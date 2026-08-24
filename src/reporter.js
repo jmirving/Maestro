@@ -1,4 +1,6 @@
 const fs = require("node:fs/promises");
+const fsSync = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
@@ -32,14 +34,30 @@ async function latestRunBundle(repoPath) {
 }
 
 function copyToClipboard(text) {
+  if (process.platform !== "win32") {
+    const dir = fsSync.mkdtempSync(path.join(os.tmpdir(), "maestro-clipboard-"));
+    const file = path.join(dir, "report.txt");
+    try {
+      fsSync.writeFileSync(file, text, "utf8");
+      const converted = spawnSync("wslpath", ["-w", file], { encoding: "utf8" });
+      if (!converted.error && converted.status === 0) {
+        const winPath = converted.stdout.trim().replace(/'/g, "''");
+        const ps = spawnSync("powershell.exe", ["-NoProfile", "-Command", `Get-Content -Raw -Encoding UTF8 '${winPath}' | Set-Clipboard`], { encoding: "utf8" });
+        if (!ps.error && ps.status === 0) return "powershell.exe/Set-Clipboard";
+      }
+    } finally {
+      fsSync.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
   const candidates = process.platform === "win32"
-    ? [["clip.exe", []]]
-    : [["clip.exe", []], ["wl-copy", []], ["xclip", ["-selection", "clipboard"]]];
+    ? [["powershell.exe", ["-NoProfile", "-Command", "$input | Set-Clipboard"]], ["clip.exe", []]]
+    : [["wl-copy", []], ["xclip", ["-selection", "clipboard"]]];
   for (const [command, args] of candidates) {
     const result = spawnSync(command, args, { input: text, encoding: "utf8" });
     if (!result.error && result.status === 0) return command;
   }
-  throw new Error("Could not find a supported clipboard command (clip.exe, wl-copy, or xclip).");
+  throw new Error("Could not find a supported Unicode-safe clipboard command.");
 }
 
 module.exports = { reportRootForRepo, parseReportName, latestRunBundle, copyToClipboard };
