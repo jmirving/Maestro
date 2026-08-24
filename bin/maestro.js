@@ -4,15 +4,31 @@ const path = require("node:path");
 const { computePlan } = require("../src/planner");
 const { dryRun, executeRun, executeAndIntegrate, continuousRun } = require("../src/controller");
 const { latestRunBundle, copyToClipboard } = require("../src/reporter");
+const { recordReview } = require("../src/reviews");
+const { integrateExistingRun } = require("../src/existing-run");
 
 function usage() {
-  console.error("Usage:\n  maestro plan <manifest.json>\n  maestro run <manifest.json> --repo-path <path> [--execute|--integrate|--continuous] [--allow-failing-baseline]\n  maestro report --repo-path <path> [--copy]");
+  console.error("Usage:\n" +
+    "  maestro plan <manifest.json>\n" +
+    "  maestro run <manifest.json> --repo-path <path> [--execute|--integrate|--continuous] [--allow-failing-baseline]\n" +
+    "  maestro report --repo-path <path> [--copy]\n" +
+    "  maestro review <manifest.json> --repo-path <path> --run <id> --issue <n> --disposition <approve|rework-original|approve-with-follow-up> [--title <title> --notes <notes>]\n" +
+    "  maestro integrate-run <manifest.json> --repo-path <path> --run <id> [--close-issues]");
   process.exit(2);
 }
 
 function option(name) {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : null;
+}
+
+function loadConfig(manifestPath) {
+  const absolute = path.resolve(process.cwd(), manifestPath);
+  const config = JSON.parse(fs.readFileSync(absolute, "utf8"));
+  if (process.argv.includes("--allow-failing-baseline")) {
+    config.baseline = { ...(config.baseline || {}), allowFailing: true };
+  }
+  return config;
 }
 
 async function main() {
@@ -31,12 +47,40 @@ async function main() {
     return;
   }
 
-  if (!manifestPath || !["plan", "run"].includes(command)) usage();
-  const absolute = path.resolve(process.cwd(), manifestPath);
-  const config = JSON.parse(fs.readFileSync(absolute, "utf8"));
+  if (!manifestPath || !["plan", "run", "review", "integrate-run"].includes(command)) usage();
+  const config = loadConfig(manifestPath);
+  const repoPath = option("--repo-path");
+  const resolvedRepoPath = repoPath ? path.resolve(process.cwd(), repoPath) : null;
 
-  if (process.argv.includes("--allow-failing-baseline")) {
-    config.baseline = { ...(config.baseline || {}), allowFailing: true };
+  if (command === "review") {
+    if (!resolvedRepoPath) usage();
+    const runId = option("--run");
+    const issue = option("--issue");
+    const disposition = option("--disposition");
+    if (!runId || !issue || !disposition) usage();
+    const review = await recordReview({
+      repoPath: resolvedRepoPath,
+      runId,
+      issue,
+      disposition,
+      title: option("--title"),
+      notes: option("--notes")
+    });
+    process.stdout.write(`${JSON.stringify({ runId, issue, review }, null, 2)}\n`);
+    return;
+  }
+
+  if (command === "integrate-run") {
+    if (!resolvedRepoPath) usage();
+    const runId = option("--run");
+    if (!runId) usage();
+    const result = await integrateExistingRun(config, {
+      repoPath: resolvedRepoPath,
+      runId,
+      closeIssues: process.argv.includes("--close-issues")
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
   }
 
   if (command === "plan") {
@@ -44,9 +88,7 @@ async function main() {
     return;
   }
 
-  const repoPath = option("--repo-path");
-  if (!repoPath) usage();
-  const resolvedRepoPath = path.resolve(process.cwd(), repoPath);
+  if (!resolvedRepoPath) usage();
   let result;
   if (process.argv.includes("--continuous")) {
     result = await continuousRun(config, { repoPath: resolvedRepoPath });
