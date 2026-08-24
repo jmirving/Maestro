@@ -13,10 +13,11 @@ const config = {
   }
 };
 
-test("executeRun preflights once, creates isolated worktrees, and runs selected workers", async () => {
+test("executeRun preflights once, creates isolated worktrees, runs workers, and validates changed branches", async () => {
   const preflightCalls = [];
   const worktreeCalls = [];
   const workerCalls = [];
+  const validatorCalls = [];
   const result = await executeRun(config, {
     repoPath: "/target",
     runId: "run-1",
@@ -30,12 +31,26 @@ test("executeRun preflights once, creates isolated worktrees, and runs selected 
     },
     workerExecutor: async ({ item, worktree }) => {
       workerCalls.push({ id: item.id, path: worktree.worktreePath });
-      return { issue: item.id, exitCode: 0, headSha: `head-${item.id}` };
+      return {
+        issue: item.id,
+        exitCode: 0,
+        baseSha: worktree.baseSha,
+        headSha: `head-${item.id}`,
+        branch: worktree.branch,
+        worktreePath: worktree.worktreePath,
+        report: "complete"
+      };
+    },
+    validatorExecutor: async ({ worker }) => {
+      validatorCalls.push(worker.issue);
+      return { issue: worker.issue, exitCode: 0, verdict: "approve" };
     }
   });
 
   assert.equal(preflightCalls.length, 1);
   assert.deepEqual(worktreeCalls, ["1", "2"]);
   assert.deepEqual(workerCalls.map((entry) => entry.id), ["1", "2"]);
+  assert.deepEqual(validatorCalls, ["1", "2"]);
   assert.deepEqual(result.workers.map((entry) => entry.headSha), ["head-1", "head-2"]);
+  assert.deepEqual(result.validations.map((entry) => entry.verdict), ["approve", "approve"]);
 });
