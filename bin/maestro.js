@@ -3,9 +3,10 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { computePlan } = require("../src/planner");
 const { dryRun, executeRun, executeAndIntegrate, continuousRun } = require("../src/controller");
+const { latestRunBundle, copyToClipboard } = require("../src/reporter");
 
 function usage() {
-  console.error("Usage:\n  maestro plan <manifest.json>\n  maestro run <manifest.json> --repo-path <path> [--execute|--integrate|--continuous] [--allow-failing-baseline]");
+  console.error("Usage:\n  maestro plan <manifest.json>\n  maestro run <manifest.json> --repo-path <path> [--execute|--integrate|--continuous] [--allow-failing-baseline]\n  maestro report --repo-path <path> [--copy]");
   process.exit(2);
 }
 
@@ -16,6 +17,20 @@ function option(name) {
 
 async function main() {
   const [, , command, manifestPath] = process.argv;
+
+  if (command === "report") {
+    const repoPath = option("--repo-path");
+    if (!repoPath) usage();
+    const bundle = await latestRunBundle(path.resolve(process.cwd(), repoPath));
+    if (process.argv.includes("--copy")) {
+      const clipboard = copyToClipboard(bundle.text);
+      console.error(`Copied Maestro run ${bundle.runId} to clipboard using ${clipboard}.`);
+    } else {
+      process.stdout.write(bundle.text);
+    }
+    return;
+  }
+
   if (!manifestPath || !["plan", "run"].includes(command)) usage();
   const absolute = path.resolve(process.cwd(), manifestPath);
   const config = JSON.parse(fs.readFileSync(absolute, "utf8"));
