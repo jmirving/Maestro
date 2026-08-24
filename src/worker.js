@@ -25,10 +25,14 @@ async function executeWorker({ repository, item, worktree, runId, codexCommand =
   await fs.mkdir(reportDir, { recursive: true });
   const reportPath = path.join(reportDir, `worker-${item.id}-${runId}.md`);
   const prompt = buildWorkerPrompt({ repository, item });
+  console.error(`[Maestro] worker #${item.id} starting`);
   const result = await runner(codexCommand, ["exec", "--sandbox", "danger-full-access", "--output-last-message", reportPath, "-"], {
     cwd: worktree.worktreePath,
-    input: `${prompt}\n`
+    input: `${prompt}\n`,
+    stream: true,
+    streamPrefix: `[#${item.id} worker] `
   });
+  console.error(`[Maestro] worker #${item.id} finished with exit ${result.code}`);
   let report = "";
   try { report = await fs.readFile(reportPath, "utf8"); } catch {}
   const headSha = await currentHead(worktree.worktreePath);
