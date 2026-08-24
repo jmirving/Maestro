@@ -29,10 +29,14 @@ async function validateWorker({ repository, worker, runId, baseline, codexComman
   const reportDir = path.join(path.dirname(worker.worktreePath), ".maestro-reports");
   await fs.mkdir(reportDir, { recursive: true });
   const reportPath = path.join(reportDir, `validator-${worker.issue}-${runId}.md`);
+  console.error(`[Maestro] validator #${worker.issue} starting`);
   const result = await runner(codexCommand, ["exec", "--sandbox", "read-only", "--output-last-message", reportPath, "-"], {
     cwd: worker.worktreePath,
-    input: `${buildValidatorPrompt({ repository, worker, baseline })}\n`
+    input: `${buildValidatorPrompt({ repository, worker, baseline })}\n`,
+    stream: true,
+    streamPrefix: `[#${worker.issue} validator] `
   });
+  console.error(`[Maestro] validator #${worker.issue} finished with exit ${result.code}`);
   let report = "";
   try { report = await fs.readFile(reportPath, "utf8"); } catch {}
   return {
