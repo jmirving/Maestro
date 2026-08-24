@@ -13,11 +13,12 @@ const config = {
   }
 };
 
-test("executeRun preflights once, creates isolated worktrees, runs workers, and validates changed branches", async () => {
+test("executeRun preflights once, creates isolated worktrees, runs workers, validates changed branches, and persists the run", async () => {
   const preflightCalls = [];
   const worktreeCalls = [];
   const workerCalls = [];
   const validatorCalls = [];
+  const saved = [];
   const result = await executeRun(config, {
     repoPath: "/target",
     runId: "run-1",
@@ -44,7 +45,8 @@ test("executeRun preflights once, creates isolated worktrees, runs workers, and 
     validatorExecutor: async ({ worker }) => {
       validatorCalls.push(worker.issue);
       return { issue: worker.issue, exitCode: 0, verdict: "approve" };
-    }
+    },
+    stateSaver: async (repoPath, runId, state) => saved.push({ repoPath, runId, state })
   });
 
   assert.equal(preflightCalls.length, 1);
@@ -53,4 +55,7 @@ test("executeRun preflights once, creates isolated worktrees, runs workers, and 
   assert.deepEqual(validatorCalls, ["1", "2"]);
   assert.deepEqual(result.workers.map((entry) => entry.headSha), ["head-1", "head-2"]);
   assert.deepEqual(result.validations.map((entry) => entry.verdict), ["approve", "approve"]);
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].runId, "run-1");
+  assert.deepEqual(saved[0].state.reviews, {});
 });
