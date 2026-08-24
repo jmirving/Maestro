@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://maestro.local/schemas/repository-config.schema.json",
+  "title": "Maestro repository execution manifest",
+  "type": "object",
+  "required": ["repository", "work"],
+  "properties": {
+    "repository": { "type": "string", "minLength": 3 },
+    "defaultConcurrency": { "type": "integer", "minimum": 1, "maximum": 8, "default": 2 },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "preflight": { "type": "string" },
+          "required": { "type": "boolean", "default": true }
+        },
+        "additionalProperties": false
+      }
+    },
+    "work": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "status": { "enum": ["ready", "blocked", "human_gate", "complete"] },
+          "mode": { "enum": ["execute", "research", "validate"] },
+          "blockedBy": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+          "requires": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+          "humanGate": { "type": ["string", "null"] }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": false
+}

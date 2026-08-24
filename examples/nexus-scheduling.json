@@ -1,0 +1,25 @@
+{
+  "repository": "jmirving/Nexus",
+  "defaultConcurrency": 2,
+  "capabilities": {
+    "node": { "preflight": "node --version" },
+    "playwright": { "preflight": "npm run test:e2e:install" },
+    "postgres": { "preflight": "docker info && npm run verify:ci-postgres" },
+    "external_research": { "required": true }
+  },
+  "work": {
+    "31": {
+      "status": "ready",
+      "mode": "research",
+      "requires": ["external_research"],
+      "humanGate": "live provider enablement"
+    },
+    "34": { "status": "ready", "requires": ["node", "playwright"] },
+    "47": { "status": "ready", "requires": ["node", "postgres", "playwright"] },
+    "56": { "status": "ready", "requires": ["node"] },
+    "57": { "status": "ready", "requires": ["node", "postgres", "playwright"] },
+    "58": { "status": "blocked", "blockedBy": ["57"], "requires": ["playwright"] },
+    "59": { "status": "ready", "requires": ["node", "postgres", "playwright"] },
+    "60": { "status": "ready", "requires": ["node", "postgres", "playwright"] }
+  }
+}

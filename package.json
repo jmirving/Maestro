@@ -1,0 +1,14 @@
+{
+  "name": "maestro-orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Safe, continuous, dependency-aware repository agent orchestration",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test",
+    "plan": "node bin/maestro.js plan"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
