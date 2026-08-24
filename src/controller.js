@@ -4,10 +4,15 @@ const { describePreflights, runPreflights } = require("./preflight");
 const { prepareWorktree } = require("./worktrees");
 const { executeWorker } = require("./worker");
 const { validateWorker } = require("./validator");
+const { integrateApproved } = require("./integrator");
 
 function newRunId(now = new Date()) {
   const stamp = now.toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
   return `${stamp}-${crypto.randomBytes(3).toString("hex")}`;
+}
+
+function cloneConfig(config) {
+  return JSON.parse(JSON.stringify(config));
 }
 
 async function dryRun(config, { repoPath }) {
@@ -37,12 +42,7 @@ async function executeRun(config, {
   for (const item of plan.selected) {
     prepared.push({
       item,
-      worktree: await worktreeFactory({
-        repoPath,
-        item,
-        runId,
-        defaultBranch: config.defaultBranch || "main"
-      })
+      worktree: await worktreeFactory({ repoPath, item, runId, defaultBranch: config.defaultBranch || "main" })
     });
   }
 
@@ -60,4 +60,37 @@ async function executeRun(config, {
   return { runId, mode: "execute", plan, preflights, workers, validations };
 }
 
-module.exports = { newRunId, dryRun, executeRun };
+async function executeAndIntegrate(config, options = {}) {
+  const result = await executeRun(config, options);
+  const blockedValidation = result.validations.find((entry) => entry.verdict !== "approve");
+  if (blockedValidation) return { ...result, integration: [], stopped: `validation-${blockedValidation.verdict}` };
+  if (result.workers.some((worker) => worker.exitCode !== 0)) return { ...result, integration: [], stopped: "worker-failure" };
+  const integration = await integrateApproved({
+    config,
+    repoPath: options.repoPath,
+    workers: result.workers,
+    validations: result.validations
+  });
+  return { ...result, integration };
+}
+
+async function continuousRun(config, { repoPath, maxCycles = 20 } = {}) {
+  const runtime = cloneConfig(config);
+  const cycles = [];
+  for (let cycle = 0; cycle < maxCycles; cycle += 1) {
+    const plan = computePlan(runtime);
+    if (!plan.selected.length) {
+      return { mode: "continuous", cycles, finalPlan: plan, stopped: plan.humanGates.length ? "human-gate" : "no-ready-work" };
+    }
+    const result = await executeAndIntegrate(runtime, { repoPath });
+    cycles.push(result);
+    if (result.stopped) return { mode: "continuous", cycles, finalPlan: computePlan(runtime), stopped: result.stopped };
+    if (!result.integration.length) return { mode: "continuous", cycles, finalPlan: computePlan(runtime), stopped: "nothing-integrated" };
+    for (const integrated of result.integration) {
+      if (runtime.work?.[integrated.issue]) runtime.work[integrated.issue].status = "complete";
+    }
+  }
+  return { mode: "continuous", cycles, finalPlan: computePlan(runtime), stopped: "max-cycles" };
+}
+
+module.exports = { newRunId, dryRun, executeRun, executeAndIntegrate, continuousRun };
