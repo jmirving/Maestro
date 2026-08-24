@@ -1,6 +1,7 @@
 const { loadRunState, saveRunState } = require("./run-store");
 const { ensureFollowUp } = require("./reviews");
 const { integrateApproved } = require("./integrator");
+const { captureBaseline } = require("./baseline");
 
 async function integrateExistingRun(config, {
   repoPath,
@@ -29,6 +30,15 @@ async function integrateExistingRun(config, {
     await ensureFollowUp({ config, repoPath, state, issue: worker.issue, runner });
   }
 
+  // Runs created before persisted run-state support do not contain the raw baseline
+  // that their validators saw. Re-capture it from the current clean target checkout
+  // before integration instead of silently treating the baseline as green-only.
+  if (!state.baseline) {
+    state.baseline = await captureBaseline(config, { cwd: repoPath, runner: shellRunner });
+    state.baselineRecapturedAt = new Date().toISOString();
+    await saveRunState(repoPath, runId, state);
+  }
+
   const integrationConfig = JSON.parse(JSON.stringify(config));
   integrationConfig.integration = {
     ...(integrationConfig.integration || {}),
@@ -48,7 +58,7 @@ async function integrateExistingRun(config, {
   state.integration = integration;
   state.integratedAt = new Date().toISOString();
   await saveRunState(repoPath, runId, state);
-  return { runId, reviews: state.reviews, integration };
+  return { runId, reviews: state.reviews, baseline: state.baseline, integration };
 }
 
 module.exports = { integrateExistingRun };
