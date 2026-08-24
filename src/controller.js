@@ -6,6 +6,7 @@ const { prepareWorktree } = require("./worktrees");
 const { executeWorker } = require("./worker");
 const { validateWorker } = require("./validator");
 const { integrateApproved } = require("./integrator");
+const { saveRunState } = require("./run-store");
 
 function newRunId(now = new Date()) {
   const stamp = now.toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
@@ -64,7 +65,9 @@ async function executeRun(config, {
     .filter((worker) => worker.exitCode === 0 && worker.headSha !== worker.baseSha)
     .map((worker) => validatorExecutor({ repository: config.repository, worker, baseline, runId })));
 
-  return { runId, mode: "execute", plan, baseline, preflights, workers, validations };
+  const result = { runId, mode: "execute", repoPath, plan, baseline, preflights, workers, validations, reviews: {} };
+  await saveRunState(repoPath, runId, result);
+  return result;
 }
 
 async function executeAndIntegrate(config, options = {}) {
