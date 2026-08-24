@@ -20,7 +20,7 @@ function buildWorkerPrompt({ repository, item }) {
 }
 
 async function executeWorker({ repository, item, worktree, runId, codexCommand = "codex", runner = runProcess }) {
-  const reportDir = path.join(worktree.worktreePath, ".maestro");
+  const reportDir = path.join(path.dirname(worktree.worktreePath), ".maestro-reports");
   await fs.mkdir(reportDir, { recursive: true });
   const reportPath = path.join(reportDir, `worker-${item.id}-${runId}.md`);
   const prompt = buildWorkerPrompt({ repository, item });
@@ -40,6 +40,7 @@ async function executeWorker({ repository, item, worktree, runId, codexCommand =
     headSha,
     branch: worktree.branch,
     worktreePath: worktree.worktreePath,
+    reportPath,
     report,
     stderr: result.stderr.trim()
   };
