@@ -2,10 +2,10 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { computePlan } = require("../src/planner");
-const { dryRun, executeRun } = require("../src/controller");
+const { dryRun, executeRun, executeAndIntegrate, continuousRun } = require("../src/controller");
 
 function usage() {
-  console.error("Usage:\n  maestro plan <manifest.json>\n  maestro run <manifest.json> --repo-path <path> [--execute]");
+  console.error("Usage:\n  maestro plan <manifest.json>\n  maestro run <manifest.json> --repo-path <path> [--execute|--integrate|--continuous]");
   process.exit(2);
 }
 
@@ -28,11 +28,19 @@ async function main() {
   const repoPath = option("--repo-path");
   if (!repoPath) usage();
   const resolvedRepoPath = path.resolve(process.cwd(), repoPath);
-  const result = process.argv.includes("--execute")
-    ? await executeRun(config, { repoPath: resolvedRepoPath })
-    : await dryRun(config, { repoPath: resolvedRepoPath });
+  let result;
+  if (process.argv.includes("--continuous")) {
+    result = await continuousRun(config, { repoPath: resolvedRepoPath });
+  } else if (process.argv.includes("--integrate")) {
+    result = await executeAndIntegrate(config, { repoPath: resolvedRepoPath });
+  } else if (process.argv.includes("--execute")) {
+    result = await executeRun(config, { repoPath: resolvedRepoPath });
+  } else {
+    result = await dryRun(config, { repoPath: resolvedRepoPath });
+  }
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   if (result.workers?.some((worker) => worker.exitCode !== 0)) process.exitCode = 1;
+  if (result.validations?.some((entry) => entry.verdict !== "approve")) process.exitCode = 1;
 }
 
 main().catch((error) => {
