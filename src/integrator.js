@@ -18,6 +18,24 @@ function normalizeFailureOutput(text = "") {
     .join("\n");
 }
 
+function failureSignatures(text = "") {
+  const clean = String(text).replace(/\x1b\[[0-9;]*m/g, "");
+  const signatures = [];
+  for (const rawLine of clean.split("\n")) {
+    const line = rawLine.trim();
+    let match = line.match(/^not ok\s+\d+\s+-\s+(.+)$/i);
+    if (match) {
+      signatures.push(`tap:${match[1].trim()}`);
+      continue;
+    }
+    match = line.match(/^\d+\)\s+(?:\[[^\]]+\]\s+)?›\s+(.+)$/);
+    if (match) {
+      signatures.push(`playwright:${match[1].replace(/:\d+:\d+/g, ":<line>").trim()}`);
+    }
+  }
+  return [...new Set(signatures)].sort();
+}
+
 function baselineResultForCommand(baseline, command) {
   return baseline?.results?.find((entry) => entry.command === command) || null;
 }
@@ -26,8 +44,18 @@ function isAcceptedBaselineFailure({ baseline, command, result }) {
   if (baseline?.allowFailing !== true || result.code === 0) return false;
   const prior = baselineResultForCommand(baseline, command);
   if (!prior || prior.code === 0) return false;
-  const priorFingerprint = normalizeFailureOutput(`${prior.stdout || ""}\n${prior.stderr || ""}`);
-  const currentFingerprint = normalizeFailureOutput(`${result.stdout || ""}\n${result.stderr || ""}`);
+
+  const priorText = `${prior.stdout || ""}\n${prior.stderr || ""}`;
+  const currentText = `${result.stdout || ""}\n${result.stderr || ""}`;
+  const priorSignatures = failureSignatures(priorText);
+  const currentSignatures = failureSignatures(currentText);
+
+  if (priorSignatures.length || currentSignatures.length) {
+    return priorSignatures.length > 0 && JSON.stringify(priorSignatures) === JSON.stringify(currentSignatures);
+  }
+
+  const priorFingerprint = normalizeFailureOutput(priorText);
+  const currentFingerprint = normalizeFailureOutput(currentText);
   return priorFingerprint.length > 0 && priorFingerprint === currentFingerprint;
 }
 
@@ -35,8 +63,14 @@ async function runIntegrationCommand(command, { cwd, baseline, shellRunner = run
   const result = await shellRunner(command, { cwd });
   if (result.code === 0) return result;
   if (isAcceptedBaselineFailure({ baseline, command, result })) return { ...result, acceptedBaselineFailure: true };
+
+  const prior = baselineResultForCommand(baseline, command);
   const error = new Error(`integration validation failed: ${command}`);
   error.result = result;
+  error.baselineComparison = prior ? {
+    baselineSignatures: failureSignatures(`${prior.stdout || ""}\n${prior.stderr || ""}`),
+    currentSignatures: failureSignatures(`${result.stdout || ""}\n${result.stderr || ""}`)
+  } : null;
   throw error;
 }
 
@@ -84,4 +118,4 @@ async function integrateApproved({ config, repoPath, workers, validations, basel
   return results;
 }
 
-module.exports = { ensureClean, normalizeFailureOutput, isAcceptedBaselineFailure, runIntegrationCommand, integrateApproved };
+module.exports = { ensureClean, normalizeFailureOutput, failureSignatures, isAcceptedBaselineFailure, runIntegrationCommand, integrateApproved };
