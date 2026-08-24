@@ -1,6 +1,7 @@
 const crypto = require("node:crypto");
 const { computePlan } = require("./planner");
 const { describePreflights, runPreflights } = require("./preflight");
+const { captureBaseline } = require("./baseline");
 const { prepareWorktree } = require("./worktrees");
 const { executeWorker } = require("./worker");
 const { validateWorker } = require("./validator");
@@ -22,6 +23,10 @@ async function dryRun(config, { repoPath }) {
     mode: "dry-run",
     repoPath,
     plan,
+    baseline: {
+      commands: config.baseline?.commands || config.integration?.commands || [],
+      allowFailing: config.baseline?.allowFailing === true
+    },
     preflights: describePreflights(config, plan.selected)
   };
 }
@@ -32,11 +37,13 @@ async function executeRun(config, {
   workerExecutor = executeWorker,
   validatorExecutor = validateWorker,
   worktreeFactory = prepareWorktree,
-  preflightRunner
+  preflightRunner,
+  baselineRunner
 } = {}) {
   const plan = computePlan(config);
-  if (!plan.selected.length) return { runId, mode: "execute", plan, preflights: [], workers: [], validations: [] };
+  if (!plan.selected.length) return { runId, mode: "execute", plan, baseline: null, preflights: [], workers: [], validations: [] };
 
+  const baseline = await captureBaseline(config, { cwd: repoPath, runner: baselineRunner });
   const preflights = await runPreflights(config, plan.selected, { cwd: repoPath, runner: preflightRunner });
   const prepared = [];
   for (const item of plan.selected) {
@@ -55,9 +62,9 @@ async function executeRun(config, {
 
   const validations = await Promise.all(workers
     .filter((worker) => worker.exitCode === 0 && worker.headSha !== worker.baseSha)
-    .map((worker) => validatorExecutor({ repository: config.repository, worker, runId })));
+    .map((worker) => validatorExecutor({ repository: config.repository, worker, baseline, runId })));
 
-  return { runId, mode: "execute", plan, preflights, workers, validations };
+  return { runId, mode: "execute", plan, baseline, preflights, workers, validations };
 }
 
 async function executeAndIntegrate(config, options = {}) {
