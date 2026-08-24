@@ -16,7 +16,8 @@ function buildWorkerPrompt({ repository, item }) {
     `- If you encounter a product/domain decision not already resolved, stop and report it instead of guessing.\n` +
     `- Run all tests required by the issue and repository instructions. Mandatory persistence tests may not be silently skipped.\n` +
     `- Commit completed work to the current worker branch.\n\n` +
-    `Final report must state: result (complete|blocked|failed), important changes, tests with exact results, commit SHA, and any human decision required.`;
+    `Final report must state: result (complete|blocked|failed), important changes, tests with exact results, commit SHA, and any human decision required.\n\n` +
+    `End with a section titled exactly \"### Human review\". Keep it concise and practical. State where a human should expect to see any visual/behavior change, which user/persona/state to use if relevant, and the highest-value place to check for catastrophic regression or unintended side effects. If no meaningful manual review exists, say so explicitly.`;
 }
 
 async function executeWorker({ repository, item, worktree, runId, codexCommand = "codex", runner = runProcess }) {
