@@ -15,22 +15,65 @@ function parseReportName(name) {
   return { kind: match[1], issue: match[2], runId: match[3], name };
 }
 
+function formatRunLifecycle(state) {
+  if (!state) return "";
+  const reviews = state.reviews || {};
+  const integrationByIssue = new Map((state.integration || []).map((entry) => [String(entry.issue), entry]));
+  const validationByIssue = new Map((state.validations || []).map((entry) => [String(entry.issue), entry]));
+  const issues = [...new Set([
+    ...(state.workers || []).map((entry) => String(entry.issue)),
+    ...Object.keys(reviews),
+    ...integrationByIssue.keys()
+  ])].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  if (!issues.length) return "";
+
+  const lines = ["## Run lifecycle", ""];
+  for (const issue of issues) {
+    const validation = validationByIssue.get(issue);
+    const review = reviews[issue];
+    const integrated = integrationByIssue.get(issue);
+    const parts = [];
+    if (validation?.verdict) parts.push(`validator=${validation.verdict}`);
+    if (review?.disposition) parts.push(`review=${review.disposition}`);
+    if (review?.followUp?.issueNumber) parts.push(`follow-up=#${review.followUp.issueNumber}`);
+    if (integrated?.integratedSha) parts.push(`integrated=${integrated.integratedSha}`);
+    else if (integrated) parts.push("integrated=yes");
+    lines.push(`- #${issue}: ${parts.join(", ") || "recorded"}`);
+  }
+  if (state.integratedAt) lines.push(`- integration completed at ${state.integratedAt}`);
+  else if ((state.integration || []).length) lines.push(`- integration partially completed (${state.integration.length} item(s))`);
+  return `${lines.join("\n")}\n`;
+}
+
 async function latestRunBundle(repoPath) {
   const reportRoot = reportRootForRepo(repoPath);
   const names = await fs.readdir(reportRoot);
   const reports = names.map(parseReportName).filter(Boolean);
-  if (!reports.length) throw new Error(`No Maestro reports found in ${reportRoot}`);
-  const latestRunId = reports.map((entry) => entry.runId).sort().at(-1);
+  const stateRunIds = names
+    .map((name) => name.match(/^run-(\d{14}-[a-f0-9]+)\.json$/)?.[1])
+    .filter(Boolean);
+  const runIds = [...new Set([...reports.map((entry) => entry.runId), ...stateRunIds])];
+  if (!runIds.length) throw new Error(`No Maestro reports found in ${reportRoot}`);
+  const latestRunId = runIds.sort().at(-1);
   const selected = reports
     .filter((entry) => entry.runId === latestRunId)
     .sort((a, b) => a.issue.localeCompare(b.issue, undefined, { numeric: true }) || a.kind.localeCompare(b.kind));
 
+  let state = null;
+  try {
+    state = JSON.parse(await fs.readFile(path.join(reportRoot, `run-${latestRunId}.json`), "utf8"));
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+
   const sections = [`# Maestro run ${latestRunId}`];
+  const lifecycle = formatRunLifecycle(state);
+  if (lifecycle) sections.push(`\n${lifecycle.trimEnd()}`);
   for (const entry of selected) {
     const content = await fs.readFile(path.join(reportRoot, entry.name), "utf8");
     sections.push(`\n## ${entry.kind} #${entry.issue}\n\n${content.trim()}`);
   }
-  return { runId: latestRunId, reportRoot, text: `${sections.join("\n")}\n` };
+  return { runId: latestRunId, reportRoot, state, text: `${sections.join("\n")}\n` };
 }
 
 function copyToClipboard(text) {
@@ -60,4 +103,4 @@ function copyToClipboard(text) {
   throw new Error("Could not find a supported Unicode-safe clipboard command.");
 }
 
-module.exports = { reportRootForRepo, parseReportName, latestRunBundle, copyToClipboard };
+module.exports = { reportRootForRepo, parseReportName, formatRunLifecycle, latestRunBundle, copyToClipboard };
