@@ -6,6 +6,7 @@
   "required": ["repository", "work"],
   "properties": {
     "repository": { "type": "string", "minLength": 3 },
+    "defaultBranch": { "type": "string", "minLength": 1, "default": "main" },
     "defaultConcurrency": { "type": "integer", "minimum": 1, "maximum": 8, "default": 2 },
     "capabilities": {
       "type": "object",
@@ -17,6 +18,16 @@
         },
         "additionalProperties": false
       }
+    },
+    "integration": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean", "default": false },
+        "commands": { "type": "array", "items": { "type": "string" } },
+        "postMergeCommands": { "type": "array", "items": { "type": "string" } },
+        "closeIssues": { "type": "boolean", "default": false }
+      },
+      "additionalProperties": false
     },
     "work": {
       "type": "object",
