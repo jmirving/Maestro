@@ -6,9 +6,10 @@ const { dryRun, executeRun, executeAndIntegrate, continuousRun } = require("../s
 const { latestRunBundle, copyToClipboard } = require("../src/reporter");
 const { recordReview } = require("../src/reviews");
 const { integrateExistingRun } = require("../src/existing-run");
+const { statusSnapshot, formatStatus, watchStatus } = require("../src/display");
 
 function usage() {
-  console.error("Usage:\n  maestro plan <manifest.json>\n  maestro run <manifest.json> --repo-path <path> [--execute|--integrate|--continuous] [--allow-failing-baseline]\n  maestro report --repo-path <path> [--copy]\n  maestro review <manifest.json> --repo-path <path> --run <run-id> --issue <number> --disposition <approve|rework-original|approve-with-follow-up> [--title <title>] [--notes <notes>]\n  maestro integrate-run <manifest.json> --repo-path <path> --run <run-id> [--close-issues]");
+  console.error("Usage:\n  maestro plan <manifest.json>\n  maestro run <manifest.json> --repo-path <path> [--execute|--integrate|--continuous] [--allow-failing-baseline]\n  maestro status <manifest.json> --repo-path <path> [--watch]\n  maestro report --repo-path <path> [--copy]\n  maestro review <manifest.json> --repo-path <path> --run <run-id> --issue <number> --disposition <approve|rework-original|approve-with-follow-up> [--title <title>] [--notes <notes>]\n  maestro integrate-run <manifest.json> --repo-path <path> --run <run-id> [--close-issues]");
   process.exit(2);
 }
 
@@ -38,6 +39,20 @@ async function main() {
       console.error(`Copied Maestro run ${bundle.runId} to clipboard using ${clipboard}.`);
     } else {
       process.stdout.write(bundle.text);
+    }
+    return;
+  }
+
+  if (command === "status") {
+    if (!manifestPath) usage();
+    const config = loadConfig(manifestPath);
+    const repoPath = option("--repo-path");
+    if (!repoPath) usage();
+    const resolvedRepoPath = path.resolve(process.cwd(), repoPath);
+    if (process.argv.includes("--watch")) {
+      await watchStatus(config, resolvedRepoPath);
+    } else {
+      process.stdout.write(formatStatus(await statusSnapshot(config, resolvedRepoPath)));
     }
     return;
   }
