@@ -60,7 +60,8 @@ function isAcceptedBaselineFailure({ baseline, command, result }) {
 }
 
 async function runIntegrationCommand(command, { cwd, baseline, shellRunner = runShell }) {
-  const result = await shellRunner(command, { cwd });
+  console.error(`[Maestro] integration check: ${command}`);
+  const result = await shellRunner(command, { cwd, stream: true, streamPrefix: "[integration] " });
   if (result.code === 0) return result;
   if (isAcceptedBaselineFailure({ baseline, command, result })) return { ...result, acceptedBaselineFailure: true };
 
@@ -74,7 +75,7 @@ async function runIntegrationCommand(command, { cwd, baseline, shellRunner = run
   throw error;
 }
 
-async function integrateApproved({ config, repoPath, workers, validations, baseline = null, runner = runChecked, shellRunner = runShell }) {
+async function integrateApproved({ config, repoPath, workers, validations, baseline = null, runner = runChecked, shellRunner = runShell, onIntegrated = null }) {
   const integration = config.integration || {};
   if (integration.enabled !== true) throw new Error("Manifest does not enable integration.");
   const defaultBranch = config.defaultBranch || "main";
@@ -84,6 +85,7 @@ async function integrateApproved({ config, repoPath, workers, validations, basel
 
   await ensureClean(repoPath, runner);
   for (const worker of approved) {
+    console.error(`[Maestro] integrating #${worker.issue}`);
     await runner("git", ["fetch", "origin", defaultBranch], { cwd: worker.worktreePath });
     await runner("git", ["rebase", `origin/${defaultBranch}`], { cwd: worker.worktreePath }).catch(async (error) => {
       try { await runner("git", ["rebase", "--abort"], { cwd: worker.worktreePath }); } catch {}
@@ -113,7 +115,10 @@ async function integrateApproved({ config, repoPath, workers, validations, basel
     if (integration.closeIssues === true) {
       await runner("gh", ["issue", "close", String(worker.issue), "--repo", config.repository, "--reason", "completed", "--comment", `Integrated by Maestro at ${integratedSha}.`], { cwd: repoPath });
     }
-    results.push({ issue: worker.issue, branch: worker.branch, integratedSha, validationResults });
+    const integrated = { issue: worker.issue, branch: worker.branch, integratedSha, validationResults };
+    results.push(integrated);
+    if (onIntegrated) await onIntegrated(integrated);
+    console.error(`[Maestro] integrated #${worker.issue} at ${integratedSha}`);
   }
   return results;
 }
