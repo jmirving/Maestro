@@ -30,13 +30,19 @@ async function integrateExistingRun(config, {
     await ensureFollowUp({ config, repoPath, state, issue: worker.issue, runner });
   }
 
-  // Runs created before persisted run-state support do not contain the raw baseline
-  // that their validators saw. Re-capture it from the current clean target checkout
-  // before integration instead of silently treating the baseline as green-only.
   if (!state.baseline) {
     state.baseline = await captureBaseline(config, { cwd: repoPath, runner: shellRunner });
     state.baselineRecapturedAt = new Date().toISOString();
     await saveRunState(repoPath, runId, state);
+  }
+
+  const alreadyIntegrated = new Set((state.integration || []).map((entry) => String(entry.issue)));
+  const pendingWorkers = (state.workers || []).filter((worker) => !alreadyIntegrated.has(String(worker.issue)));
+  const pendingIssues = new Set(pendingWorkers.map((worker) => String(worker.issue)));
+  const pendingValidations = (state.validations || []).filter((entry) => pendingIssues.has(String(entry.issue)));
+
+  if (!pendingWorkers.length) {
+    return { runId, reviews: state.reviews, baseline: state.baseline, integration: state.integration || [], resumed: true, nothingToDo: true };
   }
 
   const integrationConfig = JSON.parse(JSON.stringify(config));
@@ -46,19 +52,31 @@ async function integrateExistingRun(config, {
     closeIssues: closeIssues === true || integrationConfig.integration?.closeIssues === true
   };
 
-  const integration = await integrateApproved({
+  state.integration = state.integration || [];
+  const newlyIntegrated = await integrateApproved({
     config: integrationConfig,
     repoPath,
-    workers: state.workers,
-    validations: state.validations,
+    workers: pendingWorkers,
+    validations: pendingValidations,
     baseline: state.baseline || null,
     runner,
-    shellRunner
+    shellRunner,
+    onIntegrated: async (integrated) => {
+      state.integration.push(integrated);
+      state.lastIntegratedAt = new Date().toISOString();
+      await saveRunState(repoPath, runId, state);
+    }
   });
-  state.integration = integration;
+
   state.integratedAt = new Date().toISOString();
   await saveRunState(repoPath, runId, state);
-  return { runId, reviews: state.reviews, baseline: state.baseline, integration };
+  return {
+    runId,
+    reviews: state.reviews,
+    baseline: state.baseline,
+    integration: state.integration,
+    newlyIntegrated
+  };
 }
 
 module.exports = { integrateExistingRun };
