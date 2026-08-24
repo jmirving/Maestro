@@ -39,7 +39,8 @@ async function executeRun(config, {
   validatorExecutor = validateWorker,
   worktreeFactory = prepareWorktree,
   preflightRunner,
-  baselineRunner
+  baselineRunner,
+  stateSaver = saveRunState
 } = {}) {
   const plan = computePlan(config);
   if (!plan.selected.length) return { runId, mode: "execute", plan, baseline: null, preflights: [], workers: [], validations: [] };
@@ -66,7 +67,7 @@ async function executeRun(config, {
     .map((worker) => validatorExecutor({ repository: config.repository, worker, baseline, runId })));
 
   const result = { runId, mode: "execute", repoPath, plan, baseline, preflights, workers, validations, reviews: {} };
-  await saveRunState(repoPath, runId, result);
+  await stateSaver(repoPath, runId, result);
   return result;
 }
 
