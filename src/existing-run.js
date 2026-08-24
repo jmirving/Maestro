@@ -41,6 +41,7 @@ async function integrateExistingRun(config, {
     repoPath,
     workers: state.workers,
     validations: state.validations,
+    baseline: state.baseline || null,
     runner,
     shellRunner
   });
