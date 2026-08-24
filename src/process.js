@@ -1,5 +1,18 @@
 const { spawn } = require("node:child_process");
 
+function writeStream(target, chunk, prefix) {
+  if (!target) return;
+  const text = chunk.toString();
+  if (!prefix) {
+    target.write(text);
+    return;
+  }
+  for (const part of text.split(/(?<=\n)/)) {
+    if (!part) continue;
+    target.write(`${prefix}${part}`);
+  }
+}
+
 function runProcess(command, args = [], options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -9,8 +22,14 @@ function runProcess(command, args = [], options = {}) {
     });
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", (chunk) => { stdout += chunk; });
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      if (options.stream) writeStream(process.stdout, chunk, options.streamPrefix || "");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+      if (options.stream) writeStream(process.stderr, chunk, options.streamPrefix || "");
+    });
     child.on("error", reject);
     child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
     if (options.input != null) {
