@@ -45,8 +45,15 @@ async function executeRun(config, {
   const plan = computePlan(config);
   if (!plan.selected.length) return { runId, mode: "execute", plan, baseline: null, preflights: [], workers: [], validations: [] };
 
-  const baseline = await captureBaseline(config, { cwd: repoPath, runner: baselineRunner });
+  // Fail fast on missing runtime capabilities before spending minutes on the
+  // expensive repository baseline. A missing database/browser/etc. is an
+  // environment problem, not useful baseline evidence.
+  console.error(`[Maestro] run ${runId}: capability preflight`);
   const preflights = await runPreflights(config, plan.selected, { cwd: repoPath, runner: preflightRunner });
+  console.error(`[Maestro] run ${runId}: baseline validation`);
+  const baseline = await captureBaseline(config, { cwd: repoPath, runner: baselineRunner });
+  console.error(`[Maestro] run ${runId}: preparing ${plan.selected.length} worker(s)`);
+
   const prepared = [];
   for (const item of plan.selected) {
     prepared.push({
@@ -55,6 +62,7 @@ async function executeRun(config, {
     });
   }
 
+  console.error(`[Maestro] run ${runId}: workers running`);
   const workers = await Promise.all(prepared.map(({ item, worktree }) => workerExecutor({
     repository: config.repository,
     item,
@@ -62,12 +70,14 @@ async function executeRun(config, {
     runId
   })));
 
+  console.error(`[Maestro] run ${runId}: validating changed branches`);
   const validations = await Promise.all(workers
     .filter((worker) => worker.exitCode === 0 && worker.headSha !== worker.baseSha)
     .map((worker) => validatorExecutor({ repository: config.repository, worker, baseline, runId })));
 
   const result = { runId, mode: "execute", repoPath, plan, baseline, preflights, workers, validations, reviews: {} };
   await stateSaver(repoPath, runId, result);
+  console.error(`[Maestro] run ${runId}: complete`);
   return result;
 }
 
