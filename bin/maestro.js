@@ -5,7 +5,7 @@ const { computePlan } = require("../src/planner");
 const { dryRun, executeRun, executeAndIntegrate, continuousRun } = require("../src/controller");
 
 function usage() {
-  console.error("Usage:\n  maestro plan <manifest.json>\n  maestro run <manifest.json> --repo-path <path> [--execute|--integrate|--continuous]");
+  console.error("Usage:\n  maestro plan <manifest.json>\n  maestro run <manifest.json> --repo-path <path> [--execute|--integrate|--continuous] [--allow-failing-baseline]");
   process.exit(2);
 }
 
@@ -19,6 +19,10 @@ async function main() {
   if (!manifestPath || !["plan", "run"].includes(command)) usage();
   const absolute = path.resolve(process.cwd(), manifestPath);
   const config = JSON.parse(fs.readFileSync(absolute, "utf8"));
+
+  if (process.argv.includes("--allow-failing-baseline")) {
+    config.baseline = { ...(config.baseline || {}), allowFailing: true };
+  }
 
   if (command === "plan") {
     process.stdout.write(`${JSON.stringify(computePlan(config), null, 2)}\n`);
