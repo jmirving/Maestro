@@ -19,9 +19,11 @@ async function runPreflights(config, items, { cwd, runner = runShellChecked } = 
       results.push({ capability: entry.name, status: "available-no-command" });
       continue;
     }
+    console.error(`[Maestro] preflight ${entry.name}: ${entry.command}`);
     try {
-      const result = await runner(entry.command, { cwd });
+      const result = await runner(entry.command, { cwd, stream: true, streamPrefix: `[preflight:${entry.name}] ` });
       results.push({ capability: entry.name, status: "passed", stdout: result.stdout.trim() });
+      console.error(`[Maestro] preflight ${entry.name} passed`);
     } catch (error) {
       results.push({ capability: entry.name, status: "failed", stderr: error.result?.stderr?.trim() || error.message });
       if (entry.definition.required !== false) {
