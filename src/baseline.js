@@ -6,9 +6,16 @@ async function captureBaseline(config, { cwd, runner = runShell } = {}) {
   if (!commands.length) return { enabled: false, allowFailing: false, commands: [], results: [], passing: true };
 
   const results = [];
-  for (const command of commands) {
-    const result = await runner(command, { cwd });
+  for (let index = 0; index < commands.length; index += 1) {
+    const command = commands[index];
+    console.error(`[Maestro] baseline ${index + 1}/${commands.length}: ${command}`);
+    const result = await runner(command, {
+      cwd,
+      stream: true,
+      streamPrefix: `[baseline:${index + 1}/${commands.length}] `
+    });
     results.push({ command, code: result.code, stdout: result.stdout, stderr: result.stderr });
+    console.error(`[Maestro] baseline ${index + 1}/${commands.length} ${result.code === 0 ? "passed" : "failed"}`);
   }
   const passing = results.every((entry) => entry.code === 0);
   const allowFailing = baseline.allowFailing === true;
