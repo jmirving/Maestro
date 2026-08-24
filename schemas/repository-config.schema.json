@@ -8,6 +8,14 @@
     "repository": { "type": "string", "minLength": 3 },
     "defaultBranch": { "type": "string", "minLength": 1, "default": "main" },
     "defaultConcurrency": { "type": "integer", "minimum": 1, "maximum": 8, "default": 2 },
+    "baseline": {
+      "type": "object",
+      "properties": {
+        "commands": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "allowFailing": { "type": "boolean", "default": false }
+      },
+      "additionalProperties": false
+    },
     "capabilities": {
       "type": "object",
       "additionalProperties": {
