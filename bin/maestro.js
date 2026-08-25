@@ -6,10 +6,11 @@ const { dryRun, executeRun, executeAndIntegrate, continuousRun } = require("../s
 const { latestRunBundle, copyToClipboard } = require("../src/reporter");
 const { recordReview } = require("../src/reviews");
 const { integrateExistingRun } = require("../src/existing-run");
+const { executeReworkRun } = require("../src/rework");
 const { statusSnapshot, formatStatus, watchStatus } = require("../src/display");
 
 function usage() {
-  console.error("Usage:\n  maestro plan <manifest.json>\n  maestro run <manifest.json> --repo-path <path> [--execute|--integrate|--continuous] [--allow-failing-baseline]\n  maestro status <manifest.json> --repo-path <path> [--watch]\n  maestro report --repo-path <path> [--copy]\n  maestro review <manifest.json> --repo-path <path> --run <run-id> --issue <number> --disposition <approve|rework-original|approve-with-follow-up> [--title <title>] [--notes <notes>]\n  maestro integrate-run <manifest.json> --repo-path <path> --run <run-id> [--close-issues]");
+  console.error("Usage:\n  maestro plan <manifest.json>\n  maestro run <manifest.json> --repo-path <path> [--execute|--integrate|--continuous] [--allow-failing-baseline]\n  maestro rework <manifest.json> --repo-path <path> --run <source-run-id> [--allow-failing-baseline]\n  maestro status <manifest.json> --repo-path <path> [--watch]\n  maestro report --repo-path <path> [--copy]\n  maestro review <manifest.json> --repo-path <path> --run <run-id> --issue <number> --disposition <approve|rework-original|approve-with-follow-up> [--title <title>] [--notes <notes>]\n  maestro integrate-run <manifest.json> --repo-path <path> --run <run-id> [--close-issues]");
   process.exit(2);
 }
 
@@ -54,6 +55,22 @@ async function main() {
     } else {
       process.stdout.write(formatStatus(await statusSnapshot(config, resolvedRepoPath)));
     }
+    return;
+  }
+
+  if (command === "rework") {
+    if (!manifestPath) usage();
+    const config = loadConfig(manifestPath);
+    const repoPath = option("--repo-path");
+    const sourceRunId = option("--run");
+    if (!repoPath || !sourceRunId) usage();
+    const result = await executeReworkRun(config, {
+      repoPath: path.resolve(process.cwd(), repoPath),
+      sourceRunId
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    if (result.workers?.some((worker) => worker.exitCode !== 0)) process.exitCode = 1;
+    if (result.validations?.some((entry) => entry.verdict !== "approve")) process.exitCode = 1;
     return;
   }
 
