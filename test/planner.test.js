@@ -19,6 +19,22 @@ test("selects only dependency-satisfied ready work up to concurrency", () => {
   assert.deepEqual(plan.blocked.map((item) => item.id), ["58"]);
 });
 
+test("explicit priority overrides numeric issue-key enumeration order", () => {
+  const plan = computePlan({
+    repository: "jmirving/Nexus",
+    defaultConcurrency: 3,
+    work: {
+      "46": { status: "ready", priority: 40 },
+      "57": { status: "ready", priority: 10 },
+      "59": { status: "ready", priority: 20 },
+      "63": { status: "ready", priority: 30 }
+    }
+  });
+
+  assert.deepEqual(plan.selected.map((item) => item.id), ["57", "59", "63"]);
+  assert.deepEqual(plan.ready.map((item) => item.id), ["57", "59", "63", "46"]);
+});
+
 test("a declared ready item still blocks when dependency is incomplete", () => {
   const plan = computePlan({
     repository: "example/repo",
