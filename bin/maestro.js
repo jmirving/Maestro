@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 const fs = require("node:fs");
-const path = require("node:path");
 const { computePlan } = require("../src/planner");
 const { dryRun, executeRun, executeAndIntegrate, continuousRun } = require("../src/controller");
 const { latestRunBundle, copyToClipboard } = require("../src/reporter");
@@ -8,151 +7,249 @@ const { recordReview } = require("../src/reviews");
 const { integrateExistingRun } = require("../src/existing-run");
 const { executeReworkRun } = require("../src/rework");
 const { executeReconcileRun } = require("../src/reconcile");
+const { latestRunId, loadRunState } = require("../src/run-store");
 const { statusSnapshot, formatStatus, watchStatus } = require("../src/display");
+const {
+  normalizeCommand,
+  resolveRepoPath,
+  resolveManifestPath,
+  looksLikeManifest,
+  persistManifestCompletion
+} = require("../src/cli-context");
 
 function usage() {
-  console.error("Usage:\n  maestro plan <manifest.json>\n  maestro run <manifest.json> --repo-path <path> [--execute|--integrate|--continuous] [--allow-failing-baseline]\n  maestro rework <manifest.json> --repo-path <path> --run <source-run-id> [--allow-failing-baseline]\n  maestro reconcile <manifest.json> --repo-path <path> --run <source-run-id> [--issue <number>] [--allow-failing-baseline]\n  maestro status <manifest.json> --repo-path <path> [--watch]\n  maestro report --repo-path <path> [--copy]\n  maestro review <manifest.json> --repo-path <path> --run <run-id> --issue <number> --disposition <approve|rework-original|approve-with-follow-up> [--title <title>] [--notes <notes>]\n  maestro integrate-run <manifest.json> --repo-path <path> --run <run-id> [--close-issues]");
+  console.error(`Usage:
+  maestro plan [manifest.json] [--repo-path <path>]
+  maestro start [manifest.json] [--repo-path <path>]
+  maestro status [manifest.json] [--repo-path <path>] [--watch]
+  maestro output [--repo-path <path>]
+  maestro approve [issue ...] [manifest.json] [--repo-path <path>] [--run <run-id>]
+  maestro commit [manifest.json] [--repo-path <path>] [--run <run-id>] [--close-issues]
+  maestro next [manifest.json] [--repo-path <path>]
+
+Short aliases: s=start, st=status, o=output, a=approve, c=commit, n=next
+
+Advanced commands:
+  maestro run [manifest.json] [--repo-path <path>] [--execute|--integrate|--continuous] [--allow-failing-baseline]
+  maestro rework [manifest.json] [--repo-path <path>] --run <source-run-id> [--allow-failing-baseline]
+  maestro reconcile [manifest.json] [--repo-path <path>] --run <source-run-id> [--issue <number>] [--allow-failing-baseline]
+  maestro report [--repo-path <path>] [--copy]
+  maestro review [manifest.json] [--repo-path <path>] --run <run-id> --issue <number> --disposition <approve|rework-original|approve-with-follow-up> [--title <title>] [--notes <notes>]
+  maestro integrate-run [manifest.json] [--repo-path <path>] --run <run-id> [--close-issues]`);
   process.exit(2);
 }
 
-function option(name) {
-  const index = process.argv.indexOf(name);
-  return index >= 0 ? process.argv[index + 1] : null;
+function option(args, name) {
+  const index = args.indexOf(name);
+  return index >= 0 ? args[index + 1] : null;
 }
 
-function loadConfig(manifestPath) {
-  const absolute = path.resolve(process.cwd(), manifestPath);
-  const config = JSON.parse(fs.readFileSync(absolute, "utf8"));
-  if (process.argv.includes("--allow-failing-baseline")) {
+function explicitManifest(rest) {
+  return looksLikeManifest(rest[0]) ? rest[0] : null;
+}
+
+function issuePositionals(rest) {
+  const manifest = explicitManifest(rest);
+  const start = manifest ? 1 : 0;
+  const issues = [];
+  for (let index = start; index < rest.length; index += 1) {
+    const value = rest[index];
+    if (value.startsWith("--")) {
+      index += 1;
+      continue;
+    }
+    if (/^\d+$/.test(value)) issues.push(value);
+  }
+  return issues;
+}
+
+function resolveContext(rest, args, { manifest = true } = {}) {
+  const repoPath = resolveRepoPath(option(args, "--repo-path"));
+  if (!manifest) return { repoPath };
+  const manifestPath = resolveManifestPath(explicitManifest(rest), repoPath);
+  return { repoPath, manifestPath };
+}
+
+function loadConfig(manifestPath, args) {
+  const config = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  if (args.includes("--allow-failing-baseline")) {
     config.baseline = { ...(config.baseline || {}), allowFailing: true };
   }
   return config;
 }
 
+function setResultExitCode(result) {
+  if (result.workers?.some((worker) => worker.exitCode !== 0)) process.exitCode = 1;
+  if (result.validations?.some((entry) => entry.verdict !== "approve")) process.exitCode = 1;
+}
+
+async function outputLatest(repoPath, { copy = true, print = true } = {}) {
+  const bundle = await latestRunBundle(repoPath);
+  if (print) process.stdout.write(bundle.text);
+  if (copy) {
+    const clipboard = copyToClipboard(bundle.text);
+    console.error(`Copied Maestro run ${bundle.runId} to clipboard using ${clipboard}.`);
+  }
+  return bundle;
+}
+
+async function approveLatest({ config, repoPath, runId, requestedIssues }) {
+  const resolvedRunId = runId || await latestRunId(repoPath);
+  const state = await loadRunState(repoPath, resolvedRunId);
+  const validationByIssue = new Map((state.validations || []).map((entry) => [String(entry.issue), entry]));
+  const workerIssues = new Set((state.workers || []).map((worker) => String(worker.issue)));
+  const targets = requestedIssues.length
+    ? requestedIssues.map(String)
+    : [...workerIssues].filter((issue) => validationByIssue.get(issue)?.verdict === "approve" && !state.reviews?.[issue]);
+
+  if (!targets.length) {
+    console.log(`No validator-approved, unreviewed work remains in Maestro run ${resolvedRunId}.`);
+    return { runId: resolvedRunId, approved: [] };
+  }
+
+  const approved = [];
+  for (const issue of targets) {
+    if (!workerIssues.has(issue)) throw new Error(`Issue #${issue} is not part of Maestro run ${resolvedRunId}.`);
+    const validation = validationByIssue.get(issue);
+    if (validation?.verdict !== "approve") {
+      throw new Error(`Issue #${issue} is not validator-approved (${validation?.verdict || "missing"}); it cannot be approved by the shorthand command.`);
+    }
+    await recordReview({ config, repoPath, runId: resolvedRunId, issue, disposition: "approve" });
+    approved.push(issue);
+  }
+
+  console.log(`Approved Maestro run ${resolvedRunId}: ${approved.map((issue) => `#${issue}`).join(", ")}`);
+  return { runId: resolvedRunId, approved };
+}
+
+async function commitLatest({ config, repoPath, manifestPath, runId, closeIssues }) {
+  const resolvedRunId = runId || await latestRunId(repoPath);
+  const result = await integrateExistingRun(config, {
+    repoPath,
+    runId: resolvedRunId,
+    closeIssues
+  });
+  const integratedIssues = [...new Set((result.integration || []).map((entry) => String(entry.issue)))];
+  const progress = persistManifestCompletion({ repoPath, manifestPath, issueIds: integratedIssues });
+  console.log(`Committed Maestro run ${resolvedRunId}: ${integratedIssues.length ? integratedIssues.map((issue) => `#${issue}`).join(", ") : "nothing new"}`);
+  if (progress.changed.length) console.log(`Advanced ${manifestPath}: ${progress.changed.map((issue) => `#${issue}`).join(", ")}`);
+  return { ...result, manifestProgress: progress };
+}
+
 async function main() {
-  const [, , command, manifestPath] = process.argv;
+  const args = process.argv.slice(2);
+  if (!args.length || ["-h", "--help", "help"].includes(args[0])) usage();
+  const command = normalizeCommand(args[0]);
+  const rest = args.slice(1);
+
+  if (command === "output") {
+    const { repoPath } = resolveContext(rest, args, { manifest: false });
+    await outputLatest(repoPath, { copy: true, print: true });
+    return;
+  }
 
   if (command === "report") {
-    const repoPath = option("--repo-path");
-    if (!repoPath) usage();
-    const bundle = await latestRunBundle(path.resolve(process.cwd(), repoPath));
-    if (process.argv.includes("--copy")) {
-      const clipboard = copyToClipboard(bundle.text);
-      console.error(`Copied Maestro run ${bundle.runId} to clipboard using ${clipboard}.`);
-    } else {
-      process.stdout.write(bundle.text);
-    }
+    const { repoPath } = resolveContext(rest, args, { manifest: false });
+    await outputLatest(repoPath, { copy: args.includes("--copy"), print: true });
     return;
   }
 
-  if (command === "status") {
-    if (!manifestPath) usage();
-    const config = loadConfig(manifestPath);
-    const repoPath = option("--repo-path");
-    if (!repoPath) usage();
-    const resolvedRepoPath = path.resolve(process.cwd(), repoPath);
-    if (process.argv.includes("--watch")) {
-      await watchStatus(config, resolvedRepoPath);
-    } else {
-      process.stdout.write(formatStatus(await statusSnapshot(config, resolvedRepoPath)));
-    }
-    return;
-  }
-
-  if (command === "rework") {
-    if (!manifestPath) usage();
-    const config = loadConfig(manifestPath);
-    const repoPath = option("--repo-path");
-    const sourceRunId = option("--run");
-    if (!repoPath || !sourceRunId) usage();
-    const result = await executeReworkRun(config, {
-      repoPath: path.resolve(process.cwd(), repoPath),
-      sourceRunId
-    });
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    if (result.workers?.some((worker) => worker.exitCode !== 0)) process.exitCode = 1;
-    if (result.validations?.some((entry) => entry.verdict !== "approve")) process.exitCode = 1;
-    return;
-  }
-
-  if (command === "reconcile") {
-    if (!manifestPath) usage();
-    const config = loadConfig(manifestPath);
-    const repoPath = option("--repo-path");
-    const sourceRunId = option("--run");
-    const issue = option("--issue");
-    if (!repoPath || !sourceRunId) usage();
-    const result = await executeReconcileRun(config, {
-      repoPath: path.resolve(process.cwd(), repoPath),
-      sourceRunId,
-      issueIds: issue ? [issue] : null
-    });
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    if (result.workers?.some((worker) => worker.exitCode !== 0)) process.exitCode = 1;
-    if (result.validations?.some((entry) => entry.verdict !== "approve")) process.exitCode = 1;
-    return;
-  }
-
-  if (command === "review") {
-    if (!manifestPath) usage();
-    const config = loadConfig(manifestPath);
-    const repoPath = option("--repo-path");
-    const runId = option("--run");
-    const issue = option("--issue");
-    const disposition = option("--disposition");
-    if (!repoPath || !runId || !issue || !disposition) usage();
-    const result = await recordReview({
-      config,
-      repoPath: path.resolve(process.cwd(), repoPath),
-      runId,
-      issue,
-      disposition,
-      title: option("--title"),
-      notes: option("--notes")
-    });
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    return;
-  }
-
-  if (command === "integrate-run") {
-    if (!manifestPath) usage();
-    const config = loadConfig(manifestPath);
-    const repoPath = option("--repo-path");
-    const runId = option("--run");
-    if (!repoPath || !runId) usage();
-    const result = await integrateExistingRun(config, {
-      repoPath: path.resolve(process.cwd(), repoPath),
-      runId,
-      closeIssues: process.argv.includes("--close-issues")
-    });
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    return;
-  }
-
-  if (!manifestPath || !["plan", "run"].includes(command)) usage();
-  const config = loadConfig(manifestPath);
+  const { repoPath, manifestPath } = resolveContext(rest, args);
+  const config = loadConfig(manifestPath, args);
 
   if (command === "plan") {
     process.stdout.write(`${JSON.stringify(computePlan(config), null, 2)}\n`);
     return;
   }
 
-  const repoPath = option("--repo-path");
-  if (!repoPath) usage();
-  const resolvedRepoPath = path.resolve(process.cwd(), repoPath);
-  let result;
-  if (process.argv.includes("--continuous")) {
-    result = await continuousRun(config, { repoPath: resolvedRepoPath });
-  } else if (process.argv.includes("--integrate")) {
-    result = await executeAndIntegrate(config, { repoPath: resolvedRepoPath });
-  } else if (process.argv.includes("--execute")) {
-    result = await executeRun(config, { repoPath: resolvedRepoPath });
-  } else {
-    result = await dryRun(config, { repoPath: resolvedRepoPath });
+  if (command === "status") {
+    if (args.includes("--watch")) await watchStatus(config, repoPath);
+    else process.stdout.write(formatStatus(await statusSnapshot(config, repoPath)));
+    return;
   }
+
+  if (command === "start" || command === "next") {
+    const result = await executeRun(config, { repoPath });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    setResultExitCode(result);
+    return;
+  }
+
+  if (command === "approve") {
+    await approveLatest({
+      config,
+      repoPath,
+      runId: option(args, "--run"),
+      requestedIssues: issuePositionals(rest)
+    });
+    return;
+  }
+
+  if (command === "commit") {
+    await commitLatest({
+      config,
+      repoPath,
+      manifestPath,
+      runId: option(args, "--run"),
+      closeIssues: args.includes("--close-issues")
+    });
+    return;
+  }
+
+  if (command === "rework") {
+    const sourceRunId = option(args, "--run");
+    if (!sourceRunId) usage();
+    const result = await executeReworkRun(config, { repoPath, sourceRunId });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    setResultExitCode(result);
+    return;
+  }
+
+  if (command === "reconcile") {
+    const sourceRunId = option(args, "--run");
+    if (!sourceRunId) usage();
+    const issue = option(args, "--issue");
+    const result = await executeReconcileRun(config, { repoPath, sourceRunId, issueIds: issue ? [issue] : null });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    setResultExitCode(result);
+    return;
+  }
+
+  if (command === "review") {
+    const runId = option(args, "--run");
+    const issue = option(args, "--issue");
+    const disposition = option(args, "--disposition");
+    if (!runId || !issue || !disposition) usage();
+    const result = await recordReview({
+      config,
+      repoPath,
+      runId,
+      issue,
+      disposition,
+      title: option(args, "--title"),
+      notes: option(args, "--notes")
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+
+  if (command === "integrate-run") {
+    const runId = option(args, "--run");
+    if (!runId) usage();
+    const result = await integrateExistingRun(config, { repoPath, runId, closeIssues: args.includes("--close-issues") });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+
+  if (command !== "run") usage();
+
+  let result;
+  if (args.includes("--continuous")) result = await continuousRun(config, { repoPath });
+  else if (args.includes("--integrate")) result = await executeAndIntegrate(config, { repoPath });
+  else if (args.includes("--execute")) result = await executeRun(config, { repoPath });
+  else result = await dryRun(config, { repoPath });
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-  if (result.workers?.some((worker) => worker.exitCode !== 0)) process.exitCode = 1;
-  if (result.validations?.some((entry) => entry.verdict !== "approve")) process.exitCode = 1;
+  setResultExitCode(result);
 }
 
 main().catch((error) => {
