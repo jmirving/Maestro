@@ -7,10 +7,11 @@ const { latestRunBundle, copyToClipboard } = require("../src/reporter");
 const { recordReview } = require("../src/reviews");
 const { integrateExistingRun } = require("../src/existing-run");
 const { executeReworkRun } = require("../src/rework");
+const { executeReconcileRun } = require("../src/reconcile");
 const { statusSnapshot, formatStatus, watchStatus } = require("../src/display");
 
 function usage() {
-  console.error("Usage:\n  maestro plan <manifest.json>\n  maestro run <manifest.json> --repo-path <path> [--execute|--integrate|--continuous] [--allow-failing-baseline]\n  maestro rework <manifest.json> --repo-path <path> --run <source-run-id> [--allow-failing-baseline]\n  maestro status <manifest.json> --repo-path <path> [--watch]\n  maestro report --repo-path <path> [--copy]\n  maestro review <manifest.json> --repo-path <path> --run <run-id> --issue <number> --disposition <approve|rework-original|approve-with-follow-up> [--title <title>] [--notes <notes>]\n  maestro integrate-run <manifest.json> --repo-path <path> --run <run-id> [--close-issues]");
+  console.error("Usage:\n  maestro plan <manifest.json>\n  maestro run <manifest.json> --repo-path <path> [--execute|--integrate|--continuous] [--allow-failing-baseline]\n  maestro rework <manifest.json> --repo-path <path> --run <source-run-id> [--allow-failing-baseline]\n  maestro reconcile <manifest.json> --repo-path <path> --run <source-run-id> [--issue <number>] [--allow-failing-baseline]\n  maestro status <manifest.json> --repo-path <path> [--watch]\n  maestro report --repo-path <path> [--copy]\n  maestro review <manifest.json> --repo-path <path> --run <run-id> --issue <number> --disposition <approve|rework-original|approve-with-follow-up> [--title <title>] [--notes <notes>]\n  maestro integrate-run <manifest.json> --repo-path <path> --run <run-id> [--close-issues]");
   process.exit(2);
 }
 
@@ -67,6 +68,24 @@ async function main() {
     const result = await executeReworkRun(config, {
       repoPath: path.resolve(process.cwd(), repoPath),
       sourceRunId
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    if (result.workers?.some((worker) => worker.exitCode !== 0)) process.exitCode = 1;
+    if (result.validations?.some((entry) => entry.verdict !== "approve")) process.exitCode = 1;
+    return;
+  }
+
+  if (command === "reconcile") {
+    if (!manifestPath) usage();
+    const config = loadConfig(manifestPath);
+    const repoPath = option("--repo-path");
+    const sourceRunId = option("--run");
+    const issue = option("--issue");
+    if (!repoPath || !sourceRunId) usage();
+    const result = await executeReconcileRun(config, {
+      repoPath: path.resolve(process.cwd(), repoPath),
+      sourceRunId,
+      issueIds: issue ? [issue] : null
     });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     if (result.workers?.some((worker) => worker.exitCode !== 0)) process.exitCode = 1;
