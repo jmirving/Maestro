@@ -65,13 +65,13 @@ function markManifestComplete(manifestPath, issueIds) {
 }
 
 function persistManifestCompletion({ repoPath, manifestPath, issueIds }) {
-  const changed = markManifestComplete(manifestPath, issueIds);
-  if (!changed.length) return { changed, committed: false };
-
   const relativeManifest = path.relative(repoPath, manifestPath);
   if (relativeManifest.startsWith("..") || path.isAbsolute(relativeManifest)) {
     throw new Error("The inferred Maestro manifest is outside the target repository and cannot be committed automatically.");
   }
+
+  const changed = markManifestComplete(manifestPath, issueIds);
+  if (!changed.length) return { changed, committed: false };
 
   run("git", ["add", "--", relativeManifest], repoPath);
   const message = `Advance Maestro work state: ${changed.map((issue) => `#${issue}`).join(", ")}`;
