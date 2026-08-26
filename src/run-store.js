@@ -7,6 +7,25 @@ function statePath(repoPath, runId) {
   return path.join(reportRootForRepo(repoPath), `run-${runId}.json`);
 }
 
+async function latestRunId(repoPath) {
+  const reportRoot = reportRootForRepo(repoPath);
+  let names;
+  try {
+    names = await fs.readdir(reportRoot);
+  } catch (error) {
+    if (error.code === "ENOENT") throw new Error(`No Maestro runs found for ${path.resolve(repoPath)}.`);
+    throw error;
+  }
+
+  const stateRunIds = names
+    .map((name) => name.match(/^run-(\d{14}-[a-f0-9]+)\.json$/)?.[1])
+    .filter(Boolean);
+  const reportRunIds = names.map(parseReportName).filter(Boolean).map((entry) => entry.runId);
+  const runIds = [...new Set([...stateRunIds, ...reportRunIds])];
+  if (!runIds.length) throw new Error(`No Maestro runs found for ${path.resolve(repoPath)}.`);
+  return runIds.sort().at(-1);
+}
+
 async function saveRunState(repoPath, runId, state) {
   const file = statePath(repoPath, runId);
   await fs.mkdir(path.dirname(file), { recursive: true });
@@ -52,4 +71,4 @@ async function loadRunState(repoPath, runId) {
   }
 }
 
-module.exports = { statePath, saveRunState, loadRunState, reconstructLegacyRun };
+module.exports = { statePath, latestRunId, saveRunState, loadRunState, reconstructLegacyRun };
