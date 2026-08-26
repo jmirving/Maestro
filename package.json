@@ -4,6 +4,9 @@
   "private": true,
   "description": "Safe, continuous, dependency-aware repository agent orchestration",
   "type": "commonjs",
+  "bin": {
+    "maestro": "./bin/maestro.js"
+  },
   "scripts": {
     "test": "node --test",
     "plan": "node bin/maestro.js plan"
