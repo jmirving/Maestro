@@ -3,10 +3,18 @@ function normalizeWork(work = {}) {
     id: String(id),
     status: item.status,
     mode: item.mode || "execute",
+    priority: Number.isFinite(Number(item.priority)) ? Number(item.priority) : null,
     blockedBy: (item.blockedBy || []).map(String),
     requires: [...new Set(item.requires || [])],
     humanGate: item.humanGate || null
   }));
+}
+
+function compareReady(a, b) {
+  const aPriority = a.priority == null ? Number.POSITIVE_INFINITY : a.priority;
+  const bPriority = b.priority == null ? Number.POSITIVE_INFINITY : b.priority;
+  if (aPriority !== bPriority) return aPriority - bPriority;
+  return Number(a.id) - Number(b.id) || a.id.localeCompare(b.id);
 }
 
 function computePlan(config) {
@@ -30,6 +38,7 @@ function computePlan(config) {
     if (item.status === "ready") ready.push(item);
   }
 
+  ready.sort(compareReady);
   const concurrency = Math.max(1, Number(config.defaultConcurrency || 2));
   return {
     repository: config.repository,
@@ -41,4 +50,4 @@ function computePlan(config) {
   };
 }
 
-module.exports = { computePlan, normalizeWork };
+module.exports = { computePlan, normalizeWork, compareReady };
