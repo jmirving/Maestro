@@ -15,12 +15,21 @@ function normalizeCommand(command) {
   return COMMAND_ALIASES.get(command) || command;
 }
 
-function gitRoot(cwd = process.cwd()) {
-  const result = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8" });
+function run(command, args, cwd) {
+  const result = spawnSync(command, args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   if (result.error || result.status !== 0) {
+    const detail = `${result.stdout || ""}\n${result.stderr || ""}`.trim();
+    throw new Error(`${command} ${args.join(" ")} failed${detail ? `:\n${detail}` : ""}`);
+  }
+  return result.stdout.trim();
+}
+
+function gitRoot(cwd = process.cwd()) {
+  try {
+    return path.resolve(run("git", ["rev-parse", "--show-toplevel"], cwd));
+  } catch {
     throw new Error("Maestro could not find a Git repository from the current directory. Use --repo-path explicitly.");
   }
-  return path.resolve(result.stdout.trim());
 }
 
 function resolveRepoPath(explicitRepoPath, cwd = process.cwd()) {
@@ -55,6 +64,22 @@ function markManifestComplete(manifestPath, issueIds) {
   return changed;
 }
 
+function persistManifestCompletion({ repoPath, manifestPath, issueIds }) {
+  const changed = markManifestComplete(manifestPath, issueIds);
+  if (!changed.length) return { changed, committed: false };
+
+  const relativeManifest = path.relative(repoPath, manifestPath);
+  if (relativeManifest.startsWith("..") || path.isAbsolute(relativeManifest)) {
+    throw new Error("The inferred Maestro manifest is outside the target repository and cannot be committed automatically.");
+  }
+
+  run("git", ["add", "--", relativeManifest], repoPath);
+  const message = `Advance Maestro work state: ${changed.map((issue) => `#${issue}`).join(", ")}`;
+  run("git", ["commit", "-m", message, "--", relativeManifest], repoPath);
+  run("git", ["push", "origin", "HEAD"], repoPath);
+  return { changed, committed: true };
+}
+
 module.exports = {
   COMMAND_ALIASES,
   normalizeCommand,
@@ -62,5 +87,6 @@ module.exports = {
   resolveRepoPath,
   resolveManifestPath,
   looksLikeManifest,
-  markManifestComplete
+  markManifestComplete,
+  persistManifestCompletion
 };
