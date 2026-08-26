@@ -13,6 +13,11 @@ async function ensureCleanWorktree(worker, runner = runChecked) {
   if (status) throw new Error(`Reconcile branch for issue #${worker.issue} is not clean before rebase:\n${status}`);
 }
 
+async function rebaseInProgress(worktreePath, runner = runProcess) {
+  const result = await runner("git", ["rev-parse", "-q", "--verify", "REBASE_HEAD"], { cwd: worktreePath });
+  return result.code === 0;
+}
+
 function buildReconcilePrompt({ repository, worker, validation, sourceRunId, defaultBranch }) {
   return `Reconcile ${repository} issue #${worker.issue} after an integration-time rebase conflict.\n\n` +
     `The implementation was already validator-approved in Maestro run ${sourceRunId}. Do not redesign or restart the issue. ` +
@@ -101,11 +106,14 @@ async function executeReconcileRun(config, {
       exitCode = resolved.result.code;
       report = resolved.report;
       reportPath = resolved.reportPath;
-      if (exitCode !== 0) {
+      const stillRebasing = await rebaseInProgress(original.worktreePath, processRunner);
+      const dirty = (await runner("git", ["status", "--porcelain=v1"], { cwd: original.worktreePath })).stdout.trim();
+      if (exitCode !== 0 || stillRebasing || dirty) {
         try { await runner("git", ["rebase", "--abort"], { cwd: original.worktreePath }); } catch {}
-      } else {
-        const rebaseState = (await runner("git", ["status", "--porcelain=v1"], { cwd: original.worktreePath })).stdout.trim();
-        if (rebaseState) throw new Error(`Reconcile agent left issue #${original.issue} worktree dirty after conflict resolution:\n${rebaseState}`);
+        if (exitCode === 0) {
+          const reasons = [stillRebasing ? "rebase still in progress" : null, dirty ? `dirty worktree:\n${dirty}` : null].filter(Boolean).join("; ");
+          throw new Error(`Reconcile agent did not complete issue #${original.issue} cleanly: ${reasons}`);
+        }
       }
     }
 
@@ -144,4 +152,4 @@ async function executeReconcileRun(config, {
   return result;
 }
 
-module.exports = { buildReconcilePrompt, executeReconcileRun };
+module.exports = { buildReconcilePrompt, rebaseInProgress, executeReconcileRun };
