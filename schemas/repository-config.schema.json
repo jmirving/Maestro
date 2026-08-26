@@ -45,6 +45,7 @@
         "properties": {
           "status": { "enum": ["ready", "blocked", "human_gate", "complete"] },
           "mode": { "enum": ["execute", "research", "validate"] },
+          "priority": { "type": "number" },
           "blockedBy": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
           "requires": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
           "humanGate": { "type": ["string", "null"] }
