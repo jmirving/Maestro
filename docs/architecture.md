@@ -28,6 +28,8 @@ Serializes approved changes, rebases/refreshes as necessary, verifies required c
 
 GitHub, Git, Codex CLI, Docker/PostgreSQL, Playwright, and future agent runtimes are adapters around the deterministic orchestration core.
 
+Manifest drafting follows the same boundary. The GitHub adapter discovers the checkout's repository and reads issue facts; the deterministic draft core merges those facts into an existing manifest without invoking workers or making provider mutations. Repository-specific label and dependency conventions require explicit configuration before they can influence a draft.
+
 ## Isolation
 
 Every concurrent worker must use a separate Git branch and worktree from a recorded base SHA. Shared mutable resources such as a local test database must be explicitly coordinated by capability providers.

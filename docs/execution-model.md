@@ -14,6 +14,10 @@ Maestro normalizes target work into:
 - `complete` — integrated and verified;
 - `failed` — execution or validation failed and needs intervention/retry policy.
 
+## Drafting
+
+`maestro draft` is a planning operation, not an execution state. It proposes `ready` entries for previously unknown open GitHub issues and preserves existing work metadata and completed state. A proposal is validated against the repository-config schema before it can be written. Closed, malformed, duplicate, or otherwise unsafe issue records remain unresolved for human attention rather than being interpreted semantically.
+
 ## Capability requirements
 
 A work item may require named capabilities such as:

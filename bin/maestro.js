@@ -9,10 +9,13 @@ const { executeReworkRun } = require("../src/rework");
 const { executeReconcileRun } = require("../src/reconcile");
 const { latestRunId, loadRunState } = require("../src/run-store");
 const { statusSnapshot, formatStatus, watchStatus } = require("../src/display");
+const { discoverGitHubRepository, loadGitHubIssues } = require("../src/github");
+const { proposeDraft, formatDraftSummary, readExistingManifest, writeManifest } = require("../src/draft");
 const {
   normalizeCommand,
   resolveRepoPath,
   resolveManifestPath,
+  resolveDraftManifestPath,
   looksLikeManifest,
   persistManifestCompletion
 } = require("../src/cli-context");
@@ -20,6 +23,7 @@ const {
 function usage() {
   console.error(`Usage:
   maestro plan [manifest.json] [--repo-path <path>]
+  maestro draft [manifest.json] [issue ...] [--repo-path <path>] [--all] [--write]
   maestro start [manifest.json] [--repo-path <path>]
   maestro status [manifest.json] [--repo-path <path>] [--watch]
   maestro output [--repo-path <path>]
@@ -61,6 +65,22 @@ function issuePositionals(rest) {
     if (/^\d+$/.test(value)) issues.push(value);
   }
   return issues;
+}
+
+function draftIssuePositionals(rest) {
+  const manifest = explicitManifest(rest);
+  const issues = [];
+  for (let index = manifest ? 1 : 0; index < rest.length; index += 1) {
+    const value = rest[index];
+    if (value === "--repo-path") {
+      index += 1;
+      continue;
+    }
+    if (value.startsWith("--")) continue;
+    if (!/^\d+$/.test(value)) throw new Error(`Invalid issue number: ${value}`);
+    issues.push(value);
+  }
+  return [...new Set(issues)];
 }
 
 function resolveContext(rest, args, { manifest = true } = {}) {
@@ -151,6 +171,27 @@ async function main() {
   if (command === "report") {
     const { repoPath } = resolveContext(rest, args, { manifest: false });
     await outputLatest(repoPath, { copy: args.includes("--copy"), print: true });
+    return;
+  }
+
+  if (command === "draft") {
+    const repoPath = resolveRepoPath(option(args, "--repo-path"));
+    const manifestPath = resolveDraftManifestPath(explicitManifest(rest), repoPath);
+    const requestedIssues = draftIssuePositionals(rest);
+    if (args.includes("--all") && requestedIssues.length) {
+      throw new Error("maestro draft accepts either selected issue numbers or --all, not both.");
+    }
+    const repository = await discoverGitHubRepository(repoPath);
+    const issues = await loadGitHubIssues(repository, requestedIssues, { repoPath });
+    const result = proposeDraft({
+      repository,
+      existingConfig: readExistingManifest(manifestPath),
+      issues,
+      selectedIssueIds: requestedIssues
+    });
+    const write = args.includes("--write");
+    process.stdout.write(formatDraftSummary({ repository, manifestPath, result, write }));
+    if (write && (result.created || result.added.length)) writeManifest(manifestPath, result.manifest);
     return;
   }
 

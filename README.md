@@ -49,6 +49,17 @@ maestro commit
 maestro next
 ```
 
+Create or refresh that manifest from GitHub issues before planning:
+
+```bash
+maestro draft                 # review all newly eligible open issues
+maestro draft --write         # persist the schema-valid proposal
+maestro draft 101 102 --write # update only these issues; preserve all other work
+maestro draft --all           # explicitly reconsider every eligible open issue
+```
+
+Drafting is deterministic and never starts workers or mutates GitHub. Existing work entries are preserved exactly; because repositories may attach meaning to their metadata, the initial strategy only adds previously unknown open issues as `ready`. Records that cannot be safely normalized are listed as unresolved.
+
 `maestro approve` without issue numbers approves every validator-approved, unreviewed item in the latest run. Supply issue numbers to approve only a subset:
 
 ```bash

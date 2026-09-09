@@ -46,6 +46,12 @@ function resolveManifestPath(explicitManifestPath, repoPath, cwd = process.cwd()
   return manifestPath;
 }
 
+function resolveDraftManifestPath(explicitManifestPath, repoPath, cwd = process.cwd()) {
+  return explicitManifestPath
+    ? path.resolve(cwd, explicitManifestPath)
+    : path.join(repoPath, ".maestro.json");
+}
+
 function looksLikeManifest(value) {
   return Boolean(value && !value.startsWith("--") && (value.endsWith(".json") || value.includes("/")));
 }
@@ -86,6 +92,7 @@ module.exports = {
   gitRoot,
   resolveRepoPath,
   resolveManifestPath,
+  resolveDraftManifestPath,
   looksLikeManifest,
   markManifestComplete,
   persistManifestCompletion
