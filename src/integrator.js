@@ -1,8 +1,85 @@
+const path = require("node:path");
 const { runChecked, runShell } = require("./process");
 
 async function ensureClean(repoPath, runner = runChecked) {
   const status = (await runner("git", ["status", "--porcelain"], { cwd: repoPath })).stdout.trim();
   if (status) throw new Error(`Target default-branch checkout is not clean:\n${status}`);
+}
+
+function repositoryRelativeManifest(repoPath, manifestPath) {
+  if (!manifestPath) return null;
+  const relative = path.relative(repoPath, manifestPath);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error("The resolved Maestro manifest must be a file inside the target repository before integration can preserve it safely.");
+  }
+  return relative;
+}
+
+async function statusFor(repoPath, pathspec, runner) {
+  return (await runner("git", ["status", "--porcelain=v1", "--untracked-files=all", "--", pathspec], { cwd: repoPath })).stdout.trim();
+}
+
+async function dropStash(repoPath, stashSha, runner) {
+  const list = (await runner("git", ["stash", "list", "--format=%H"], { cwd: repoPath })).stdout.trim().split("\n");
+  const index = list.findIndex((sha) => sha === stashSha);
+  if (index >= 0) await runner("git", ["stash", "drop", `stash@{${index}}`], { cwd: repoPath });
+}
+
+async function restoreManifest(repoPath, relativeManifest, stashSha, runner) {
+  try {
+    await runner("git", ["stash", "apply", "--index", stashSha], { cwd: repoPath });
+    await dropStash(repoPath, stashSha, runner);
+  } catch (error) {
+    const recovery = new Error(
+      `Maestro could not restore ${relativeManifest} after integration. Its original state remains recoverable in Git stash ${stashSha}. ` +
+      `Resolve the manifest conflict, then drop that stash manually once its contents are preserved.`
+    );
+    recovery.cause = error;
+    throw recovery;
+  }
+}
+
+async function withPreservedManifest({ repoPath, manifestPath, runner = runChecked }, operation) {
+  const relativeManifest = repositoryRelativeManifest(repoPath, manifestPath);
+  if (!relativeManifest) {
+    await ensureClean(repoPath, runner);
+    return operation();
+  }
+
+  const allStatus = await statusFor(repoPath, ".", runner);
+  const manifestStatus = await statusFor(repoPath, relativeManifest, runner);
+  if (allStatus !== manifestStatus) {
+    throw new Error(
+      `Target default-branch checkout has changes outside the resolved Maestro manifest (${relativeManifest}). ` +
+      `Commit, stash, or remove the unrelated working-tree state before integration:\n${allStatus}`
+    );
+  }
+
+  let stashSha = null;
+  if (manifestStatus) {
+    await runner("git", ["stash", "push", "--all", "--message", "maestro: preserve manifest during integration", "--", relativeManifest], { cwd: repoPath });
+    stashSha = (await runner("git", ["rev-parse", "refs/stash"], { cwd: repoPath })).stdout.trim();
+  }
+
+  let result;
+  let operationError = null;
+  try {
+    await ensureClean(repoPath, runner);
+    result = await operation();
+  } catch (error) {
+    operationError = error;
+  }
+
+  if (stashSha) {
+    try {
+      await restoreManifest(repoPath, relativeManifest, stashSha, runner);
+    } catch (restoreError) {
+      if (operationError) restoreError.integrationError = operationError;
+      throw restoreError;
+    }
+  }
+  if (operationError) throw operationError;
+  return result;
 }
 
 function normalizeFailureOutput(text = "") {
@@ -75,7 +152,7 @@ async function runIntegrationCommand(command, { cwd, baseline, shellRunner = run
   throw error;
 }
 
-async function integrateApproved({ config, repoPath, workers, validations, baseline = null, runner = runChecked, shellRunner = runShell, onIntegrated = null }) {
+async function integrateApproved({ config, repoPath, manifestPath = null, workers, validations, baseline = null, runner = runChecked, shellRunner = runShell, onIntegrated = null }) {
   const integration = config.integration || {};
   if (integration.enabled !== true) throw new Error("Manifest does not enable integration.");
   const defaultBranch = config.defaultBranch || "main";
@@ -83,44 +160,65 @@ async function integrateApproved({ config, repoPath, workers, validations, basel
   const approved = workers.filter((worker) => worker.exitCode === 0 && verdicts.get(String(worker.issue)) === "approve");
   const results = [];
 
-  await ensureClean(repoPath, runner);
-  for (const worker of approved) {
-    console.error(`[Maestro] integrating #${worker.issue}`);
-    await runner("git", ["fetch", "origin", defaultBranch], { cwd: worker.worktreePath });
-    await runner("git", ["rebase", `origin/${defaultBranch}`], { cwd: worker.worktreePath }).catch(async (error) => {
-      try { await runner("git", ["rebase", "--abort"], { cwd: worker.worktreePath }); } catch {}
-      throw error;
-    });
+  return withPreservedManifest({ repoPath, manifestPath, runner }, async () => {
+    for (const worker of approved) {
+      console.error(`[Maestro] integrating #${worker.issue}`);
+      await runner("git", ["fetch", "origin", defaultBranch], { cwd: worker.worktreePath });
+      await runner("git", ["rebase", `origin/${defaultBranch}`], { cwd: worker.worktreePath }).catch(async (error) => {
+        try { await runner("git", ["rebase", "--abort"], { cwd: worker.worktreePath }); } catch {}
+        throw error;
+      });
 
-    const validationResults = [];
-    for (const command of integration.commands || []) {
-      validationResults.push({ command, ...(await runIntegrationCommand(command, { cwd: worker.worktreePath, baseline, shellRunner })) });
-    }
-
-    await runner("git", ["checkout", defaultBranch], { cwd: repoPath });
-    await runner("git", ["pull", "--ff-only", "origin", defaultBranch], { cwd: repoPath });
-    const before = (await runner("git", ["rev-parse", "HEAD"], { cwd: repoPath })).stdout.trim();
-    try {
-      await runner("git", ["merge", "--ff-only", worker.branch], { cwd: repoPath });
-      for (const command of integration.postMergeCommands || []) {
-        await runIntegrationCommand(command, { cwd: repoPath, baseline, shellRunner });
+      const relativeManifest = repositoryRelativeManifest(repoPath, manifestPath);
+      if (relativeManifest) {
+        const changedManifest = (await runner("git", ["diff", "--name-only", `origin/${defaultBranch}...HEAD`, "--", relativeManifest], { cwd: worker.worktreePath })).stdout.trim();
+        if (changedManifest) {
+          throw new Error(
+            `Worker branch ${worker.branch} changes the Maestro manifest (${relativeManifest}). ` +
+            "Manifest progress is owned by maestro commit and must be resolved separately before integration."
+          );
+        }
       }
-      await runner("git", ["push", "origin", defaultBranch], { cwd: repoPath });
-    } catch (error) {
-      try { await runner("git", ["reset", "--hard", before], { cwd: repoPath }); } catch {}
-      throw error;
-    }
 
-    const integratedSha = (await runner("git", ["rev-parse", "HEAD"], { cwd: repoPath })).stdout.trim();
-    if (integration.closeIssues === true) {
-      await runner("gh", ["issue", "close", String(worker.issue), "--repo", config.repository, "--reason", "completed", "--comment", `Integrated by Maestro at ${integratedSha}.`], { cwd: repoPath });
+      const validationResults = [];
+      for (const command of integration.commands || []) {
+        validationResults.push({ command, ...(await runIntegrationCommand(command, { cwd: worker.worktreePath, baseline, shellRunner })) });
+      }
+
+      await runner("git", ["checkout", defaultBranch], { cwd: repoPath });
+      await runner("git", ["pull", "--ff-only", "origin", defaultBranch], { cwd: repoPath });
+      const before = (await runner("git", ["rev-parse", "HEAD"], { cwd: repoPath })).stdout.trim();
+      try {
+        await runner("git", ["merge", "--ff-only", worker.branch], { cwd: repoPath });
+        for (const command of integration.postMergeCommands || []) {
+          await runIntegrationCommand(command, { cwd: repoPath, baseline, shellRunner });
+        }
+        await runner("git", ["push", "origin", defaultBranch], { cwd: repoPath });
+      } catch (error) {
+        try { await runner("git", ["reset", "--hard", before], { cwd: repoPath }); } catch {}
+        throw error;
+      }
+
+      const integratedSha = (await runner("git", ["rev-parse", "HEAD"], { cwd: repoPath })).stdout.trim();
+      if (integration.closeIssues === true) {
+        await runner("gh", ["issue", "close", String(worker.issue), "--repo", config.repository, "--reason", "completed", "--comment", `Integrated by Maestro at ${integratedSha}.`], { cwd: repoPath });
+      }
+      const integrated = { issue: worker.issue, branch: worker.branch, integratedSha, validationResults };
+      results.push(integrated);
+      if (onIntegrated) await onIntegrated(integrated);
+      console.error(`[Maestro] integrated #${worker.issue} at ${integratedSha}`);
     }
-    const integrated = { issue: worker.issue, branch: worker.branch, integratedSha, validationResults };
-    results.push(integrated);
-    if (onIntegrated) await onIntegrated(integrated);
-    console.error(`[Maestro] integrated #${worker.issue} at ${integratedSha}`);
-  }
-  return results;
+    return results;
+  });
 }
 
-module.exports = { ensureClean, normalizeFailureOutput, failureSignatures, isAcceptedBaselineFailure, runIntegrationCommand, integrateApproved };
+module.exports = {
+  ensureClean,
+  repositoryRelativeManifest,
+  withPreservedManifest,
+  normalizeFailureOutput,
+  failureSignatures,
+  isAcceptedBaselineFailure,
+  runIntegrationCommand,
+  integrateApproved
+};

@@ -146,6 +146,7 @@ async function commitLatest({ config, repoPath, manifestPath, runId, closeIssues
   const resolvedRunId = runId || await latestRunId(repoPath);
   const result = await integrateExistingRun(config, {
     repoPath,
+    manifestPath,
     runId: resolvedRunId,
     closeIssues
   });
@@ -277,7 +278,7 @@ async function main() {
   if (command === "integrate-run") {
     const runId = option(args, "--run");
     if (!runId) usage();
-    const result = await integrateExistingRun(config, { repoPath, runId, closeIssues: args.includes("--close-issues") });
+    const result = await integrateExistingRun(config, { repoPath, manifestPath, runId, closeIssues: args.includes("--close-issues") });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;
   }

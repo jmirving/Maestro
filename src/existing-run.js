@@ -37,6 +37,7 @@ function classifyRunItems(state) {
 
 async function integrateExistingRun(config, {
   repoPath,
+  manifestPath = null,
   runId,
   closeIssues = false,
   runner,
@@ -83,6 +84,7 @@ async function integrateExistingRun(config, {
   const newlyIntegrated = await integrateApproved({
     config: integrationConfig,
     repoPath,
+    manifestPath,
     workers: pendingWorkers,
     validations: pendingValidations,
     baseline: state.baseline || null,

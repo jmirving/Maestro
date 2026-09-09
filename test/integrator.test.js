@@ -1,6 +1,32 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { failureSignatures, isAcceptedBaselineFailure } = require("../src/integrator");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+const {
+  failureSignatures,
+  isAcceptedBaselineFailure,
+  withPreservedManifest,
+  integrateApproved
+} = require("../src/integrator");
+
+function git(repoPath, ...args) {
+  const result = spawnSync("git", args, { cwd: repoPath, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+function repository() {
+  const repoPath = fs.mkdtempSync(path.join(os.tmpdir(), "maestro-integrator-test-"));
+  git(repoPath, "init", "-q");
+  git(repoPath, "config", "user.name", "Maestro Test");
+  git(repoPath, "config", "user.email", "maestro@example.test");
+  fs.writeFileSync(path.join(repoPath, "README.md"), "base\n");
+  git(repoPath, "add", "README.md");
+  git(repoPath, "commit", "-qm", "base");
+  return repoPath;
+}
 
 test("failureSignatures ignores TAP ordinal and timing noise", () => {
   const first = `not ok 53 - focuses the requested inbox item\n# error: timeout after 5000ms\n# duration_ms: 5004.21`;
@@ -36,4 +62,124 @@ test("falls back to normalized error fingerprint when no test identity is availa
     command: "custom",
     result: { code: 1, stdout: "", stderr: "Error: service unavailable" }
   }), true);
+});
+
+test("preserves an untracked manifest while integration runs with a clean tree", async () => {
+  const repoPath = repository();
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  const original = '{"work":{"13":{"status":"ready"}}}\n';
+  fs.writeFileSync(manifestPath, original);
+
+  await withPreservedManifest({ repoPath, manifestPath }, async () => {
+    assert.equal(fs.existsSync(manifestPath), false);
+    assert.equal(git(repoPath, "status", "--porcelain"), "");
+  });
+
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), original);
+  assert.equal(git(repoPath, "status", "--porcelain"), "?? .maestro.json");
+  assert.equal(git(repoPath, "stash", "list"), "");
+});
+
+test("leaves a tracked clean manifest available during integration", async () => {
+  const repoPath = repository();
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  fs.writeFileSync(manifestPath, "tracked\n");
+  git(repoPath, "add", ".maestro.json");
+  git(repoPath, "commit", "-qm", "track manifest");
+
+  await withPreservedManifest({ repoPath, manifestPath }, async () => {
+    assert.equal(fs.readFileSync(manifestPath, "utf8"), "tracked\n");
+    assert.equal(git(repoPath, "status", "--porcelain"), "");
+  });
+
+  assert.equal(git(repoPath, "status", "--porcelain"), "");
+});
+
+test("restores tracked manifest index and working-tree edits exactly", async () => {
+  const repoPath = repository();
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  fs.writeFileSync(manifestPath, "base\n");
+  git(repoPath, "add", ".maestro.json");
+  git(repoPath, "commit", "-qm", "track manifest");
+  fs.writeFileSync(manifestPath, "staged user edit\n");
+  git(repoPath, "add", ".maestro.json");
+  fs.writeFileSync(manifestPath, "unstaged user edit\n");
+
+  await withPreservedManifest({ repoPath, manifestPath }, async () => {
+    assert.equal(fs.readFileSync(manifestPath, "utf8"), "base\n");
+    assert.equal(git(repoPath, "status", "--porcelain"), "");
+  });
+
+  assert.equal(git(repoPath, "show", ":.maestro.json"), "staged user edit");
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), "unstaged user edit\n");
+  assert.equal(git(repoPath, "status", "--porcelain"), "MM .maestro.json");
+  assert.equal(git(repoPath, "stash", "list"), "");
+});
+
+test("rejects unrelated dirty state without changing the manifest", async () => {
+  const repoPath = repository();
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  fs.writeFileSync(manifestPath, "manifest edit\n");
+  fs.writeFileSync(path.join(repoPath, "README.md"), "unrelated edit\n");
+  let operated = false;
+
+  await assert.rejects(
+    withPreservedManifest({ repoPath, manifestPath }, async () => { operated = true; }),
+    /changes outside the resolved Maestro manifest.*README\.md/s
+  );
+  assert.equal(operated, false);
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), "manifest edit\n");
+  assert.equal(git(repoPath, "stash", "list"), "");
+});
+
+test("restores manifest state when integration fails", async () => {
+  const repoPath = repository();
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  fs.writeFileSync(manifestPath, "recover me\n");
+
+  await assert.rejects(
+    withPreservedManifest({ repoPath, manifestPath }, async () => { throw new Error("merge failed"); }),
+    /merge failed/
+  );
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), "recover me\n");
+  assert.equal(git(repoPath, "status", "--porcelain"), "?? .maestro.json");
+  assert.equal(git(repoPath, "stash", "list"), "");
+});
+
+test("keeps the recovery stash when incoming work conflicts with manifest edits", async () => {
+  const repoPath = repository();
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  fs.writeFileSync(manifestPath, "base\n");
+  git(repoPath, "add", ".maestro.json");
+  git(repoPath, "commit", "-qm", "track manifest");
+  fs.writeFileSync(manifestPath, "local progress\n");
+
+  await assert.rejects(withPreservedManifest({ repoPath, manifestPath }, async () => {
+    fs.writeFileSync(manifestPath, "incoming progress\n");
+    git(repoPath, "add", ".maestro.json");
+    git(repoPath, "commit", "-qm", "incoming manifest change");
+  }), /original state remains recoverable in Git stash [a-f0-9]+/);
+
+  assert.match(git(repoPath, "stash", "list"), /maestro: preserve manifest during integration/);
+  assert.match(git(repoPath, "status", "--porcelain"), /UU \.maestro\.json/);
+});
+
+test("rejects worker branches that change the manifest before merging", async () => {
+  const calls = [];
+  const runner = async (command, args, options) => {
+    calls.push({ command, args, cwd: options.cwd });
+    if (args[0] === "diff") return { code: 0, stdout: ".maestro.json\n", stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+
+  await assert.rejects(integrateApproved({
+    config: { defaultBranch: "main", integration: { enabled: true } },
+    repoPath: "/target",
+    manifestPath: "/target/.maestro.json",
+    workers: [{ issue: "13", branch: "worker/13", worktreePath: "/worker", exitCode: 0 }],
+    validations: [{ issue: "13", verdict: "approve" }],
+    runner
+  }), /Worker branch worker\/13 changes the Maestro manifest/);
+
+  assert.equal(calls.some((call) => call.args[0] === "merge"), false);
 });

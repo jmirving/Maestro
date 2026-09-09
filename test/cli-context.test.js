@@ -8,7 +8,8 @@ const {
   normalizeCommand,
   resolveRepoPath,
   resolveManifestPath,
-  markManifestComplete
+  markManifestComplete,
+  persistManifestCompletion
 } = require("../src/cli-context");
 const { latestRunId, saveRunState } = require("../src/run-store");
 
@@ -19,6 +20,27 @@ function tempDir() {
 function initGitRepo(repoPath) {
   const result = spawnSync("git", ["init", "-q"], { cwd: repoPath, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
+}
+
+function git(repoPath, ...args) {
+  const result = spawnSync("git", args, { cwd: repoPath, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+function initPushableRepo() {
+  const repoPath = tempDir();
+  const remotePath = tempDir();
+  initGitRepo(repoPath);
+  git(repoPath, "config", "user.name", "Maestro Test");
+  git(repoPath, "config", "user.email", "maestro@example.test");
+  fs.writeFileSync(path.join(repoPath, "README.md"), "base\n");
+  git(repoPath, "add", "README.md");
+  git(repoPath, "commit", "-qm", "base");
+  git(remotePath, "init", "--bare", "-q");
+  git(repoPath, "remote", "add", "origin", remotePath);
+  git(repoPath, "push", "-u", "origin", "HEAD");
+  return repoPath;
 }
 
 test("short command aliases normalize to ergonomic commands", () => {
@@ -57,6 +79,46 @@ test("markManifestComplete changes only known incomplete work", () => {
   assert.equal(saved.work["57"].status, "complete");
   assert.equal(saved.work["57"].priority, 10);
   assert.equal(saved.work["59"].status, "complete");
+});
+
+test("persistManifestCompletion commits an untracked bootstrap manifest", () => {
+  const repoPath = initPushableRepo();
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  fs.writeFileSync(manifestPath, `${JSON.stringify({
+    repository: "owner/repo",
+    work: { "13": { status: "ready" } }
+  }, null, 2)}\n`);
+
+  assert.deepEqual(persistManifestCompletion({ repoPath, manifestPath, issueIds: ["13"] }), {
+    changed: ["13"],
+    committed: true
+  });
+  assert.equal(JSON.parse(fs.readFileSync(manifestPath, "utf8")).work["13"].status, "complete");
+  assert.equal(git(repoPath, "status", "--porcelain"), "");
+  assert.equal(git(repoPath, "show", "@{upstream}:.maestro.json").includes('"status": "complete"'), true);
+});
+
+test("persistManifestCompletion retains user-authored fields in a tracked dirty manifest", () => {
+  const repoPath = initPushableRepo();
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  fs.writeFileSync(manifestPath, `${JSON.stringify({
+    repository: "owner/repo",
+    work: { "13": { status: "ready", priority: 10 } }
+  }, null, 2)}\n`);
+  git(repoPath, "add", ".maestro.json");
+  git(repoPath, "commit", "-qm", "track manifest");
+  git(repoPath, "push");
+
+  const edited = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  edited.work["13"].priority = 25;
+  edited.work["13"].notes = "user-authored";
+  fs.writeFileSync(manifestPath, `${JSON.stringify(edited, null, 2)}\n`);
+
+  const result = persistManifestCompletion({ repoPath, manifestPath, issueIds: ["13"] });
+  const saved = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  assert.deepEqual(result, { changed: ["13"], committed: true });
+  assert.deepEqual(saved.work["13"], { status: "complete", priority: 25, notes: "user-authored" });
+  assert.equal(git(repoPath, "status", "--porcelain"), "");
 });
 
 test("latestRunId resolves the newest persisted run", async () => {

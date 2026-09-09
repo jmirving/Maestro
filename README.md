@@ -68,6 +68,8 @@ maestro approve 57 63
 
 `maestro commit` integrates the latest reviewed run, updates the matching work items to `complete` in `.maestro.json`, commits that manifest progress, and pushes it so the next invocation advances to newly unblocked work.
 
+The resolved manifest may be untracked or contain pending edits when `maestro commit` starts. Maestro preserves that file while it integrates approved worker branches, restores it unchanged, and only then records completed work. Changes to any other file still block integration. Worker or incoming changes that conflict with the preserved manifest stop with an explicit recovery message; the original manifest remains available in the named Git stash.
+
 Short aliases are available for the high-frequency loop:
 
 ```text
