@@ -19,6 +19,10 @@ async function statusFor(repoPath, pathspec, runner) {
   return (await runner("git", ["status", "--porcelain=v1", "--untracked-files=all", "--", pathspec], { cwd: repoPath })).stdout.trim();
 }
 
+async function ignoredStatusFor(repoPath, pathspec, runner) {
+  return (await runner("git", ["status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching", "--", pathspec], { cwd: repoPath })).stdout.trim();
+}
+
 async function dropStash(repoPath, stashSha, runner) {
   const list = (await runner("git", ["stash", "list", "--format=%H"], { cwd: repoPath })).stdout.trim().split("\n");
   const index = list.findIndex((sha) => sha === stashSha);
@@ -56,7 +60,8 @@ async function withPreservedManifest({ repoPath, manifestPath, runner = runCheck
   }
 
   let stashSha = null;
-  if (manifestStatus) {
+  const ignoredManifestStatus = await ignoredStatusFor(repoPath, relativeManifest, runner);
+  if (manifestStatus || ignoredManifestStatus) {
     await runner("git", ["stash", "push", "--all", "--message", "maestro: preserve manifest during integration", "--", relativeManifest], { cwd: repoPath });
     stashSha = (await runner("git", ["rev-parse", "refs/stash"], { cwd: repoPath })).stdout.trim();
   }

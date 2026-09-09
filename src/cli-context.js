@@ -79,7 +79,9 @@ function persistManifestCompletion({ repoPath, manifestPath, issueIds }) {
   const changed = markManifestComplete(manifestPath, issueIds);
   if (!changed.length) return { changed, committed: false };
 
-  run("git", ["add", "--", relativeManifest], repoPath);
+  // The manifest is an explicitly resolved Maestro input, so it remains safe
+  // to persist even when a repository-wide ignore rule matches its path.
+  run("git", ["add", "--force", "--", relativeManifest], repoPath);
   const message = `Advance Maestro work state: ${changed.map((issue) => `#${issue}`).join(", ")}`;
   run("git", ["commit", "-m", message, "--", relativeManifest], repoPath);
   run("git", ["push", "origin", "HEAD"], repoPath);

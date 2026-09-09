@@ -98,6 +98,27 @@ test("persistManifestCompletion commits an untracked bootstrap manifest", () => 
   assert.equal(git(repoPath, "show", "@{upstream}:.maestro.json").includes('"status": "complete"'), true);
 });
 
+test("persistManifestCompletion commits an ignored bootstrap manifest", () => {
+  const repoPath = initPushableRepo();
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  fs.writeFileSync(path.join(repoPath, ".gitignore"), ".maestro.json\n");
+  git(repoPath, "add", ".gitignore");
+  git(repoPath, "commit", "-qm", "ignore manifest");
+  git(repoPath, "push");
+  fs.writeFileSync(manifestPath, `${JSON.stringify({
+    repository: "owner/repo",
+    work: { "13": { status: "ready", notes: "preserved" } }
+  }, null, 2)}\n`);
+
+  assert.deepEqual(persistManifestCompletion({ repoPath, manifestPath, issueIds: ["13"] }), {
+    changed: ["13"],
+    committed: true
+  });
+  const persisted = JSON.parse(git(repoPath, "show", "@{upstream}:.maestro.json"));
+  assert.deepEqual(persisted.work["13"], { status: "complete", notes: "preserved" });
+  assert.equal(git(repoPath, "status", "--porcelain"), "");
+});
+
 test("persistManifestCompletion retains user-authored fields in a tracked dirty manifest", () => {
   const repoPath = initPushableRepo();
   const manifestPath = path.join(repoPath, ".maestro.json");

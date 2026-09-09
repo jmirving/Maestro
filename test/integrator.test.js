@@ -80,6 +80,25 @@ test("preserves an untracked manifest while integration runs with a clean tree",
   assert.equal(git(repoPath, "stash", "list"), "");
 });
 
+test("preserves an ignored manifest while integration runs with a clean tree", async () => {
+  const repoPath = repository();
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  const original = '{"work":{"13":{"status":"ready","notes":"keep me"}}}\n';
+  fs.writeFileSync(path.join(repoPath, ".gitignore"), ".maestro.json\n");
+  git(repoPath, "add", ".gitignore");
+  git(repoPath, "commit", "-qm", "ignore manifest");
+  fs.writeFileSync(manifestPath, original);
+
+  await withPreservedManifest({ repoPath, manifestPath }, async () => {
+    assert.equal(fs.existsSync(manifestPath), false);
+    assert.equal(git(repoPath, "status", "--porcelain"), "");
+  });
+
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), original);
+  assert.equal(git(repoPath, "status", "--porcelain", "--ignored=matching", "--", ".maestro.json"), "!! .maestro.json");
+  assert.equal(git(repoPath, "stash", "list"), "");
+});
+
 test("leaves a tracked clean manifest available during integration", async () => {
   const repoPath = repository();
   const manifestPath = path.join(repoPath, ".maestro.json");
@@ -162,6 +181,25 @@ test("keeps the recovery stash when incoming work conflicts with manifest edits"
 
   assert.match(git(repoPath, "stash", "list"), /maestro: preserve manifest during integration/);
   assert.match(git(repoPath, "status", "--porcelain"), /UU \.maestro\.json/);
+});
+
+test("keeps an ignored manifest recoverable when incoming work claims its path", async () => {
+  const repoPath = repository();
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  fs.writeFileSync(path.join(repoPath, ".gitignore"), ".maestro.json\n");
+  git(repoPath, "add", ".gitignore");
+  git(repoPath, "commit", "-qm", "ignore manifest");
+  fs.writeFileSync(manifestPath, "ignored local manifest\n");
+
+  await assert.rejects(withPreservedManifest({ repoPath, manifestPath }, async () => {
+    fs.writeFileSync(manifestPath, "incoming tracked manifest\n");
+    git(repoPath, "add", "--force", ".maestro.json");
+    git(repoPath, "commit", "-qm", "incoming manifest");
+  }), /original state remains recoverable in Git stash [a-f0-9]+/);
+
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), "incoming tracked manifest\n");
+  assert.equal(git(repoPath, "show", "stash@{0}^3:.maestro.json"), "ignored local manifest");
+  assert.match(git(repoPath, "stash", "list"), /maestro: preserve manifest during integration/);
 });
 
 test("rejects worker branches that change the manifest before merging", async () => {
