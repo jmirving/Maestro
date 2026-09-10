@@ -30,6 +30,10 @@ GitHub, Git, Codex CLI, Docker/PostgreSQL, Playwright, and future agent runtimes
 
 Manifest drafting follows the same boundary. The GitHub adapter discovers the checkout's repository and reads issue facts; the deterministic draft core merges those facts into an existing manifest without invoking workers or making provider mutations. A planning-analysis interface accepts injected advisory analyzers, while the bundled shared-label analyzer only activates for labels explicitly named in repository configuration. Hard dependency parsing is limited to explicit issue syntax and existing manifest truth. Advisory relationships retain analyzer, confidence, reason, and source provenance and never become `blockedBy` entries.
 
+### Persisted-run resolution
+
+Issue-oriented commands resolve persisted execution evidence through the shared run resolver. It can select the newest run globally, the newest run containing a requested set of issues, or the newest semantic match by lifecycle state, validator verdict, human-review disposition, run status, mode, or integration state. Callers that operate across diverged issue histories can resolve each issue independently; callers that require one common run fail clearly when the issues resolve to different runs. An explicit run ID always constrains lookup to that historical run.
+
 ## Isolation
 
 Every concurrent worker must use a separate Git branch and worktree from a recorded base SHA. Shared mutable resources such as a local test database must be explicitly coordinated by capability providers.
