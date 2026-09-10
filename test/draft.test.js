@@ -14,6 +14,15 @@ function issue(number, state = "OPEN") {
   return { number, state, title: `Issue ${number}`, body: "", labels: [] };
 }
 
+function agentAnalysis(output) {
+  return {
+    output: { version: 1, dependencies: [], conflicts: [], work: [], waves: [], unresolved: [], ...output },
+    metadata: {
+      analyzer: "agent", provider: "codex", contextDigest: "a".repeat(64), outputDigest: "b".repeat(64), attempts: 1, issueIds: ["1", "2"], files: []
+    }
+  };
+}
+
 test("creates a valid minimal manifest from open GitHub issues", () => {
   const result = proposeDraft({
     repository: "owner/repo",
@@ -126,6 +135,61 @@ test("a full refresh replaces stale output owned by an active analyzer", () => {
   assert.equal(result.changed, true);
 });
 
+test("agent recommendations merge semantically while explicit manifest truth wins", () => {
+  const result = proposeDraft({
+    repository: "owner/repo",
+    existingConfig: { repository: "owner/repo", work: { "1": { status: "ready", mode: "execute", priority: 7, requires: ["node"] } } },
+    issues: [issue(1), issue(2)],
+    agentAnalysis: agentAnalysis({
+      dependencies: [{ issue: "2", blockedBy: "1", confidence: "high", reason: "Shared abstraction must land first.", evidence: ["src/core.js", "issue #2"] }],
+      conflicts: [{ issues: ["1", "2"], confidence: "high", reason: "Both edit the core.", evidence: ["src/core.js"] }],
+      work: [
+        { issue: "1", confidence: "high", reason: "Database tests are required.", evidence: ["package.json"], mode: "research", priority: 1, requires: ["postgres"] },
+        { issue: "2", confidence: "high", reason: "Implementation work.", evidence: ["issue #2"], mode: "execute", priority: 20 }
+      ],
+      waves: [{ issues: ["1"], confidence: "high", reason: "Foundation first.", evidence: ["dependency inference"] }]
+    })
+  });
+  assert.deepEqual(result.manifest.work["1"], { status: "ready", mode: "execute", priority: 7, requires: ["node", "postgres"] });
+  assert.deepEqual(result.manifest.work["2"], { status: "ready", blockedBy: ["1"], mode: "execute", priority: 20 });
+  assert.equal(result.manifest.planning.advisoryConflicts[0].analyzer, "agent");
+  assert.equal(result.manifest.planning.agentAnalysis.contextDigest, "a".repeat(64));
+  assert.match(result.dependencySources.find((entry) => entry.issue === "2").source, /src\/core.js/);
+  assert.deepEqual(result.planning.waves, [["1"], ["2"]]);
+  assert.equal(result.writable, true);
+});
+
+test("low-confidence agent decisions remain unresolved instead of mutating hard truth", () => {
+  const result = proposeDraft({
+    repository: "owner/repo",
+    issues: [issue(1), issue(2)],
+    agentAnalysis: agentAnalysis({
+      dependencies: [{ issue: "2", blockedBy: "1", confidence: "low", reason: "Possibly ordered.", evidence: ["similar wording"] }],
+      conflicts: [{ issues: ["1", "2"], confidence: "low", reason: "Maybe overlap.", evidence: ["titles"] }],
+      work: [{ issue: "2", confidence: "low", reason: "Might require research.", evidence: ["issue body"], mode: "research" }]
+    })
+  });
+  assert.equal(result.manifest.work["2"].blockedBy, undefined);
+  assert.equal(result.manifest.work["2"].mode, undefined);
+  assert.equal(result.manifest.planning.advisoryConflicts, undefined);
+  assert.equal(result.unresolved.length, 3);
+});
+
+test("agent dependency cycles and invalid references block the proposal", () => {
+  const result = proposeDraft({
+    repository: "owner/repo",
+    issues: [issue(1), issue(2)],
+    agentAnalysis: agentAnalysis({ dependencies: [
+      { issue: "1", blockedBy: "2", confidence: "high", reason: "First edge.", evidence: ["A"] },
+      { issue: "2", blockedBy: "1", confidence: "high", reason: "Second edge.", evidence: ["B"] },
+      { issue: "2", blockedBy: "99", confidence: "high", reason: "Unknown edge.", evidence: ["C"] }
+    ] })
+  });
+  assert.equal(result.writable, false);
+  assert.match(result.diagnostics.map((entry) => entry.reason).join("\n"), /cycle detected/);
+  assert.match(result.diagnostics.map((entry) => entry.reason).join("\n"), /not present in the manifest/);
+});
+
 test("cycles and unresolved dependency references block persistence", () => {
   const missing = proposeDraft({
     repository: "owner/repo",
@@ -177,6 +241,16 @@ test("invalid existing metadata fails schema validation before it can be written
   assert.throws(() => writeManifest(path.join(tempDir(), ".maestro.json"), {
     repository: "owner/repo",
     work: { "1": {} }
+  }), /repository-config schema/);
+
+  assert.throws(() => proposeDraft({
+    repository: "owner/repo",
+    existingConfig: {
+      repository: "owner/repo",
+      work: { "1": { status: "ready" } },
+      planning: { agentAnalysis: { ...agentAnalysis({}).metadata, recommendations: { version: 1 } } }
+    },
+    issues: [issue(1)]
   }), /repository-config schema/);
 });
 
@@ -278,5 +352,66 @@ else process.exit(3);
   assert.equal(result.status, 1, result.stderr);
   assert.match(result.stdout, /Hard dependency #99 is not present/);
   assert.match(result.stdout, /Write blocked/);
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), original);
+});
+
+test("draft --agent invokes the bounded planner and writes an inspectable semantic proposal", () => {
+  const repoPath = tempDir();
+  const binPath = path.join(repoPath, "bin");
+  fs.mkdirSync(binPath);
+  assert.equal(spawnSync("git", ["init", "-q"], { cwd: repoPath }).status, 0);
+  fs.writeFileSync(path.join(binPath, "gh"), `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "repo") process.stdout.write('{"nameWithOwner":"owner/repo"}');
+else if (args[0] === "issue") process.stdout.write('[{"number":1,"state":"OPEN","title":"Core","body":"","labels":[]},{"number":2,"state":"OPEN","title":"API","body":"","labels":[]}]');
+else process.exit(3);
+`, { mode: 0o755 });
+  fs.writeFileSync(path.join(binPath, "codex"), `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const outputPath = args[args.indexOf("--output-last-message") + 1];
+fs.writeFileSync(outputPath, process.env.MAESTRO_TEST_AGENT_OUTPUT);
+`, { mode: 0o755 });
+  const plannerOutput = {
+    version: 1,
+    dependencies: [{ issue: "2", blockedBy: "1", confidence: "high", reason: "API builds on core.", evidence: ["issue titles"] }],
+    conflicts: [], work: [], waves: [{ issues: ["1"], confidence: "high", reason: "Core first.", evidence: ["dependency"] }], unresolved: []
+  };
+  const result = spawnSync(process.execPath, [path.resolve(__dirname, "../bin/maestro.js"), "draft", "--agent", "--write"], {
+    cwd: repoPath,
+    env: { ...process.env, PATH: `${binPath}${path.delimiter}${process.env.PATH}`, MAESTRO_TEST_AGENT_OUTPUT: JSON.stringify(plannerOutput) },
+    encoding: "utf8"
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Agent-assisted recommendations:/);
+  assert.match(result.stdout, /1 high-confidence hard dependencies accepted/);
+  const manifest = JSON.parse(fs.readFileSync(path.join(repoPath, ".maestro.json"), "utf8"));
+  assert.deepEqual(manifest.work["2"].blockedBy, ["1"]);
+  assert.equal(manifest.planning.agentAnalysis.recommendations.dependencies[0].reason, "API builds on core.");
+  assert.match(manifest.planning.agentAnalysis.contextDigest, /^[a-f0-9]{64}$/);
+});
+
+test("draft --agent failure leaves an existing manifest byte-for-byte untouched", () => {
+  const repoPath = tempDir();
+  const binPath = path.join(repoPath, "bin");
+  fs.mkdirSync(binPath);
+  assert.equal(spawnSync("git", ["init", "-q"], { cwd: repoPath }).status, 0);
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  const original = `${JSON.stringify({ repository: "owner/repo", work: { "1": { status: "ready" } } }, null, 2)}\n`;
+  fs.writeFileSync(manifestPath, original);
+  fs.writeFileSync(path.join(binPath, "gh"), `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "repo") process.stdout.write('{"nameWithOwner":"owner/repo"}');
+else if (args[0] === "issue") process.stdout.write('[{"number":1,"state":"OPEN","title":"One","body":"","labels":[]}]');
+else process.exit(3);
+`, { mode: 0o755 });
+  fs.writeFileSync(path.join(binPath, "codex"), "#!/usr/bin/env node\nprocess.exit(9);\n", { mode: 0o755 });
+  const result = spawnSync(process.execPath, [path.resolve(__dirname, "../bin/maestro.js"), "draft", "--agent", "--write"], {
+    cwd: repoPath,
+    env: { ...process.env, PATH: `${binPath}${path.delimiter}${process.env.PATH}` },
+    encoding: "utf8"
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Agent-assisted planning failed after 2 attempt/);
   assert.equal(fs.readFileSync(manifestPath, "utf8"), original);
 });

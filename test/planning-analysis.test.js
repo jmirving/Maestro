@@ -3,9 +3,17 @@ const assert = require("node:assert/strict");
 const {
   createSharedLabelAnalyzer,
   runAdvisoryAnalyzers,
+  runPlanningAnalyzer,
   validateDependencyGraph,
   computeExpectedWaves
 } = require("../src/planning-analysis");
+
+test("planning analysis interface supports bounded asynchronous analyzers", async () => {
+  const input = { issues: [{ id: "1" }] };
+  const result = await runPlanningAnalyzer({ name: "agent", analyze: async (received) => ({ received }) }, input);
+  assert.deepEqual(result, { received: input });
+  await assert.rejects(() => runPlanningAnalyzer({}, input), /must expose an analyze/);
+});
 
 function ready(blockedBy = []) {
   return blockedBy.length ? { status: "ready", blockedBy } : { status: "ready" };

@@ -1,7 +1,9 @@
 const Ajv2020 = require("ajv/dist/2020");
 const schema = require("../schemas/repository-config.schema.json");
+const agentPlanningOutputSchema = require("../schemas/agent-planning-output.schema.json");
 
 const ajv = new Ajv2020({ allErrors: true, strict: false });
+ajv.addSchema(agentPlanningOutputSchema);
 const validate = ajv.compile(schema);
 
 function validateRepositoryConfig(config) {

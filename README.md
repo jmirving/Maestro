@@ -56,9 +56,14 @@ maestro draft                 # review all newly eligible open issues
 maestro draft --write         # persist the schema-valid proposal
 maestro draft 101 102 --write # update only these issues; preserve all other work
 maestro draft --all           # explicitly reconsider every eligible open issue
+maestro draft --agent         # add bounded semantic recommendations to the dry run
 ```
 
 Drafting is deterministic and never starts workers or mutates GitHub. Existing work entries and manually authored `blockedBy` relationships are preserved. Previously unknown open issues are added as `ready`, while explicit `Blocked by #123` or `Depends on #123` lines become hard dependencies. The output explains the expected concurrency-bounded execution waves and the source of dependency and advisory decisions. Cycles and references to work absent from the manifest block `--write`.
+
+`--agent` opts into a planning-only Codex invocation. Maestro supplies a reproducible, size-bounded context made from selected issue data, the deterministic proposal, the tracked repository tree, and prioritized excerpts from `AGENTS.md`, `README.md`, `docs/`, schemas, package metadata, and source. The analyzer runs read-only and ephemerally in a temporary directory, with Codex and Maestro both enforcing the structured JSON schema and its evidence/confidence requirements. It has a 120-second timeout, one retry, a 200-issue/64 KiB issue budget, a 96 KiB source-context budget, and a 256 KiB output limit. Larger queues must be selected in smaller explicit batches.
+
+Agent output never starts work or writes directly. Existing manifest values and explicit issue dependencies take precedence. Only high-confidence semantic dependencies enter the proposed `blockedBy` graph; medium- and low-confidence dependency suggestions and all low-confidence work/conflict suggestions remain unresolved for review. References and cycles are validated after merging, and any invocation, schema, reference, or graph failure leaves the existing manifest untouched. Accepted recommendations and non-secret context/output digests are visible in the draft and persisted under `planning.agentAnalysis` only when the user supplies `--write`.
 
 Advisory overlap is stored separately under `planning.advisoryConflicts`; it can serialize likely-conflicting work without inventing a product dependency. Analyzers are pluggable in the deterministic draft core. The built-in analyzer is opt-in and only considers repository-configured labels:
 

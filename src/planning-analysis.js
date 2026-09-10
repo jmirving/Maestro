@@ -84,6 +84,13 @@ function runAdvisoryAnalyzers({ analyzers = [], issues = [], manifest }) {
   return [...unique.values()].sort((a, b) => relationshipKey(a).localeCompare(relationshipKey(b)) || a.source.localeCompare(b.source));
 }
 
+async function runPlanningAnalyzer(analyzer, input) {
+  if (!analyzer || typeof analyzer.analyze !== "function") {
+    throw new Error("Planning analyzers must expose an analyze(input) function.");
+  }
+  return analyzer.analyze(input);
+}
+
 function validateDependencyGraph(work = {}) {
   const ids = new Set(Object.keys(work).map(String));
   const diagnostics = [];
@@ -212,6 +219,7 @@ module.exports = {
   configuredAnalyzers,
   createSharedLabelAnalyzer,
   runAdvisoryAnalyzers,
+  runPlanningAnalyzer,
   validateDependencyGraph,
   validateAdvisoryReferences,
   computeExpectedWaves,

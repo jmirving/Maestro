@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://maestro.local/schemas/agent-planning-output.schema.json",
+  "title": "Maestro agent planning recommendations",
+  "type": "object",
+  "required": ["version", "dependencies", "conflicts", "work", "waves", "unresolved"],
+  "properties": {
+    "version": { "const": 1 },
+    "dependencies": { "type": "array", "items": { "$ref": "#/$defs/dependency" } },
+    "conflicts": { "type": "array", "items": { "$ref": "#/$defs/conflict" } },
+    "work": { "type": "array", "items": { "$ref": "#/$defs/work" } },
+    "waves": { "type": "array", "items": { "$ref": "#/$defs/wave" } },
+    "unresolved": { "type": "array", "items": { "$ref": "#/$defs/unresolved" } }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "confidence": { "enum": ["low", "medium", "high"] },
+    "evidence": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "maxItems": 8 },
+    "dependency": {
+      "type": "object",
+      "required": ["issue", "blockedBy", "confidence", "reason", "evidence"],
+      "properties": {
+        "issue": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+        "blockedBy": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "reason": { "type": "string", "minLength": 1 },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      },
+      "additionalProperties": false
+    },
+    "conflict": {
+      "type": "object",
+      "required": ["issues", "confidence", "reason", "evidence"],
+      "properties": {
+        "issues": { "type": "array", "items": { "type": "string", "pattern": "^[1-9][0-9]*$" }, "minItems": 2, "maxItems": 2 },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "reason": { "type": "string", "minLength": 1 },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      },
+      "additionalProperties": false
+    },
+    "work": {
+      "type": "object",
+      "required": ["issue", "confidence", "reason", "evidence"],
+      "properties": {
+        "issue": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "reason": { "type": "string", "minLength": 1 },
+        "evidence": { "$ref": "#/$defs/evidence" },
+        "mode": { "enum": ["execute", "research", "validate"] },
+        "requires": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "priority": { "type": "number" },
+        "humanGate": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "wave": {
+      "type": "object",
+      "required": ["issues", "confidence", "reason", "evidence"],
+      "properties": {
+        "issues": { "type": "array", "items": { "type": "string", "pattern": "^[1-9][0-9]*$" }, "minItems": 1, "uniqueItems": true },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "reason": { "type": "string", "minLength": 1 },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      },
+      "additionalProperties": false
+    },
+    "unresolved": {
+      "type": "object",
+      "required": ["issue", "question", "reason", "evidence"],
+      "properties": {
+        "issue": { "type": ["string", "null"], "pattern": "^[1-9][0-9]*$" },
+        "question": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1 },
+        "evidence": { "type": "array", "items": { "type": "string", "minLength": 1 }, "maxItems": 8 }
+      },
+      "additionalProperties": false
+    }
+  }
+}

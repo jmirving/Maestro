@@ -42,6 +42,33 @@
             },
             "additionalProperties": false
           }
+        },
+        "agentAnalysis": {
+          "type": "object",
+          "required": ["analyzer", "provider", "contextDigest", "outputDigest", "attempts", "issueIds", "files", "recommendations"],
+          "properties": {
+            "analyzer": { "const": "agent" },
+            "provider": { "type": "string", "minLength": 1 },
+            "contextDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "outputDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "attempts": { "type": "integer", "minimum": 1 },
+            "issueIds": { "type": "array", "items": { "type": "string", "pattern": "^[1-9][0-9]*$" }, "uniqueItems": true },
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["path", "sha256", "truncated"],
+                "properties": {
+                  "path": { "type": "string", "minLength": 1 },
+                  "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                  "truncated": { "type": "boolean" }
+                },
+                "additionalProperties": false
+              }
+            },
+            "recommendations": { "$ref": "https://maestro.local/schemas/agent-planning-output.schema.json" }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false

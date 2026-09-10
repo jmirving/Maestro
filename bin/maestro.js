@@ -12,6 +12,8 @@ const { latestRunId, loadRunState } = require("../src/run-store");
 const { statusSnapshot, formatStatus, watchStatus } = require("../src/display");
 const { discoverGitHubRepository, loadGitHubIssues } = require("../src/github");
 const { proposeDraft, formatDraftSummary, readExistingManifest, writeManifest } = require("../src/draft");
+const { createAgentPlanner } = require("../src/agent-planner");
+const { runPlanningAnalyzer } = require("../src/planning-analysis");
 const {
   normalizeCommand,
   resolveRepoPath,
@@ -24,7 +26,7 @@ const {
 function usage() {
   console.error(`Usage:
   maestro plan [manifest.json] [--repo-path <path>]
-  maestro draft [manifest.json] [issue ...] [--repo-path <path>] [--all] [--write]
+  maestro draft [manifest.json] [issue ...] [--repo-path <path>] [--all] [--agent] [--write]
   maestro start [manifest.json] [--repo-path <path>] [--rerun]
   maestro status [manifest.json] [--repo-path <path>] [--watch]
   maestro output [--repo-path <path>]
@@ -185,12 +187,42 @@ async function main() {
     }
     const repository = await discoverGitHubRepository(repoPath);
     const issues = await loadGitHubIssues(repository, requestedIssues, { repoPath });
-    const result = proposeDraft({
+    const existingConfig = readExistingManifest(manifestPath);
+    const deterministicResult = proposeDraft({
       repository,
-      existingConfig: readExistingManifest(manifestPath),
+      existingConfig,
       issues,
       selectedIssueIds: requestedIssues
     });
+    let agentAnalysis = null;
+    if (args.includes("--agent")) {
+      const contextManifest = JSON.parse(JSON.stringify(deterministicResult.manifest));
+      if (contextManifest.planning?.agentAnalysis) delete contextManifest.planning.agentAnalysis;
+      if (contextManifest.planning?.advisoryConflicts) {
+        contextManifest.planning.advisoryConflicts = contextManifest.planning.advisoryConflicts.filter((conflict) => conflict.analyzer !== "agent");
+        if (!contextManifest.planning.advisoryConflicts.length) delete contextManifest.planning.advisoryConflicts;
+      }
+      if (contextManifest.planning && !Object.keys(contextManifest.planning).length) delete contextManifest.planning;
+      agentAnalysis = await runPlanningAnalyzer(createAgentPlanner(), {
+        repoPath,
+        repository,
+        issues,
+        manifest: contextManifest,
+        deterministicFindings: {
+          dependencies: deterministicResult.dependencySources,
+          conflicts: deterministicResult.inferredConflicts.filter((conflict) => conflict.analyzer !== "agent"),
+          unresolved: deterministicResult.unresolved,
+          expectedWaves: deterministicResult.planning.waves
+        }
+      });
+    }
+    const result = agentAnalysis ? proposeDraft({
+      repository,
+      existingConfig,
+      issues,
+      selectedIssueIds: requestedIssues,
+      agentAnalysis
+    }) : deterministicResult;
     const write = args.includes("--write");
     process.stdout.write(formatDraftSummary({ repository, manifestPath, result, write }));
     if (write && !result.writable) {

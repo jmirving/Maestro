@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const { validateRepositoryConfig } = require("./config-validator");
+const { validateAgentOutput } = require("./agent-planner");
 const {
   configuredAnalyzers,
   runAdvisoryAnalyzers,
@@ -36,7 +37,11 @@ function conflictKey(conflict) {
   return [...conflict.issues].map(String).sort(issueOrder).join(":") + `:${conflict.analyzer}:${conflict.source}`;
 }
 
-function proposeDraft({ repository, existingConfig = null, issues = [], selectedIssueIds = [], analyzers = null }) {
+function agentSource(agentAnalysis, recommendation) {
+  return `agent:${agentAnalysis.metadata.provider} context:${agentAnalysis.metadata.contextDigest.slice(0, 12)}; evidence: ${recommendation.evidence.join(" | ")}`;
+}
+
+function proposeDraft({ repository, existingConfig = null, issues = [], selectedIssueIds = [], analyzers = null, agentAnalysis = null }) {
   if (existingConfig?.repository && existingConfig.repository !== repository) {
     throw new Error(`The existing manifest targets ${existingConfig.repository}, but the current checkout is ${repository}.`);
   }
@@ -44,6 +49,7 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
   if (existingConfig) validateRepositoryConfig(existingConfig);
 
   const manifest = existingConfig ? clone(existingConfig) : { repository, work: {} };
+  const existingWorkIds = new Set(Object.keys(existingConfig?.work || {}));
   const selected = new Set(selectedIssueIds.map(String));
   const seen = new Set();
   const ambiguous = new Set();
@@ -103,10 +109,107 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
     if (dependenciesChanged) manifest.work[id].blockedBy = currentDependencies;
   }
 
+  const agentUnresolved = [];
+  const agentDiagnostics = [];
+  const acceptedAgentDependencies = [];
+  const acceptedAgentConflicts = [];
+  if (agentAnalysis) {
+    validateAgentOutput(agentAnalysis.output);
+    const known = new Set(Object.keys(manifest.work));
+    const analyzed = new Set(normalized.filter(({ id, issue }) => !ambiguous.has(id) && String(issue.state).toUpperCase() === "OPEN").map(({ id }) => id));
+    const checkKnown = (id, description) => {
+      if (known.has(String(id))) return true;
+      agentDiagnostics.push({ issue: String(id), reason: `Agent ${description} references work not present in the manifest.` });
+      return false;
+    };
+    const checkTarget = (id, description) => {
+      if (analyzed.has(String(id))) return true;
+      agentDiagnostics.push({ issue: String(id), reason: `Agent ${description} targets an issue outside the bounded candidate set.` });
+      return false;
+    };
+
+    for (const recommendation of agentAnalysis.output.dependencies) {
+      const validTarget = checkTarget(recommendation.issue, "dependency");
+      const validDependency = checkKnown(recommendation.blockedBy, "dependency");
+      const valid = validTarget && validDependency;
+      if (recommendation.issue === recommendation.blockedBy) {
+        agentDiagnostics.push({ issue: recommendation.issue, reason: "Agent dependency cannot make an issue depend on itself." });
+        continue;
+      }
+      if (!valid) continue;
+      if (recommendation.confidence !== "high") {
+        agentUnresolved.push({ issue: recommendation.issue, reason: `Agent suggested #${recommendation.issue} depend on #${recommendation.blockedBy} at ${recommendation.confidence} confidence: ${recommendation.reason}` });
+        continue;
+      }
+      const blockedBy = (manifest.work[recommendation.issue].blockedBy || []).map(String);
+      const addedDependency = !blockedBy.includes(recommendation.blockedBy);
+      if (addedDependency) {
+        blockedBy.push(recommendation.blockedBy);
+        manifest.work[recommendation.issue].blockedBy = blockedBy;
+      }
+      const source = agentSource(agentAnalysis, recommendation);
+      const existingSource = dependencySources.find((entry) => entry.issue === recommendation.issue && entry.dependency === recommendation.blockedBy);
+      if (existingSource) existingSource.source = `${existingSource.source}; ${source}`;
+      else dependencySources.push({ issue: recommendation.issue, dependency: recommendation.blockedBy, source, added: addedDependency });
+      acceptedAgentDependencies.push(recommendation);
+    }
+
+    for (const recommendation of agentAnalysis.output.work) {
+      if (!checkTarget(recommendation.issue, "work recommendation")) continue;
+      if (recommendation.confidence === "low") {
+        agentUnresolved.push({ issue: recommendation.issue, reason: `Low-confidence agent work recommendation: ${recommendation.reason}` });
+        continue;
+      }
+      const item = manifest.work[recommendation.issue];
+      if (recommendation.mode && item.mode == null) item.mode = recommendation.mode;
+      if (recommendation.priority != null && item.priority == null) item.priority = recommendation.priority;
+      if (recommendation.requires?.length) item.requires = [...new Set([...(item.requires || []), ...recommendation.requires])];
+      if (recommendation.humanGate && !existingWorkIds.has(recommendation.issue) && item.humanGate == null) {
+        item.status = "human_gate";
+        item.humanGate = recommendation.humanGate;
+      } else if (recommendation.humanGate && item.humanGate !== recommendation.humanGate) {
+        agentUnresolved.push({ issue: recommendation.issue, reason: `Agent recommends human gate "${recommendation.humanGate}", but existing manifest state takes precedence.` });
+      }
+    }
+
+    for (const recommendation of agentAnalysis.output.conflicts) {
+      const valid = recommendation.issues.map((id) => checkKnown(id, "conflict")).every(Boolean);
+      if (recommendation.issues[0] === recommendation.issues[1]) {
+        agentDiagnostics.push({ issue: recommendation.issues[0], reason: "Agent conflict must reference two different issues." });
+        continue;
+      }
+      if (!valid) continue;
+      if (recommendation.confidence === "low") {
+        agentUnresolved.push({ issue: recommendation.issues[0], reason: `Low-confidence conflict with #${recommendation.issues[1]}: ${recommendation.reason}` });
+        continue;
+      }
+      acceptedAgentConflicts.push({
+        issues: [...recommendation.issues].map(String).sort(issueOrder),
+        confidence: recommendation.confidence,
+        source: agentSource(agentAnalysis, recommendation),
+        reason: recommendation.reason,
+        analyzer: "agent"
+      });
+    }
+    for (const recommendation of agentAnalysis.output.waves) {
+      recommendation.issues.forEach((id) => checkKnown(id, "wave recommendation"));
+      if (recommendation.confidence === "low") agentUnresolved.push({ issue: recommendation.issues[0], reason: `Low-confidence execution-wave recommendation: ${recommendation.reason}` });
+    }
+    for (const item of agentAnalysis.output.unresolved) {
+      if (item.issue != null) checkKnown(item.issue, "unresolved question");
+      agentUnresolved.push({ issue: item.issue, reason: `${item.question} ${item.reason}` });
+    }
+    manifest.planning = {
+      ...(manifest.planning || {}),
+      agentAnalysis: { ...agentAnalysis.metadata, recommendations: agentAnalysis.output }
+    };
+  }
+
   const activeAnalyzers = analyzers == null ? configuredAnalyzers(manifest) : analyzers;
-  const inferredConflicts = runAdvisoryAnalyzers({ analyzers: activeAnalyzers, issues: normalized, manifest });
+  const inferredConflicts = [...runAdvisoryAnalyzers({ analyzers: activeAnalyzers, issues: normalized, manifest }), ...acceptedAgentConflicts];
   const existingConflicts = manifest.planning?.advisoryConflicts || [];
   const activeAnalyzerNames = new Set(activeAnalyzers.map((analyzer) => analyzer.name || "custom"));
+  if (agentAnalysis) activeAnalyzerNames.add("agent");
   const analyzedIssueIds = new Set(normalized.map(({ id }) => id));
   const retainedConflicts = existingConflicts.filter((conflict) => {
     if (!activeAnalyzerNames.has(conflict.analyzer)) return true;
@@ -115,7 +218,7 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
   });
   const conflictsByKey = new Map(retainedConflicts.map((conflict) => [conflictKey(conflict), conflict]));
   for (const conflict of inferredConflicts) conflictsByKey.set(conflictKey(conflict), conflict);
-  const advisoryConflicts = activeAnalyzers.length
+  const advisoryConflicts = activeAnalyzers.length || agentAnalysis
     ? [...conflictsByKey.values()].sort((a, b) => conflictKey(a).localeCompare(conflictKey(b)))
     : existingConflicts;
   if (advisoryConflicts.length) {
@@ -129,10 +232,13 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
     if (!seen.has(id)) unresolved.push({ issue: id, reason: "GitHub did not return the selected issue." });
   }
 
+  unresolved.push(...agentUnresolved);
+
   validateRepositoryConfig(manifest);
   const diagnostics = [
     ...validateDependencyGraph(manifest.work),
-    ...validateAdvisoryReferences(manifest.work, advisoryConflicts)
+    ...validateAdvisoryReferences(manifest.work, advisoryConflicts),
+    ...agentDiagnostics
   ];
   const planning = computeExpectedWaves(manifest);
   added.sort((a, b) => Number(a) - Number(b) || a.localeCompare(b));
@@ -145,9 +251,11 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
     diagnostics,
     dependencySources,
     inferredConflicts,
+    agentRecommendations: agentAnalysis?.output || null,
+    acceptedAgentDependencies,
     planning,
     created: !existingConfig,
-    changed: !existingConfig || added.length > 0 || dependencySources.some((entry) => entry.added) || JSON.stringify(existingConflicts) !== JSON.stringify(advisoryConflicts),
+    changed: !existingConfig || JSON.stringify(existingConfig) !== JSON.stringify(manifest),
     writable: diagnostics.length === 0
   };
 }
@@ -160,7 +268,7 @@ function formatDraftSummary({ repository, manifestPath, result, write }) {
   ];
   if (result.created) lines.push("  + create manifest");
   if (result.added.length) {
-    for (const id of result.added) lines.push(`  + #${id} ready`);
+    for (const id of result.added) lines.push(`  + #${id} ${result.manifest.work[id].status}`);
   } else if (!result.created) {
     lines.push("  (no changes)");
   }
@@ -178,6 +286,16 @@ function formatDraftSummary({ repository, manifestPath, result, write }) {
     lines.push("Advisory conflict risk:");
     for (const conflict of result.inferredConflicts) {
       lines.push(`  ~ #${conflict.issues[0]} / #${conflict.issues[1]}: ${conflict.reason} (${conflict.confidence}; ${conflict.source})`);
+    }
+  }
+  if (result.agentRecommendations) {
+    lines.push("Agent-assisted recommendations:");
+    lines.push(`  ${result.acceptedAgentDependencies.length} high-confidence hard dependencies accepted into the proposal.`);
+    for (const recommendation of result.agentRecommendations.work) {
+      lines.push(`  ~ #${recommendation.issue}: ${recommendation.reason} (${recommendation.confidence}; ${recommendation.evidence.join(" | ")})`);
+    }
+    for (const recommendation of result.agentRecommendations.waves) {
+      lines.push(`  ~ suggested wave ${recommendation.issues.map((id) => `#${id}`).join(", ")}: ${recommendation.reason} (${recommendation.confidence})`);
     }
   }
   lines.push("Expected execution waves:");

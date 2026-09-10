@@ -20,6 +20,10 @@ Maestro normalizes target work into:
 
 A proposal is schema-validated and its dependency graph is checked before it can be written. Unknown dependency references and cycles fail closed with actionable diagnostics. Closed, malformed, duplicate, or otherwise unsafe issue records remain unresolved for human attention rather than being interpreted semantically.
 
+Agent-assisted drafting is an explicit `--agent` planning strategy. It receives bounded repository and issue context after deterministic drafting, returns structured recommendations through the common planning-analysis interface, and never invokes workers or mutates GitHub. Deterministic and manually curated manifest values have precedence. Only high-confidence inferred hard dependencies are proposed; lower-confidence dependencies and low-confidence work or overlap recommendations are reported as unresolved. All inferred references and the merged graph are validated before `--write` is allowed.
+
+The provider adapter enforces context, timeout, retry, and output-size bounds. A successful written proposal records recommendation evidence plus hashes of the exact context, output, and included tracked files under `planning.agentAnalysis`. Invocation or validation failure happens before persistence and therefore leaves the manifest byte-for-byte unchanged.
+
 ## Capability requirements
 
 A work item may require named capabilities such as:
