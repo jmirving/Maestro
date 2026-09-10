@@ -35,7 +35,9 @@ async function executeReworkRun(config, {
   const requested = issueIds ? new Set(issueIds.map(String)) : null;
   const candidates = (source.workers || []).filter((worker) => {
     const issue = String(worker.issue);
-    return (!requested || requested.has(issue)) && validationByIssue.get(issue)?.verdict === "rework";
+    const validationRequiresRework = validationByIssue.get(issue)?.verdict === "rework";
+    const humanRequestedRework = source.reviews?.[issue]?.disposition === "rework-original";
+    return (!requested || requested.has(issue)) && (validationRequiresRework || humanRequestedRework);
   });
   if (!candidates.length) throw new Error(`Run ${sourceRunId} has no selected REWORK issues.`);
 

@@ -67,8 +67,16 @@ async function reconstructLegacyRun(repoPath, runId, runner = runChecked) {
   const validations = [];
   for (const issue of issues) {
     const worktreePath = path.join(path.dirname(reportRoot), `${issue}-${runId}`);
-    const branch = (await runner("git", ["branch", "--show-current"], { cwd: worktreePath })).stdout.trim();
-    const headSha = (await runner("git", ["rev-parse", "HEAD"], { cwd: worktreePath })).stdout.trim();
+    let branch = null;
+    let headSha = null;
+    try {
+      branch = (await runner("git", ["branch", "--show-current"], { cwd: worktreePath })).stdout.trim() || null;
+      headSha = (await runner("git", ["rev-parse", "HEAD"], { cwd: worktreePath })).stdout.trim() || null;
+    } catch {
+      // Legacy reports are sufficient to reconstruct scheduling state. Their
+      // disposable worktrees may already have been removed, so Git metadata is
+      // best-effort and must not make status/start/next unusable.
+    }
     const workerReportName = reports.find((entry) => entry.issue === issue && entry.kind === "worker")?.name;
     const validatorReportName = reports.find((entry) => entry.issue === issue && entry.kind === "validator")?.name;
     const workerReport = workerReportName ? await fs.readFile(path.join(reportRoot, workerReportName), "utf8") : "";

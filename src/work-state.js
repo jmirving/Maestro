@@ -58,7 +58,10 @@ function classifyRunIssue(state, worker) {
     return { state: "awaiting-rework", action: `maestro rework --run ${state.runId}` };
   }
   if (validation?.verdict === "human_gate") {
-    return { state: "awaiting-human-review", action: `maestro review --run ${state.runId} --issue ${issue}` };
+    return {
+      state: "awaiting-human-review",
+      action: `maestro review --run ${state.runId} --issue ${issue} --disposition rework-original`
+    };
   }
   if (validation?.verdict === "approve") {
     return { state: "awaiting-human-review", action: `maestro approve ${issue} --run ${state.runId}` };
