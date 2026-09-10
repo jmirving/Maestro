@@ -62,6 +62,12 @@ Continuous execution pauses when:
 - a live or destructive mutation lacks explicit authorization;
 - configured retry limits are exhausted.
 
+## Effective scheduling state
+
+The manifest expresses repository intent, while persisted runs express execution lifecycle. Before `start` or `next`, Maestro overlays all persisted original and child runs and active isolated worktrees onto the dependency plan. A manifest-ready issue is deferred while any current run records it as running, awaiting validation or human review, awaiting rework, approved but not integrated, or integrated but not yet recorded complete in the manifest. Other genuinely ready work may still fill available concurrency; active workers consume concurrency until they finish.
+
+An intentional retry must use the explicit `--rerun` option. Editing or leaving a manifest item as `ready` does not silently discard its execution history.
+
 ## Parallelism
 
 Parallel scheduling requires dependency independence, acceptable advisory conflict risk, and capacity. Persisted advisory conflicts can reduce the selected wave but remain distinct from product dependencies; merge/integration remains serialized.

@@ -14,6 +14,8 @@ test("formatStatus renders run and backlog state compactly", () => {
     ready: ["47", "56", "57"],
     blocked: ["46"],
     complete: ["31", "34"],
+    deferred: [],
+    recommendations: [],
     humanGates: []
   });
 
@@ -22,4 +24,23 @@ test("formatStatus renders run and backlog state compactly", () => {
   assert.match(text, /#56\s+validated approve/);
   assert.match(text, /NEXT\s+#47, #56/);
   assert.match(text, /COMPLETE\s+#31, #34/);
+});
+
+test("formatStatus recommends settling deferred work when nothing new can start", () => {
+  const text = formatStatus({
+    repository: "example/repo",
+    runId: "20260910010101-aaaaaa",
+    runIssues: [{ issue: "7", status: "validated rework" }],
+    selected: [],
+    ready: [],
+    blocked: [],
+    complete: [],
+    deferred: [{ id: "7", lifecycle: { state: "awaiting-rework" } }],
+    recommendations: ["maestro rework --run 20260910010101-aaaaaa"],
+    humanGates: []
+  });
+
+  assert.match(text, /IN FLIGHT\s+#7 \(awaiting-rework\)/);
+  assert.match(text, /CURRENT WORK MUST BE SETTLED/);
+  assert.match(text, /maestro rework --run 20260910010101-aaaaaa/);
 });

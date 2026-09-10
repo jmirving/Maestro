@@ -26,6 +26,24 @@ async function latestRunId(repoPath) {
   return runIds.sort().at(-1);
 }
 
+async function loadPersistedRunStates(repoPath) {
+  const reportRoot = reportRootForRepo(repoPath);
+  let names;
+  try {
+    names = await fs.readdir(reportRoot);
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
+
+  const stateRunIds = names
+    .map((name) => name.match(/^run-(\d{14}-[a-f0-9]+)\.json$/)?.[1])
+    .filter(Boolean);
+  const reportRunIds = names.map(parseReportName).filter(Boolean).map((entry) => entry.runId);
+  const runIds = [...new Set([...stateRunIds, ...reportRunIds])].sort();
+  return Promise.all(runIds.map((runId) => loadRunState(repoPath, runId)));
+}
+
 async function saveRunState(repoPath, runId, state) {
   const file = statePath(repoPath, runId);
   await fs.mkdir(path.dirname(file), { recursive: true });
@@ -71,4 +89,4 @@ async function loadRunState(repoPath, runId) {
   }
 }
 
-module.exports = { statePath, latestRunId, saveRunState, loadRunState, reconstructLegacyRun };
+module.exports = { statePath, latestRunId, loadPersistedRunStates, saveRunState, loadRunState, reconstructLegacyRun };

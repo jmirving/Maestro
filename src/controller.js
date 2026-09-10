@@ -35,6 +35,7 @@ async function dryRun(config, { repoPath }) {
 async function executeRun(config, {
   repoPath,
   runId = newRunId(),
+  plan = computePlan(config),
   workerExecutor = executeWorker,
   validatorExecutor = validateWorker,
   worktreeFactory = prepareWorktree,
@@ -42,43 +43,63 @@ async function executeRun(config, {
   baselineRunner,
   stateSaver = saveRunState
 } = {}) {
-  const plan = computePlan(config);
   if (!plan.selected.length) return { runId, mode: "execute", plan, baseline: null, preflights: [], workers: [], validations: [] };
 
-  // Fail fast on missing runtime capabilities before spending minutes on the
-  // expensive repository baseline. A missing database/browser/etc. is an
-  // environment problem, not useful baseline evidence.
-  console.error(`[Maestro] run ${runId}: capability preflight`);
-  const preflights = await runPreflights(config, plan.selected, { cwd: repoPath, runner: preflightRunner });
-  console.error(`[Maestro] run ${runId}: baseline validation`);
-  const baseline = await captureBaseline(config, { cwd: repoPath, runner: baselineRunner });
-  console.error(`[Maestro] run ${runId}: preparing ${plan.selected.length} worker(s)`);
-
-  const prepared = [];
-  for (const item of plan.selected) {
-    prepared.push({
-      item,
-      worktree: await worktreeFactory({ repoPath, item, runId, defaultBranch: config.defaultBranch || "main" })
-    });
-  }
-
-  console.error(`[Maestro] run ${runId}: workers running`);
-  const workers = await Promise.all(prepared.map(({ item, worktree }) => workerExecutor({
-    repository: config.repository,
-    item,
-    worktree,
-    runId
-  })));
-
-  console.error(`[Maestro] run ${runId}: validating changed branches`);
-  const validations = await Promise.all(workers
-    .filter((worker) => worker.exitCode === 0 && worker.headSha !== worker.baseSha)
-    .map((worker) => validatorExecutor({ repository: config.repository, worker, baseline, runId })));
-
-  const result = { runId, mode: "execute", repoPath, plan, baseline, preflights, workers, validations, reviews: {} };
+  const result = {
+    runId,
+    mode: "execute",
+    status: "running",
+    repoPath,
+    plan,
+    baseline: null,
+    preflights: [],
+    workers: [],
+    validations: [],
+    reviews: {}
+  };
   await stateSaver(repoPath, runId, result);
-  console.error(`[Maestro] run ${runId}: complete`);
-  return result;
+
+  try {
+    // Fail fast on missing runtime capabilities before spending minutes on the
+    // expensive repository baseline. A missing database/browser/etc. is an
+    // environment problem, not useful baseline evidence.
+    console.error(`[Maestro] run ${runId}: capability preflight`);
+    result.preflights = await runPreflights(config, plan.selected, { cwd: repoPath, runner: preflightRunner });
+    console.error(`[Maestro] run ${runId}: baseline validation`);
+    result.baseline = await captureBaseline(config, { cwd: repoPath, runner: baselineRunner });
+    console.error(`[Maestro] run ${runId}: preparing ${plan.selected.length} worker(s)`);
+
+    const prepared = [];
+    for (const item of plan.selected) {
+      prepared.push({
+        item,
+        worktree: await worktreeFactory({ repoPath, item, runId, defaultBranch: config.defaultBranch || "main" })
+      });
+    }
+
+    console.error(`[Maestro] run ${runId}: workers running`);
+    result.workers = await Promise.all(prepared.map(({ item, worktree }) => workerExecutor({
+      repository: config.repository,
+      item,
+      worktree,
+      runId
+    })));
+
+    console.error(`[Maestro] run ${runId}: validating changed branches`);
+    result.validations = await Promise.all(result.workers
+      .filter((worker) => worker.exitCode === 0 && worker.headSha !== worker.baseSha)
+      .map((worker) => validatorExecutor({ repository: config.repository, worker, baseline: result.baseline, runId })));
+
+    result.status = "awaiting-review";
+    await stateSaver(repoPath, runId, result);
+    console.error(`[Maestro] run ${runId}: complete`);
+    return result;
+  } catch (error) {
+    result.status = "failed";
+    result.failure = error.message;
+    await stateSaver(repoPath, runId, result);
+    throw error;
+  }
 }
 
 async function executeAndIntegrate(config, options = {}) {

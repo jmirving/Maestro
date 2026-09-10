@@ -46,7 +46,7 @@ test("executeRun preflights once, creates isolated worktrees, runs workers, vali
       validatorCalls.push(worker.issue);
       return { issue: worker.issue, exitCode: 0, verdict: "approve" };
     },
-    stateSaver: async (repoPath, runId, state) => saved.push({ repoPath, runId, state })
+    stateSaver: async (repoPath, runId, state) => saved.push({ repoPath, runId, state: structuredClone(state) })
   });
 
   assert.equal(preflightCalls.length, 1);
@@ -55,7 +55,23 @@ test("executeRun preflights once, creates isolated worktrees, runs workers, vali
   assert.deepEqual(validatorCalls, ["1", "2"]);
   assert.deepEqual(result.workers.map((entry) => entry.headSha), ["head-1", "head-2"]);
   assert.deepEqual(result.validations.map((entry) => entry.verdict), ["approve", "approve"]);
-  assert.equal(saved.length, 1);
+  assert.equal(saved.length, 2);
   assert.equal(saved[0].runId, "run-1");
-  assert.deepEqual(saved[0].state.reviews, {});
+  assert.equal(saved[0].state.status, "running");
+  assert.deepEqual(saved[0].state.workers, []);
+  assert.equal(saved[1].state.status, "awaiting-review");
+  assert.deepEqual(saved[1].state.reviews, {});
+});
+
+test("executeRun persists a failed lifecycle that requires an explicit retry", async () => {
+  const saved = [];
+  await assert.rejects(executeRun(config, {
+    repoPath: "/target",
+    runId: "run-failed",
+    preflightRunner: async () => { throw new Error("node missing"); },
+    stateSaver: async (repoPath, runId, state) => saved.push({ repoPath, runId, state: structuredClone(state) })
+  }), /Required capability 'node' failed preflight/);
+
+  assert.deepEqual(saved.map((entry) => entry.state.status), ["running", "failed"]);
+  assert.match(saved[1].state.failure, /Required capability 'node' failed preflight/);
 });

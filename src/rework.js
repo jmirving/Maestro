@@ -44,57 +44,68 @@ async function executeReworkRun(config, {
     return { id: String(worker.issue), ...configured, mode: "rework" };
   });
 
-  console.error(`[Maestro] rework ${runId} from ${sourceRunId}: capability preflight`);
-  const preflights = await runPreflights(config, items, { cwd: repoPath, runner: preflightRunner });
-  console.error(`[Maestro] rework ${runId}: baseline validation`);
-  const baseline = await captureBaseline(config, { cwd: repoPath, runner: baselineRunner });
-
-  const refreshed = [];
-  for (const worker of candidates) {
-    console.error(`[Maestro] rework #${worker.issue}: rebasing existing implementation onto current ${config.defaultBranch || "main"}`);
-    refreshed.push(await refreshWorker(worker, { defaultBranch: config.defaultBranch || "main", runner }));
-  }
-
-  const workers = await Promise.all(refreshed.map((worker) => {
-    const issue = String(worker.issue);
-    const item = items.find((entry) => String(entry.id) === issue);
-    const priorValidation = validationByIssue.get(issue);
-    return workerExecutor({
-      repository: config.repository,
-      item,
-      worktree: {
-        repoRoot: repoPath,
-        baseSha: worker.baseSha,
-        branch: worker.branch,
-        worktreePath: worker.worktreePath
-      },
-      runId,
-      correctionContext: {
-        sourceRunId,
-        priorWorkerReport: worker.report || "",
-        validatorReport: priorValidation?.report || ""
-      }
-    });
-  }));
-
-  const validations = await Promise.all(workers
-    .filter((worker) => worker.exitCode === 0 && worker.headSha !== worker.baseSha)
-    .map((worker) => validatorExecutor({ repository: config.repository, worker, baseline, runId })));
-
   const result = {
     runId,
     parentRunId: sourceRunId,
     mode: "rework",
+    status: "running",
     repoPath,
     plan: { selected: items },
-    baseline,
-    preflights,
-    workers,
-    validations,
+    baseline: null,
+    preflights: [],
+    workers: [],
+    validations: [],
     reviews: {}
   };
   await stateSaver(repoPath, runId, result);
-  return result;
+
+  try {
+    console.error(`[Maestro] rework ${runId} from ${sourceRunId}: capability preflight`);
+    result.preflights = await runPreflights(config, items, { cwd: repoPath, runner: preflightRunner });
+    console.error(`[Maestro] rework ${runId}: baseline validation`);
+    result.baseline = await captureBaseline(config, { cwd: repoPath, runner: baselineRunner });
+
+    const refreshed = [];
+    for (const worker of candidates) {
+      console.error(`[Maestro] rework #${worker.issue}: rebasing existing implementation onto current ${config.defaultBranch || "main"}`);
+      refreshed.push(await refreshWorker(worker, { defaultBranch: config.defaultBranch || "main", runner }));
+    }
+
+    result.workers = await Promise.all(refreshed.map((worker) => {
+      const issue = String(worker.issue);
+      const item = items.find((entry) => String(entry.id) === issue);
+      const priorValidation = validationByIssue.get(issue);
+      return workerExecutor({
+        repository: config.repository,
+        item,
+        worktree: {
+          repoRoot: repoPath,
+          baseSha: worker.baseSha,
+          branch: worker.branch,
+          worktreePath: worker.worktreePath
+        },
+        runId,
+        correctionContext: {
+          sourceRunId,
+          priorWorkerReport: worker.report || "",
+          validatorReport: priorValidation?.report || ""
+        }
+      });
+    }));
+
+    result.validations = await Promise.all(result.workers
+      .filter((worker) => worker.exitCode === 0 && worker.headSha !== worker.baseSha)
+      .map((worker) => validatorExecutor({ repository: config.repository, worker, baseline: result.baseline, runId })));
+
+    result.status = "awaiting-review";
+    await stateSaver(repoPath, runId, result);
+    return result;
+  } catch (error) {
+    result.status = "failed";
+    result.failure = error.message;
+    await stateSaver(repoPath, runId, result);
+    throw error;
+  }
 }
 
 module.exports = { refreshWorker, executeReworkRun };

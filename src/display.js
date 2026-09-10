@@ -1,6 +1,6 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
-const { computePlan } = require("./planner");
+const { computeEffectivePlan } = require("./work-state");
 const { reportRootForRepo, parseReportName } = require("./reporter");
 const { statePath } = require("./run-store");
 
@@ -84,7 +84,7 @@ async function runIssueStatus(repoPath, runId) {
 }
 
 async function statusSnapshot(config, repoPath) {
-  const plan = computePlan(config);
+  const plan = await computeEffectivePlan(config, repoPath);
   const runs = await discoverRuns(repoPath);
   const runId = runs.at(-1) || null;
   const runIssues = runId ? await runIssueStatus(repoPath, runId) : [];
@@ -92,7 +92,18 @@ async function statusSnapshot(config, repoPath) {
   const ready = plan.ready?.map((item) => item.id) || [];
   const selected = plan.selected?.map((item) => item.id) || [];
   const blocked = plan.blocked?.map((item) => item.id) || [];
-  return { repository: config.repository, runId, runIssues, selected, ready, blocked, complete, humanGates: plan.humanGates || [] };
+  return {
+    repository: config.repository,
+    runId,
+    runIssues,
+    selected,
+    ready,
+    blocked,
+    complete,
+    deferred: plan.deferred || [],
+    recommendations: plan.recommendations || [],
+    humanGates: plan.humanGates || []
+  };
 }
 
 function formatStatus(snapshot) {
@@ -110,7 +121,15 @@ function formatStatus(snapshot) {
   lines.push(`READY      ${snapshot.ready.length ? snapshot.ready.map((id) => `#${id}`).join(", ") : "none"}`);
   lines.push(`BLOCKED    ${snapshot.blocked.length ? snapshot.blocked.map((id) => `#${id}`).join(", ") : "none"}`);
   lines.push(`COMPLETE   ${snapshot.complete.length ? snapshot.complete.map((id) => `#${id}`).join(", ") : "none"}`);
+  if (snapshot.deferred?.length) {
+    lines.push(`IN FLIGHT  ${snapshot.deferred.map((item) => `#${item.id} (${item.lifecycle.state})`).join(", ")}`);
+  }
   if (snapshot.humanGates.length) lines.push(`HUMAN GATE ${snapshot.humanGates.map((item) => `#${item.id}`).join(", ")}`);
+  if (!snapshot.selected.length && snapshot.recommendations?.length) {
+    lines.push("");
+    lines.push("CURRENT WORK MUST BE SETTLED BEFORE IT CAN RUN AGAIN");
+    for (const action of snapshot.recommendations) lines.push(`  ${action}`);
+  }
   return `${lines.join("\n")}\n`;
 }
 

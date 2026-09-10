@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 const fs = require("node:fs");
 const { computePlan } = require("../src/planner");
+const { computeEffectivePlan } = require("../src/work-state");
 const { dryRun, executeRun, executeAndIntegrate, continuousRun } = require("../src/controller");
 const { latestRunBundle, copyToClipboard } = require("../src/reporter");
 const { recordReview } = require("../src/reviews");
@@ -24,12 +25,12 @@ function usage() {
   console.error(`Usage:
   maestro plan [manifest.json] [--repo-path <path>]
   maestro draft [manifest.json] [issue ...] [--repo-path <path>] [--all] [--write]
-  maestro start [manifest.json] [--repo-path <path>]
+  maestro start [manifest.json] [--repo-path <path>] [--rerun]
   maestro status [manifest.json] [--repo-path <path>] [--watch]
   maestro output [--repo-path <path>]
   maestro approve [issue ...] [manifest.json] [--repo-path <path>] [--run <run-id>]
   maestro commit [manifest.json] [--repo-path <path>] [--run <run-id>] [--close-issues]
-  maestro next [manifest.json] [--repo-path <path>]
+  maestro next [manifest.json] [--repo-path <path>] [--rerun]
 
 Short aliases: s=start, st=status, o=output, a=approve, c=commit, n=next
 
@@ -215,7 +216,8 @@ async function main() {
   }
 
   if (command === "start" || command === "next") {
-    const result = await executeRun(config, { repoPath });
+    const plan = args.includes("--rerun") ? computePlan(config) : await computeEffectivePlan(config, repoPath);
+    const result = await executeRun(config, { repoPath, plan });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     setResultExitCode(result);
     return;
