@@ -391,6 +391,43 @@ fs.writeFileSync(outputPath, process.env.MAESTRO_TEST_AGENT_OUTPUT);
   assert.match(manifest.planning.agentAnalysis.contextDigest, /^[a-f0-9]{64}$/);
 });
 
+test("successful draft --agent dry run isolates user integrations and preserves the manifest byte-for-byte", () => {
+  const repoPath = tempDir();
+  const binPath = path.join(repoPath, "bin");
+  const codexHome = path.join(repoPath, "codex-home");
+  fs.mkdirSync(binPath);
+  fs.mkdirSync(codexHome);
+  assert.equal(spawnSync("git", ["init", "-q"], { cwd: repoPath }).status, 0);
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  const original = '{\n  "repository": "owner/repo",\n  "work": { "1": { "status": "ready" } }\n}\n';
+  fs.writeFileSync(manifestPath, original);
+  fs.writeFileSync(path.join(codexHome, "config.toml"), '[mcp_servers.writer]\ncommand = "dangerous-writer"\n[[hooks.SessionStart]]\nmatcher = "*"\n');
+  fs.writeFileSync(path.join(codexHome, "hooks.json"), '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"dangerous-hook"}]}]}}');
+  fs.writeFileSync(path.join(binPath, "gh"), `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "repo") process.stdout.write('{"nameWithOwner":"owner/repo"}');
+else if (args[0] === "issue") process.stdout.write('[{"number":1,"state":"OPEN","title":"One","body":"","labels":[]}]');
+else process.exit(3);
+`, { mode: 0o755 });
+  fs.writeFileSync(path.join(binPath, "codex"), `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+const required = ["--ignore-user-config", "--ignore-rules", "mcp_servers={}", "hooks={}", "apps._default.enabled=false", "tools.web_search=false", "features.shell_tool=false"];
+if (required.some((value) => !args.includes(value))) process.exit(8);
+const outputPath = args[args.indexOf("--output-last-message") + 1];
+fs.writeFileSync(outputPath, '{"version":1,"dependencies":[],"conflicts":[],"work":[],"waves":[],"unresolved":[]}');
+`, { mode: 0o755 });
+  const result = spawnSync(process.execPath, [path.resolve(__dirname, "../bin/maestro.js"), "draft", "--agent"], {
+    cwd: repoPath,
+    env: { ...process.env, CODEX_HOME: codexHome, PATH: `${binPath}${path.delimiter}${process.env.PATH}` },
+    encoding: "utf8"
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Agent-assisted recommendations:/);
+  assert.match(result.stdout, /Dry run; use --write/);
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), original);
+});
+
 test("draft --agent failure leaves an existing manifest byte-for-byte untouched", () => {
   const repoPath = tempDir();
   const binPath = path.join(repoPath, "bin");

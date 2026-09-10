@@ -38,20 +38,6 @@ async function assembleAgentContext({ repoPath, repository, issues, manifest, de
   const tree = allFiles.slice(0, maxFiles);
   const candidates = allFiles.filter((file) => contextFilePriority(file) < 99)
     .sort((left, right) => contextFilePriority(left) - contextFilePriority(right) || left.localeCompare(right));
-  const files = [];
-  let used = 0;
-  for (const relativePath of candidates) {
-    if (files.length >= maxFiles || used >= maxBytes) break;
-    const absolutePath = path.resolve(repoPath, relativePath);
-    if (!absolutePath.startsWith(`${path.resolve(repoPath)}${path.sep}`)) continue;
-    const stat = await fs.lstat(absolutePath);
-    if (!stat.isFile() || stat.isSymbolicLink()) continue;
-    const raw = await fs.readFile(absolutePath);
-    const remaining = maxBytes - used;
-    const included = raw.subarray(0, remaining);
-    files.push({ path: relativePath, sha256: digest(raw), truncated: included.length < raw.length, content: included.toString("utf8") });
-    used += included.length;
-  }
   const uniqueIssues = new Map();
   for (const issue of issues) {
     if (Number.isSafeInteger(issue?.number) && issue.number > 0 && !uniqueIssues.has(String(issue.number))) uniqueIssues.set(String(issue.number), issue);
@@ -80,10 +66,41 @@ async function assembleAgentContext({ repoPath, repository, issues, manifest, de
     manifest,
     deterministicFindings,
     repositoryTree: tree,
-    files
+    files: []
   };
+  const promptSize = () => Buffer.byteLength(`${plannerPrompt(context)}\n`);
+  const fixedBytes = promptSize();
+  if (fixedBytes > maxBytes) {
+    throw new Error(`Agent planning context requires ${fixedBytes} bytes before repository excerpts; the aggregate limit is ${maxBytes} bytes. Select fewer issues or reduce the manifest.`);
+  }
+
+  for (const relativePath of candidates) {
+    if (context.files.length >= maxFiles) break;
+    const absolutePath = path.resolve(repoPath, relativePath);
+    if (!absolutePath.startsWith(`${path.resolve(repoPath)}${path.sep}`)) continue;
+    const stat = await fs.lstat(absolutePath);
+    if (!stat.isFile() || stat.isSymbolicLink()) continue;
+    const raw = await fs.readFile(absolutePath);
+    const content = raw.toString("utf8");
+    const entry = { path: relativePath, sha256: digest(raw), truncated: false, content };
+    context.files.push(entry);
+    if (promptSize() <= maxBytes) continue;
+
+    entry.truncated = true;
+    let low = 0;
+    let high = content.length;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      entry.content = content.slice(0, middle);
+      if (promptSize() <= maxBytes) low = middle;
+      else high = middle - 1;
+    }
+    entry.content = content.slice(0, low);
+    if (promptSize() > maxBytes) context.files.pop();
+    break;
+  }
   const serialized = JSON.stringify(context);
-  return { context, digest: digest(serialized), files: files.map(({ path: file, sha256, truncated }) => ({ path: file, sha256, truncated })) };
+  return { context, digest: digest(serialized), files: context.files.map(({ path: file, sha256, truncated }) => ({ path: file, sha256, truncated })) };
 }
 
 function plannerPrompt(context) {
@@ -99,8 +116,13 @@ async function invokeAgentPlanner({ contextBundle, runner = runProcess, command 
     try {
       await fs.writeFile(schemaPath, JSON.stringify(agentOutputSchema), "utf8");
       const result = await runner(command, [
-        "exec", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--ignore-rules",
+        "exec", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules",
         "--config", "shell_environment_policy.inherit=none",
+        "--config", "mcp_servers={}",
+        "--config", "hooks={}",
+        "--config", "apps._default.enabled=false",
+        "--config", "tools.web_search=false",
+        "--config", "features.shell_tool=false",
         "--output-schema", schemaPath, "--output-last-message", outputPath, "-"
       ], {
         cwd: tempDir,

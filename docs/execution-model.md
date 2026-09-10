@@ -22,7 +22,7 @@ A proposal is schema-validated and its dependency graph is checked before it can
 
 Agent-assisted drafting is an explicit `--agent` planning strategy. It receives bounded repository and issue context after deterministic drafting, returns structured recommendations through the common planning-analysis interface, and never invokes workers or mutates GitHub. Deterministic and manually curated manifest values have precedence. Only high-confidence inferred hard dependencies are proposed; lower-confidence dependencies and low-confidence work or overlap recommendations are reported as unresolved. All inferred references and the merged graph are validated before `--write` is allowed.
 
-The provider adapter enforces context, timeout, retry, and output-size bounds. A successful written proposal records recommendation evidence plus hashes of the exact context, output, and included tracked files under `planning.agentAnalysis`. Invocation or validation failure happens before persistence and therefore leaves the manifest byte-for-byte unchanged.
+The provider adapter enforces an aggregate exact-prompt context bound, timeout, retry, and output-size bounds. It ignores Codex user configuration and disables external tools and hooks so planning cannot inherit write-capable integrations. A successful written proposal records recommendation evidence plus hashes of the exact context, output, and included tracked files under `planning.agentAnalysis`. Invocation or validation failure happens before persistence and therefore leaves the manifest byte-for-byte unchanged.
 
 ## Capability requirements
 
