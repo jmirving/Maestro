@@ -24,7 +24,7 @@
   },
   "work": {
     "2": {
-      "status": "ready",
+      "status": "complete",
       "mode": "execute",
       "priority": 100,
       "requires": [
