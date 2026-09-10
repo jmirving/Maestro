@@ -58,7 +58,19 @@ maestro draft 101 102 --write # update only these issues; preserve all other wor
 maestro draft --all           # explicitly reconsider every eligible open issue
 ```
 
-Drafting is deterministic and never starts workers or mutates GitHub. Existing work entries are preserved exactly; because repositories may attach meaning to their metadata, the initial strategy only adds previously unknown open issues as `ready`. Records that cannot be safely normalized are listed as unresolved.
+Drafting is deterministic and never starts workers or mutates GitHub. Existing work entries and manually authored `blockedBy` relationships are preserved. Previously unknown open issues are added as `ready`, while explicit `Blocked by #123` or `Depends on #123` lines become hard dependencies. The output explains the expected concurrency-bounded execution waves and the source of dependency and advisory decisions. Cycles and references to work absent from the manifest block `--write`.
+
+Advisory overlap is stored separately under `planning.advisoryConflicts`; it can serialize likely-conflicting work without inventing a product dependency. Analyzers are pluggable in the deterministic draft core. The built-in analyzer is opt-in and only considers repository-configured labels:
+
+```json
+{
+  "planning": {
+    "analyzers": [
+      { "type": "shared-label", "labels": ["area:api", "area:database"], "confidence": "medium" }
+    ]
+  }
+}
+```
 
 `maestro approve` without issue numbers approves every validator-approved, unreviewed item in the latest run. Supply issue numbers to approve only a subset:
 

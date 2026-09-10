@@ -16,7 +16,9 @@ Maestro normalizes target work into:
 
 ## Drafting
 
-`maestro draft` is a planning operation, not an execution state. It proposes `ready` entries for previously unknown open GitHub issues and preserves existing work metadata and completed state. A proposal is validated against the repository-config schema before it can be written. Closed, malformed, duplicate, or otherwise unsafe issue records remain unresolved for human attention rather than being interpreted semantically.
+`maestro draft` is a planning operation, not an execution state. It proposes `ready` entries for previously unknown open GitHub issues and preserves existing work metadata, completed state, and manually authored dependencies. Explicit `Blocked by` and `Depends on` issue lines may add hard `blockedBy` relationships; advisory analyzers write separate conflict records with provenance. The draft simulates expected waves using hard-dependency readiness, advisory conflict avoidance, and `defaultConcurrency`, but does not launch workers.
+
+A proposal is schema-validated and its dependency graph is checked before it can be written. Unknown dependency references and cycles fail closed with actionable diagnostics. Closed, malformed, duplicate, or otherwise unsafe issue records remain unresolved for human attention rather than being interpreted semantically.
 
 ## Capability requirements
 
@@ -62,6 +64,6 @@ Continuous execution pauses when:
 
 ## Parallelism
 
-Parallel scheduling requires both dependency independence and capacity. File-overlap prediction may later reduce concurrency but is advisory; merge/integration remains serialized.
+Parallel scheduling requires dependency independence, acceptable advisory conflict risk, and capacity. Persisted advisory conflicts can reduce the selected wave but remain distinct from product dependencies; merge/integration remains serialized.
 
 Initial default concurrency: 2. Maximum should remain configurable.

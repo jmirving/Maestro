@@ -68,6 +68,85 @@ test("selected drafting leaves unrelated entries and returned issues untouched",
   assert.deepEqual(result.added, ["2"]);
 });
 
+test("explicit issue dependencies become hard relationships while manual dependencies are preserved", () => {
+  const existing = {
+    repository: "owner/repo",
+    work: {
+      "1": { status: "complete" },
+      "2": { status: "complete" },
+      "3": { status: "ready", blockedBy: ["4", "1"], note: "curated" },
+      "4": { status: "complete" }
+    }
+  };
+  const result = proposeDraft({
+    repository: "owner/repo",
+    existingConfig: existing,
+    issues: [{ ...issue(3), body: "## Dependencies\n\nBlocked by #2." }]
+  });
+  assert.deepEqual(result.manifest.work["3"], { status: "ready", blockedBy: ["4", "1", "2"], note: "curated" });
+  assert.equal(result.dependencySources.find((entry) => entry.dependency === "1").source, "existing manifest blockedBy");
+  assert.match(result.dependencySources.find((entry) => entry.dependency === "2").source, /GitHub issue #3 body/);
+  assert.equal(result.writable, true);
+});
+
+test("injected advisory analyzers persist advisory metadata without adding blockedBy", () => {
+  const result = proposeDraft({
+    repository: "owner/repo",
+    issues: [issue(1), issue(2)],
+    analyzers: [{
+      name: "ownership-map",
+      analyze: () => [{ issues: ["1", "2"], confidence: "high", source: "config paths: src/api", reason: "Likely file overlap." }]
+    }]
+  });
+  assert.equal(result.manifest.work["2"].blockedBy, undefined);
+  assert.deepEqual(result.manifest.planning.advisoryConflicts, [{
+    issues: ["1", "2"],
+    confidence: "high",
+    source: "config paths: src/api",
+    reason: "Likely file overlap.",
+    analyzer: "ownership-map"
+  }]);
+  assert.deepEqual(result.planning.waves, [["1"], ["2"]]);
+});
+
+test("a full refresh replaces stale output owned by an active analyzer", () => {
+  const result = proposeDraft({
+    repository: "owner/repo",
+    existingConfig: {
+      repository: "owner/repo",
+      work: { "1": { status: "ready" }, "2": { status: "ready" } },
+      planning: {
+        advisoryConflicts: [{ issues: ["1", "2"], confidence: "medium", source: "old labels", reason: "Old result.", analyzer: "labels" }]
+      }
+    },
+    issues: [issue(1), issue(2)],
+    analyzers: [{ name: "labels", analyze: () => [] }]
+  });
+  assert.equal(result.manifest.planning, undefined);
+  assert.equal(result.changed, true);
+});
+
+test("cycles and unresolved dependency references block persistence", () => {
+  const missing = proposeDraft({
+    repository: "owner/repo",
+    issues: [{ ...issue(2), body: "Depends on #99" }]
+  });
+  assert.equal(missing.writable, false);
+  assert.match(missing.diagnostics[0].reason, /#99 is not present/);
+  assert.throws(() => writeManifest(path.join(tempDir(), ".maestro.json"), missing.manifest), /Cannot write unsafe Maestro manifest/);
+
+  const cycle = proposeDraft({
+    repository: "owner/repo",
+    existingConfig: {
+      repository: "owner/repo",
+      work: { "1": { status: "ready", blockedBy: ["2"] }, "2": { status: "ready", blockedBy: ["1"] } }
+    },
+    issues: [issue(1), issue(2)]
+  });
+  assert.equal(cycle.writable, false);
+  assert.match(cycle.diagnostics.map((entry) => entry.reason).join("\n"), /cycle detected/);
+});
+
 test("closed, malformed, missing, and duplicate issue data stays unresolved", () => {
   const result = proposeDraft({
     repository: "owner/repo",
@@ -131,6 +210,9 @@ if (args[0] === "repo" && args[1] === "view") {
   const dry = spawnSync(process.execPath, [cliPath, "draft"], { cwd: repoPath, env, encoding: "utf8" });
   assert.equal(dry.status, 0, dry.stderr);
   assert.match(dry.stdout, /\+ #5 ready/);
+  assert.match(dry.stdout, /Expected execution waves:/);
+  assert.match(dry.stdout, /Wave 1: #5, #8/);
+  assert.match(dry.stdout, /2-way dependency independence available; repository limit is 2/);
   assert.match(dry.stdout, /Dry run/);
   assert.equal(fs.existsSync(path.join(repoPath, ".maestro.json")), false);
 
@@ -171,4 +253,30 @@ else process.exit(3);
     "7": { status: "ready" },
     "99": { status: "complete", note: "curated" }
   });
+});
+
+test("draft CLI reports unsafe dependencies and leaves the manifest unchanged", () => {
+  const repoPath = tempDir();
+  const binPath = path.join(repoPath, "bin");
+  fs.mkdirSync(binPath);
+  assert.equal(spawnSync("git", ["init", "-q"], { cwd: repoPath }).status, 0);
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  const original = `${JSON.stringify({ repository: "owner/repo", work: { "1": { status: "ready" } } }, null, 2)}\n`;
+  fs.writeFileSync(manifestPath, original);
+  fs.writeFileSync(path.join(binPath, "gh"), `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "repo") process.stdout.write('{"nameWithOwner":"owner/repo"}');
+else if (args[0] === "issue" && args[1] === "list") process.stdout.write('[{"number":1,"state":"OPEN","title":"One","body":"Blocked by #99","labels":[]}]');
+else process.exit(3);
+`, { mode: 0o755 });
+  const result = spawnSync(process.execPath, [path.resolve(__dirname, "../bin/maestro.js"), "draft", "--write"], {
+    cwd: repoPath,
+    env: { ...process.env, PATH: `${binPath}${path.delimiter}${process.env.PATH}` },
+    encoding: "utf8"
+  });
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stdout, /Hard dependency #99 is not present/);
+  assert.match(result.stdout, /Write blocked/);
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), original);
 });

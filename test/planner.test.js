@@ -59,3 +59,21 @@ test("human gates are never selected", () => {
   assert.equal(plan.selected.length, 0);
   assert.equal(plan.humanGates.length, 1);
 });
+
+test("execution selection honors advisory conflicts without treating them as blockers", () => {
+  const plan = computePlan({
+    repository: "example/repo",
+    defaultConcurrency: 2,
+    planning: {
+      advisoryConflicts: [{ issues: ["1", "2"], confidence: "medium", source: "labels", reason: "Shared subsystem.", analyzer: "shared-label" }]
+    },
+    work: {
+      "1": { status: "ready" },
+      "2": { status: "ready" },
+      "3": { status: "ready" }
+    }
+  });
+  assert.deepEqual(plan.selected.map((item) => item.id), ["1", "3"]);
+  assert.deepEqual(plan.advisoryDeferred.map((item) => item.id), ["2"]);
+  assert.deepEqual(plan.blocked, []);
+});

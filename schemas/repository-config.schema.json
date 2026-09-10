@@ -8,6 +8,44 @@
     "repository": { "type": "string", "minLength": 3 },
     "defaultBranch": { "type": "string", "minLength": 1, "default": "main" },
     "defaultConcurrency": { "type": "integer", "minimum": 1, "maximum": 8, "default": 2 },
+    "planning": {
+      "type": "object",
+      "properties": {
+        "analyzers": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": ["type", "labels"],
+                "properties": {
+                  "type": { "const": "shared-label" },
+                  "labels": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "uniqueItems": true },
+                  "confidence": { "enum": ["low", "medium", "high"] }
+                },
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "advisoryConflicts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["issues", "confidence", "source", "reason", "analyzer"],
+            "properties": {
+              "issues": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 },
+              "confidence": { "enum": ["low", "medium", "high"] },
+              "source": { "type": "string", "minLength": 1 },
+              "reason": { "type": "string", "minLength": 1 },
+              "analyzer": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "baseline": {
       "type": "object",
       "properties": {

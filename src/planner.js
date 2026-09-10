@@ -1,3 +1,5 @@
+const { conflictFor } = require("./planning-analysis");
+
 function normalizeWork(work = {}) {
   return Object.entries(work).map(([id, item]) => ({
     id: String(id),
@@ -40,11 +42,30 @@ function computePlan(config) {
 
   ready.sort(compareReady);
   const concurrency = Math.max(1, Number(config.defaultConcurrency || 2));
+  const selected = [];
+  const advisoryDeferred = [];
+  const conflicts = config.planning?.advisoryConflicts || [];
+  for (const item of ready) {
+    if (selected.length >= concurrency) break;
+    const conflict = selected.map((other) => conflictFor(item.id, other.id, conflicts)).find(Boolean);
+    if (conflict) {
+      advisoryDeferred.push({
+        ...item,
+        conflictsWith: conflict.issues.find((id) => String(id) !== item.id),
+        reason: conflict.reason,
+        source: conflict.source,
+        confidence: conflict.confidence
+      });
+      continue;
+    }
+    selected.push(item);
+  }
   return {
     repository: config.repository,
     concurrency,
     ready,
-    selected: ready.slice(0, concurrency),
+    selected,
+    advisoryDeferred,
     blocked,
     humanGates
   };

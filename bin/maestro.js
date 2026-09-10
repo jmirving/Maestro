@@ -192,7 +192,11 @@ async function main() {
     });
     const write = args.includes("--write");
     process.stdout.write(formatDraftSummary({ repository, manifestPath, result, write }));
-    if (write && (result.created || result.added.length)) writeManifest(manifestPath, result.manifest);
+    if (write && !result.writable) {
+      process.exitCode = 1;
+      return;
+    }
+    if (write && result.changed) writeManifest(manifestPath, result.manifest);
     return;
   }
 
