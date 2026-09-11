@@ -35,6 +35,22 @@ async function fixture(t, work = { "2": { status: "ready" }, "5": { status: "rea
   return { repoPath, manifestPath };
 }
 
+async function fakeReworkProcesses(root) {
+  const binPath = path.join(root, "bin");
+  await fs.mkdir(binPath);
+  await fs.writeFile(path.join(binPath, "git"), `#!/usr/bin/env node
+if (process.argv[2] === "rev-parse") process.stdout.write("base\\n");
+`);
+  await fs.writeFile(path.join(binPath, "codex"), `#!/usr/bin/env node
+const fs = require("node:fs");
+const index = process.argv.indexOf("--output-last-message");
+if (index >= 0) fs.writeFileSync(process.argv[index + 1], "Result: complete\\n");
+`);
+  await fs.chmod(path.join(binPath, "git"), 0o755);
+  await fs.chmod(path.join(binPath, "codex"), 0o755);
+  return binPath;
+}
+
 test("plain approval settles passing siblings and leaves the newest rework generation actionable", async (t) => {
   const { repoPath, manifestPath } = await fixture(t);
   const originalId = "20260910010101-aaaaaa";
@@ -53,6 +69,27 @@ test("plain approval settles passing siblings and leaves the newest rework gener
   assert.match(result.stdout, new RegExp(`#7 \\(rework-required; run ${latestReworkId}\\)`));
   assert.match(result.stdout, /Still actionable: #7 remains rework-required/);
   assert.match(result.stdout, /Next: maestro rework 7/);
+
+  const recommendation = result.stdout.match(/^Next: (maestro rework .+)$/m)[1];
+  const latest = await loadRunState(repoPath, latestReworkId);
+  latest.workers[0].worktreePath = repoPath;
+  latest.workers[0].branch = "maestro/7";
+  await saveRunState(repoPath, latestReworkId, latest);
+  const binPath = await fakeReworkProcesses(path.dirname(repoPath));
+  const reworked = spawnSync(process.execPath, [
+    cli,
+    ...recommendation.split(" ").slice(1),
+    manifestPath,
+    "--repo-path",
+    repoPath
+  ], {
+    encoding: "utf8",
+    env: { ...process.env, PATH: `${binPath}${path.delimiter}${process.env.PATH}` }
+  });
+  assert.equal(reworked.status, 0, reworked.stderr);
+  const reworkRun = JSON.parse(reworked.stdout);
+  assert.equal(reworkRun.parentRunId, latestReworkId);
+  assert.deepEqual(reworkRun.plan.selected.map((entry) => entry.id), ["7"]);
 
   const original = await loadRunState(repoPath, originalId);
   assert.deepEqual(Object.keys(original.reviews).sort(), ["12", "2", "5"]);

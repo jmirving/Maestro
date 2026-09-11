@@ -4,7 +4,7 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { buildWorkerPrompt } = require("../src/worker");
-const { executeReworkRun } = require("../src/rework");
+const { executeReworkRun, resolveIssueReworkSources } = require("../src/rework");
 const { saveRunState } = require("../src/run-store");
 
 
@@ -76,4 +76,61 @@ test("a human-gated run marked rework-original can enter rework", async (t) => {
   assert.equal(result.workers.length, 1);
   assert.equal(result.validations[0].verdict, "approve");
   assert.ok(gitCalls.some((args) => args[0] === "rebase"));
+});
+
+test("issue-oriented rework resolves current states and groups diverged source runs", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-issue-rework-"));
+  const repoPath = path.join(root, "target");
+  await fs.mkdir(repoPath);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const firstId = "20260910010101-aaaaaa";
+  const secondId = "20260910020202-bbbbbb";
+  await saveRunState(repoPath, firstId, {
+    runId: firstId,
+    status: "awaiting-review",
+    workers: [{ issue: "7", exitCode: 0 }],
+    validations: [{ issue: "7", verdict: "rework" }],
+    reviews: {}
+  });
+  await saveRunState(repoPath, secondId, {
+    runId: secondId,
+    parentRunId: firstId,
+    status: "awaiting-review",
+    workers: [{ issue: "13", exitCode: 0 }],
+    validations: [{ issue: "13", verdict: "rework" }],
+    reviews: {}
+  });
+
+  assert.deepEqual(await resolveIssueReworkSources(repoPath, ["7", "13", "7"]), [
+    { sourceRunId: firstId, issueIds: ["7"] },
+    { sourceRunId: secondId, issueIds: ["13"] }
+  ]);
+});
+
+test("issue-oriented rework refuses to revive stale rework evidence", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-stale-rework-"));
+  const repoPath = path.join(root, "target");
+  await fs.mkdir(repoPath);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  await saveRunState(repoPath, "20260910010101-aaaaaa", {
+    runId: "20260910010101-aaaaaa",
+    status: "awaiting-review",
+    workers: [{ issue: "7", exitCode: 0 }],
+    validations: [{ issue: "7", verdict: "rework" }],
+    reviews: {}
+  });
+  await saveRunState(repoPath, "20260910020202-bbbbbb", {
+    runId: "20260910020202-bbbbbb",
+    status: "awaiting-review",
+    workers: [{ issue: "7", exitCode: 0 }],
+    validations: [{ issue: "7", verdict: "approve" }],
+    reviews: {}
+  });
+
+  await assert.rejects(
+    resolveIssueReworkSources(repoPath, ["7"]),
+    /#7 \(awaiting-human-review in run 20260910020202-bbbbbb\)/
+  );
 });

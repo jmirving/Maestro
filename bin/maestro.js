@@ -7,7 +7,7 @@ const { latestRunBundle, copyToClipboard } = require("../src/reporter");
 const { recordReview } = require("../src/reviews");
 const { approveIssues, formatApprovalSummary } = require("../src/approval");
 const { integrateExistingRun } = require("../src/existing-run");
-const { executeReworkRun } = require("../src/rework");
+const { resolveIssueReworkSources, executeReworkRun } = require("../src/rework");
 const { executeReconcileRun } = require("../src/reconcile");
 const { latestRunId } = require("../src/run-store");
 const { statusSnapshot, formatStatus, watchStatus } = require("../src/display");
@@ -41,7 +41,7 @@ Short aliases: s=start, st=status, o=output, a=approve, c=commit, n=next
 
 Advanced commands:
   maestro run [manifest.json] [--repo-path <path>] [--execute|--integrate|--continuous] [--allow-failing-baseline]
-  maestro rework [manifest.json] [--repo-path <path>] --run <source-run-id> [--allow-failing-baseline]
+  maestro rework [issue ...] [manifest.json] [--repo-path <path>] [--run <source-run-id>] [--allow-failing-baseline]
   maestro reconcile [manifest.json] [--repo-path <path>] --run <source-run-id> [--issue <number>] [--allow-failing-baseline]
   maestro report [--repo-path <path>] [--copy]
   maestro review [manifest.json] [--repo-path <path>] --run <run-id> --issue <number> --disposition <approve|rework-original|approve-with-follow-up> [--title <title>] [--notes <notes>]
@@ -287,10 +287,17 @@ async function main() {
 
   if (command === "rework") {
     const sourceRunId = option(args, "--run");
-    if (!sourceRunId) usage();
-    const result = await executeReworkRun(config, { repoPath, sourceRunId });
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    setResultExitCode(result);
+    const requestedIssues = issuePositionals(rest);
+    if (!sourceRunId && !requestedIssues.length) usage();
+    const sources = sourceRunId
+      ? [{ sourceRunId, issueIds: requestedIssues.length ? requestedIssues : null }]
+      : await resolveIssueReworkSources(repoPath, requestedIssues);
+    const results = [];
+    for (const source of sources) {
+      results.push(await executeReworkRun(config, { repoPath, ...source }));
+    }
+    process.stdout.write(`${JSON.stringify(results.length === 1 ? results[0] : results, null, 2)}\n`);
+    for (const result of results) setResultExitCode(result);
     return;
   }
 

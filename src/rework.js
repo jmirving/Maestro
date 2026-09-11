@@ -5,6 +5,28 @@ const { executeWorker } = require("./worker");
 const { validateWorker } = require("./validator");
 const { runChecked } = require("./process");
 const { newRunId } = require("./controller");
+const { resolveCurrentIssueStates } = require("./run-resolver");
+
+async function resolveIssueReworkSources(repoPath, issueIds) {
+  const requested = [...new Set((issueIds || []).map(String))];
+  if (!requested.length) throw new Error("Issue-oriented rework requires at least one issue number.");
+
+  const resolved = await resolveCurrentIssueStates(repoPath, requested);
+  const refused = resolved.filter((entry) => entry.evidence.state !== "awaiting-rework");
+  if (refused.length) {
+    const details = refused
+      .map((entry) => `#${entry.issue} (${entry.evidence.state || "unknown"} in run ${entry.runId})`)
+      .join(", ");
+    throw new Error(`Cannot rework the current workflow state for ${details}.`);
+  }
+
+  const grouped = new Map();
+  for (const entry of resolved) {
+    if (!grouped.has(entry.runId)) grouped.set(entry.runId, []);
+    grouped.get(entry.runId).push(entry.issue);
+  }
+  return [...grouped.entries()].map(([sourceRunId, issues]) => ({ sourceRunId, issueIds: issues }));
+}
 
 async function refreshWorker(worker, { defaultBranch = "main", runner = runChecked } = {}) {
   const status = (await runner("git", ["status", "--porcelain"], { cwd: worker.worktreePath })).stdout.trim();
@@ -110,4 +132,4 @@ async function executeReworkRun(config, {
   }
 }
 
-module.exports = { refreshWorker, executeReworkRun };
+module.exports = { resolveIssueReworkSources, refreshWorker, executeReworkRun };
