@@ -12,13 +12,13 @@ function classifyRunIssue(state, worker) {
     };
   }
   if (review?.disposition === "rework-original") {
-    return { state: "awaiting-rework", action: `maestro rework --run ${state.runId}` };
+    return { state: "awaiting-rework", action: `maestro rework ${issue}` };
   }
   if (review && validation?.verdict === "approve") {
     return { state: "awaiting-integration", action: `maestro commit --run ${state.runId}` };
   }
   if (validation?.verdict === "rework") {
-    return { state: "awaiting-rework", action: `maestro rework --run ${state.runId}` };
+    return { state: "awaiting-rework", action: `maestro rework ${issue}` };
   }
   if (validation?.verdict === "human_gate") {
     return {

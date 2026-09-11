@@ -9,9 +9,25 @@ const { resolveCurrentIssueStates } = require("./run-resolver");
 
 async function resolveIssueReworkSources(repoPath, issueIds) {
   const requested = [...new Set((issueIds || []).map(String))];
-  if (!requested.length) throw new Error("Issue-oriented rework requires at least one issue number.");
-
   const resolved = await resolveCurrentIssueStates(repoPath, requested);
+  if (!requested.length) {
+    const actionable = resolved.filter((entry) => (
+      entry.evidence.state === "awaiting-rework" && entry.evidence.verdict === "rework"
+    ));
+    if (!actionable.length) {
+      throw new Error("No currently relevant validator-REWORK issues are available.");
+    }
+    const sourceRunId = actionable
+      .map((entry) => String(entry.runId))
+      .sort((a, b) => b.localeCompare(a))[0];
+    return [{
+      sourceRunId,
+      issueIds: actionable
+        .filter((entry) => String(entry.runId) === sourceRunId)
+        .map((entry) => entry.issue)
+    }];
+  }
+
   const refused = resolved.filter((entry) => entry.evidence.state !== "awaiting-rework");
   if (refused.length) {
     const details = refused
@@ -53,8 +69,37 @@ async function executeReworkRun(config, {
   stateSaver = saveRunState
 } = {}) {
   const source = await loadRunState(repoPath, sourceRunId);
+  const workersByIssue = new Map();
+  for (const worker of source.workers || []) {
+    const issue = String(worker.issue);
+    if (!workersByIssue.has(issue)) workersByIssue.set(issue, []);
+    workersByIssue.get(issue).push(worker);
+  }
   const validationByIssue = new Map((source.validations || []).map((entry) => [String(entry.issue), entry]));
   const requested = issueIds ? new Set(issueIds.map(String)) : null;
+  if (requested) {
+    const missing = [...requested].filter((issue) => !workersByIssue.has(issue));
+    if (missing.length) {
+      throw new Error(`Run ${sourceRunId} has no worker evidence for ${missing.map((issue) => `issue #${issue}`).join(", ")}.`);
+    }
+    const ambiguous = [...requested].filter((issue) => workersByIssue.get(issue).length !== 1);
+    if (ambiguous.length) {
+      throw new Error(`Run ${sourceRunId} has ambiguous worker evidence for ${ambiguous.map((issue) => `issue #${issue}`).join(", ")}.`);
+    }
+    const ineligible = [...requested].filter((issue) => {
+      const validationRequiresRework = validationByIssue.get(issue)?.verdict === "rework";
+      const humanRequestedRework = source.reviews?.[issue]?.disposition === "rework-original";
+      return !validationRequiresRework && !humanRequestedRework;
+    });
+    if (ineligible.length) {
+      const details = ineligible.map((issue) => {
+        const verdict = validationByIssue.get(issue)?.verdict || "missing";
+        const disposition = source.reviews?.[issue]?.disposition || "none";
+        return `#${issue} (validator=${verdict}, review=${disposition})`;
+      }).join(", ");
+      throw new Error(`Cannot rework non-REWORK issue state in run ${sourceRunId}: ${details}.`);
+    }
+  }
   const candidates = (source.workers || []).filter((worker) => {
     const issue = String(worker.issue);
     const validationRequiresRework = validationByIssue.get(issue)?.verdict === "rework";

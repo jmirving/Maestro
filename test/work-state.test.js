@@ -48,7 +48,7 @@ test("mixed validator, review, and integration outcomes are deferred with action
     ["12", "integrated-pending-manifest"]
   ]);
   assert.ok(plan.recommendations.includes("maestro approve 2 --run 20260910010101-aaaaaa"));
-  assert.ok(plan.recommendations.includes("maestro rework --run 20260910010101-aaaaaa"));
+  assert.ok(plan.recommendations.includes("maestro rework 7"));
   assert.ok(plan.recommendations.includes("maestro commit --run 20260910010101-aaaaaa"));
 });
 
@@ -237,5 +237,5 @@ test("a HUMAN_GATE recommendation is an executable review resolution", async (t)
 
   const after = await computeEffectivePlan(config({ "14": { status: "ready" } }), repoPath);
   assert.equal(after.deferred[0].lifecycle.state, "awaiting-rework");
-  assert.deepEqual(after.recommendations, [`maestro rework --run ${runId}`]);
+  assert.deepEqual(after.recommendations, ["maestro rework 14"]);
 });

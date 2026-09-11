@@ -126,6 +126,31 @@ function statusIssuePositionals(rest) {
   return [...new Set(issues)];
 }
 
+function reworkPositionals(rest) {
+  const issues = [];
+  const manifests = [];
+  for (let index = 0; index < rest.length; index += 1) {
+    const value = rest[index];
+    if (["--repo-path", "--run"].includes(value)) {
+      if (!rest[index + 1] || rest[index + 1].startsWith("--")) throw new Error(`${value} requires a value.`);
+      index += 1;
+      continue;
+    }
+    if (value === "--allow-failing-baseline") continue;
+    if (value.startsWith("--")) throw new Error(`Unknown maestro rework option: ${value}`);
+    if (looksLikeManifest(value)) {
+      manifests.push(value);
+      continue;
+    }
+    if (!/^[1-9]\d*$/.test(value)) throw new Error(`Invalid issue number: ${value}`);
+    issues.push(value);
+  }
+  if (manifests.length > 1) {
+    throw new Error(`maestro rework received multiple manifest paths: ${manifests.join(", ")}.`);
+  }
+  return { manifest: manifests[0] || null, issues: [...new Set(issues)] };
+}
+
 function resolveContext(rest, args, { manifest = true } = {}) {
   const repoPath = resolveRepoPath(option(args, "--repo-path"));
   if (!manifest) return { repoPath };
@@ -250,7 +275,15 @@ async function main() {
     return;
   }
 
-  const { repoPath, manifestPath } = resolveContext(rest, args);
+  const reworkArgs = command === "rework" ? reworkPositionals(rest) : null;
+  let context;
+  if (reworkArgs) {
+    const repoPath = resolveRepoPath(option(args, "--repo-path"));
+    context = { repoPath, manifestPath: resolveManifestPath(reworkArgs.manifest, repoPath) };
+  } else {
+    context = resolveContext(rest, args);
+  }
+  const { repoPath, manifestPath } = context;
   const config = loadConfig(manifestPath, args);
 
   if (command === "plan") {
@@ -306,8 +339,7 @@ async function main() {
 
   if (command === "rework") {
     const sourceRunId = option(args, "--run");
-    const requestedIssues = issuePositionals(rest);
-    if (!sourceRunId && !requestedIssues.length) usage();
+    const requestedIssues = reworkArgs.issues;
     const sources = sourceRunId
       ? [{ sourceRunId, issueIds: requestedIssues.length ? requestedIssues : null }]
       : await resolveIssueReworkSources(repoPath, requestedIssues);
