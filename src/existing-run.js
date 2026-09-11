@@ -100,6 +100,10 @@ async function integrateExistingRun(config, {
   const pendingEntries = integrable.filter((entry) => !alreadyIntegrated.has(entry.issue));
   const pendingWorkers = pendingEntries.map((entry) => entry.worker);
   const pendingValidations = pendingEntries.map((entry) => entry.validation);
+  const pendingReviewAuthorizations = pendingEntries.map((entry) => ({
+    issue: entry.issue,
+    review: entry.review
+  }));
 
   if (!pendingWorkers.length) {
     return {
@@ -128,6 +132,7 @@ async function integrateExistingRun(config, {
     manifestPath,
     workers: pendingWorkers,
     validations: pendingValidations,
+    reviewAuthorizations: pendingReviewAuthorizations,
     baseline: state.baseline || null,
     runner,
     shellRunner,

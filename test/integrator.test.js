@@ -221,3 +221,37 @@ test("rejects worker branches that change the manifest before merging", async ()
 
   assert.equal(calls.some((call) => call.args[0] === "merge"), false);
 });
+
+test("integrates an audited validator override while excluding unreviewed REWORK work", async () => {
+  const calls = [];
+  let revision = 0;
+  const runner = async (command, args, options) => {
+    calls.push({ command, args, cwd: options.cwd });
+    if (args[0] === "status") return { code: 0, stdout: "", stderr: "" };
+    if (args[0] === "rev-parse") return { code: 0, stdout: `sha-${revision += 1}\n`, stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  const override = {
+    disposition: "approve-override",
+    validatorOverride: { verdict: "rework", exitCode: 1, report: "override me" }
+  };
+
+  const results = await integrateApproved({
+    config: { defaultBranch: "main", integration: { enabled: true } },
+    repoPath: "/target",
+    workers: [
+      { issue: "7", branch: "worker/7", worktreePath: "/worker/7", exitCode: 0 },
+      { issue: "8", branch: "worker/8", worktreePath: "/worker/8", exitCode: 0 }
+    ],
+    validations: [
+      { issue: "7", verdict: "rework", exitCode: 1, report: "override me" },
+      { issue: "8", verdict: "rework", exitCode: 1, report: "not reviewed" }
+    ],
+    reviewAuthorizations: [{ issue: "7", review: override }],
+    runner
+  });
+
+  assert.deepEqual(results.map((entry) => entry.issue), ["7"]);
+  assert.deepEqual(calls.filter((call) => call.args[0] === "merge").map((call) => call.args.at(-1)), ["worker/7"]);
+  assert.equal(calls.some((call) => call.args.includes("worker/8")), false);
+});

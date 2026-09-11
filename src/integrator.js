@@ -1,5 +1,6 @@
 const path = require("node:path");
 const { runChecked, runShell } = require("./process");
+const { isValidValidatorOverride } = require("./reviews");
 
 async function ensureClean(repoPath, runner = runChecked) {
   const status = (await runner("git", ["status", "--porcelain"], { cwd: repoPath })).stdout.trim();
@@ -157,12 +158,30 @@ async function runIntegrationCommand(command, { cwd, baseline, shellRunner = run
   throw error;
 }
 
-async function integrateApproved({ config, repoPath, manifestPath = null, workers, validations, baseline = null, runner = runChecked, shellRunner = runShell, onIntegrated = null }) {
+async function integrateApproved({
+  config,
+  repoPath,
+  manifestPath = null,
+  workers,
+  validations,
+  reviewAuthorizations = [],
+  baseline = null,
+  runner = runChecked,
+  shellRunner = runShell,
+  onIntegrated = null
+}) {
   const integration = config.integration || {};
   if (integration.enabled !== true) throw new Error("Manifest does not enable integration.");
   const defaultBranch = config.defaultBranch || "main";
-  const verdicts = new Map(validations.map((entry) => [String(entry.issue), entry.verdict]));
-  const approved = workers.filter((worker) => worker.exitCode === 0 && verdicts.get(String(worker.issue)) === "approve");
+  const validationByIssue = new Map(validations.map((entry) => [String(entry.issue), entry]));
+  const authorizationByIssue = new Map(reviewAuthorizations.map((entry) => [String(entry.issue), entry.review]));
+  const approved = workers.filter((worker) => {
+    if (worker.exitCode !== 0) return false;
+    const issue = String(worker.issue);
+    const validation = validationByIssue.get(issue);
+    return validation?.verdict === "approve" ||
+      isValidValidatorOverride(authorizationByIssue.get(issue), validation);
+  });
   const results = [];
 
   return withPreservedManifest({ repoPath, manifestPath, runner }, async () => {
