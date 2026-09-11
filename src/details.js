@@ -104,6 +104,13 @@ function appendEvidence(lines, state, evidence, { heading = null } = {}) {
   if (evidence.review) {
     lines.push(`  Disposition: ${valueOrNone(evidence.review.disposition)}`);
     lines.push(`  Recorded at: ${valueOrNone(evidence.review.recordedAt)}`);
+    if (evidence.review.validatorOverride) {
+      lines.push(`  Overridden validator verdict: ${valueOrNone(evidence.review.validatorOverride.verdict)}`);
+      lines.push(`  Overridden validator exit code: ${valueOrNone(evidence.review.validatorOverride.exitCode)}`);
+      if (evidence.review.validatorOverride.report) {
+        appendReport(lines, "Overridden validator report", evidence.review.validatorOverride.report);
+      }
+    }
     if (evidence.review.title) lines.push(`  Follow-up title: ${evidence.review.title}`);
     if (evidence.review.notes) lines.push(`  Notes: ${evidence.review.notes}`);
     if (evidence.review.followUpUrl) lines.push(`  Follow-up: ${evidence.review.followUpUrl}`);

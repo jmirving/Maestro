@@ -177,3 +177,48 @@ test("approval reports missing runs and issue matches clearly", async (t) => {
   await assert.rejects(approveIssues({ repoPath, requestedIssues: ["404"] }), /No relevant Maestro run for issue #404/);
   await assert.rejects(approveIssues({ repoPath, runId, requestedIssues: ["404"] }), /Issue #404 is not part of Maestro run/);
 });
+
+test("explicit override approves only a selected validator-REWORK item and records provenance", async (t) => {
+  const { repoPath } = await fixture(t);
+  const runId = "20260910010101-aaaaaa";
+  const state = run(runId, [7], { "7": "rework" });
+  state.validations[0].exitCode = 3;
+  state.validations[0].report = "VERDICT: REWORK\nA regression remains.";
+  await saveRunState(repoPath, runId, state);
+
+  await assert.rejects(
+    approveIssues({ repoPath, override: true }),
+    /requires at least one explicit issue number/
+  );
+
+  const result = await approveIssues({ repoPath, requestedIssues: ["7"], override: true });
+  assert.deepEqual(result.approved, [{ issue: "7", runId, override: true }]);
+  const review = (await loadRunState(repoPath, runId)).reviews["7"];
+  assert.equal(review.disposition, "approve-override");
+  assert.deepEqual(review.validatorOverride, {
+    verdict: "rework",
+    exitCode: 3,
+    report: "VERDICT: REWORK\nA regression remains."
+  });
+});
+
+test("approve CLI requires --override for validator-REWORK and accepts flags before the issue", async (t) => {
+  const { repoPath, manifestPath } = await fixture(t);
+  const runId = "20260910010101-aaaaaa";
+  await saveRunState(repoPath, runId, run(runId, [7], { "7": "rework" }));
+  const cli = path.resolve(__dirname, "../bin/maestro.js");
+
+  const plain = spawnSync(process.execPath, [
+    cli, "approve", manifestPath, "7", "--repo-path", repoPath
+  ], { encoding: "utf8" });
+  assert.equal(plain.status, 1);
+  assert.match(plain.stderr, /Cannot approve.*#7 \(rework-required/);
+  assert.deepEqual((await loadRunState(repoPath, runId)).reviews, {});
+
+  const override = spawnSync(process.execPath, [
+    cli, "approve", manifestPath, "--override", "7", "--repo-path", repoPath
+  ], { encoding: "utf8" });
+  assert.equal(override.status, 0, override.stderr);
+  assert.match(override.stdout, new RegExp(`Override-approved: #7 \\(run ${runId}\\)`));
+  assert.equal((await loadRunState(repoPath, runId)).reviews["7"].disposition, "approve-override");
+});

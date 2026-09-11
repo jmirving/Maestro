@@ -16,6 +16,10 @@ function isNormallyApprovable(evidence) {
   return evidence.state === "awaiting-human-review" && evidence.verdict === "approve" && !evidence.review;
 }
 
+function isOverrideApprovable(evidence) {
+  return evidence.state === "awaiting-rework" && evidence.verdict === "rework" && !evidence.review;
+}
+
 function summarizeEntry(resolved) {
   return {
     issue: resolved.issue,
@@ -26,23 +30,28 @@ function summarizeEntry(resolved) {
   };
 }
 
-async function explicitRunCandidates(repoPath, runId, requestedIssues) {
+async function explicitRunCandidates(repoPath, runId, requestedIssues, { override = false } = {}) {
   const state = await loadRunState(repoPath, runId);
   const available = new Map(issueIdsForRun(state).map((issue) => [issue, evidenceForIssue(state, issue)]));
   const targets = requestedIssues.length
     ? requestedIssues
     : [...available.keys()].filter((issue) => {
       const evidence = available.get(issue);
-      return evidence?.verdict === "approve" && !evidence.review;
+      return (override ? isOverrideApprovable(evidence) : isNormallyApprovable(evidence));
     });
 
   const missing = targets.filter((issue) => !available.has(issue));
   if (missing.length) throw new Error(`Issue #${missing[0]} is not part of Maestro run ${runId}.`);
-  const refused = targets.filter((issue) => available.get(issue)?.verdict !== "approve");
+  const refused = targets.filter((issue) => (
+    override ? !isOverrideApprovable(available.get(issue)) : !isNormallyApprovable(available.get(issue))
+  ));
   if (refused.length) {
     const issue = refused[0];
     const verdict = available.get(issue)?.verdict || "missing";
-    throw new Error(`Issue #${issue} is not validator-approved (${verdict}); it cannot be approved by the shorthand command.`);
+    if (override) {
+      throw new Error(`Issue #${issue} is not an unreviewed validator-REWORK item (${verdict}); it cannot be override-approved.`);
+    }
+    throw new Error(`Issue #${issue} is not an unreviewed validator-approved item (${verdict}); it cannot be approved by the shorthand command.`);
   }
 
   return {
@@ -53,20 +62,30 @@ async function explicitRunCandidates(repoPath, runId, requestedIssues) {
   };
 }
 
-async function approveIssues({ repoPath, runId = null, requestedIssues = [], reviewRecorder = recordReview }) {
+async function approveIssues({
+  repoPath,
+  runId = null,
+  requestedIssues = [],
+  override = false,
+  reviewRecorder = recordReview
+}) {
   const requested = [...new Set(requestedIssues.map(String))];
+  if (override && !requested.length) {
+    throw new Error("maestro approve --override requires at least one explicit issue number.");
+  }
   let candidates;
   let skipped;
 
   if (runId) {
-    ({ candidates, skipped } = await explicitRunCandidates(repoPath, String(runId), requested));
+    ({ candidates, skipped } = await explicitRunCandidates(repoPath, String(runId), requested, { override }));
   } else {
     const resolved = await resolveCurrentIssueStates(repoPath, requested);
     const current = requested.length
       ? resolved
       : resolved.filter((entry) => entry.evidence.state !== "integrated-pending-manifest");
-    candidates = current.filter((entry) => isNormallyApprovable(entry.evidence));
-    skipped = current.filter((entry) => !isNormallyApprovable(entry.evidence)).map(summarizeEntry);
+    const eligible = override ? isOverrideApprovable : isNormallyApprovable;
+    candidates = current.filter((entry) => eligible(entry.evidence));
+    skipped = current.filter((entry) => !eligible(entry.evidence)).map(summarizeEntry);
     if (requested.length && skipped.length) {
       const details = skipped.map((entry) => `#${entry.issue} (${entry.reason} in run ${entry.runId})`).join(", ");
       throw new Error(`Cannot approve the current workflow state for ${details}.`);
@@ -79,9 +98,16 @@ async function approveIssues({ repoPath, runId = null, requestedIssues = [], rev
       repoPath,
       runId: candidate.runId,
       issue: candidate.issue,
-      disposition: "approve"
+      disposition: override ? "approve-override" : "approve",
+      ...(override ? {
+        validatorOverride: {
+          verdict: candidate.evidence.verdict,
+          exitCode: candidate.evidence.validation?.exitCode ?? null,
+          report: candidate.evidence.validation?.report ?? null
+        }
+      } : {})
     });
-    approved.push({ issue: candidate.issue, runId: candidate.runId });
+    approved.push({ issue: candidate.issue, runId: candidate.runId, ...(override ? { override: true } : {}) });
   }
 
   const actionable = skipped.filter((entry) => [
@@ -90,16 +116,16 @@ async function approveIssues({ repoPath, runId = null, requestedIssues = [], rev
     "already-reviewed",
     "retry-required"
   ].includes(entry.reason));
-  return { explicitRunId: runId ? String(runId) : null, approved, skipped, actionable };
+  return { explicitRunId: runId ? String(runId) : null, override, approved, skipped, actionable };
 }
 
 function formatApprovalSummary(result) {
   const lines = [];
   if (result.approved.length) {
     const approved = result.approved.map((entry) => `#${entry.issue} (run ${entry.runId})`).join(", ");
-    lines.push(`Approved: ${approved}`);
+    lines.push(`${result.override ? "Override-approved" : "Approved"}: ${approved}`);
   } else {
-    lines.push("Approved: none");
+    lines.push(`${result.override ? "Override-approved" : "Approved"}: none`);
   }
   if (result.skipped.length) {
     lines.push(`Skipped: ${result.skipped.map((entry) => `#${entry.issue} (${entry.reason}; run ${entry.runId})`).join(", ")}`);
@@ -114,4 +140,4 @@ function formatApprovalSummary(result) {
   return `${lines.join("\n")}\n`;
 }
 
-module.exports = { approvalReason, isNormallyApprovable, approveIssues, formatApprovalSummary };
+module.exports = { approvalReason, isNormallyApprovable, isOverrideApprovable, approveIssues, formatApprovalSummary };

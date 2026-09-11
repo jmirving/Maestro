@@ -41,7 +41,12 @@ function unresolvedWork(states) {
   for (const state of [...states].sort((a, b) => String(a.runId).localeCompare(String(b.runId)))) {
     for (const worker of state.workers || []) {
       const issue = String(worker.issue);
-      byIssue.set(issue, { issue, runId: state.runId, mode: state.mode, ...classifyRunIssue(state, worker) });
+      const lifecycle = classifyRunIssue(state, worker);
+      if (lifecycle.state === "discarded") {
+        byIssue.delete(issue);
+        continue;
+      }
+      byIssue.set(issue, { issue, runId: state.runId, mode: state.mode, ...lifecycle });
     }
     if (["running", "failed"].includes(state.status)) {
       for (const item of state.plan?.selected || []) {

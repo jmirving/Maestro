@@ -84,6 +84,10 @@ Advisory overlap is stored separately under `planning.advisoryConflicts`; it can
 maestro approve 57 63
 ```
 
+Validator rework remains a fail-closed state: plain `maestro approve 7` refuses it and `maestro rework 7` is the recommended correction path. When a human intentionally disagrees with that verdict, `maestro approve 7 --override` records a distinct `approve-override` disposition together with a snapshot of the overridden validator verdict, exit code, and report. The override flag requires explicit issue numbers.
+
+`maestro discard 7` abandons an unreviewed validator-REWORK implementation without integrating it, completing the manifest item, or closing the GitHub issue. It records a `discard` disposition, preserves the isolated branch/worktree and run evidence for audit, and makes an item whose manifest status remains `ready` eligible for a fresh `start`/`next` run. Discard also requires explicit issue numbers.
+
 Use `maestro approve --run <run-id>` only when intentionally reviewing one historical run.
 
 `maestro rework` selects every currently relevant validator-rejected item from the newest actionable source run. `maestro rework <issue...>` resolves each requested issue to its current rework-required run, so the `Next:` command printed by approval can be executed directly. If selected issues belong to different source runs, Maestro creates one rework child per source run. Use `maestro rework --run <run-id>` for deliberate historical or whole-run rework.
@@ -95,6 +99,8 @@ Use `maestro approve --run <run-id>` only when intentionally reviewing one histo
 `maestro details <issue...>` is the verbose issue-level evidence view. It resolves each issue's latest relevant persisted run independently and shows worker results, commits, validator verdicts and reports, human review, integration state, and branch/worktree debugging identifiers. Rework and reconciliation children also include their parent/source evidence so the reason for a correction remains visible. Use `--run <run-id>` to inspect an explicit historical run; no workers or validators are rerun.
 
 `maestro status` is the concise decision surface between workflow actions. It projects each issue's latest relevant state, keeps validator verdicts distinct from human dispositions, reports whether commit is blocked or ready, and ends with executable next commands. In a mixed run it names every missing disposition; once settled, it says exactly which issues will integrate and which will remain out for rework. Use `maestro status <issue...>` for a focused view with the current worker commit, validator verdict, human-review state, integration eligibility, and next actions. `--watch` supports both the repository-wide and focused forms.
+
+For validator-REWORK items, status recommends rework first and shows override and discard only as explicit alternatives. `maestro details` displays the resulting disposition and any validator override provenance.
 
 The resolved manifest may be untracked, ignored, or contain pending edits when `maestro commit` starts. Maestro preserves that file while it integrates approved worker branches, restores it unchanged, and only then records completed work. An ignored manifest is explicitly force-added when that progress is committed. Changes to any other file still block integration. Worker or incoming changes that conflict with the preserved manifest stop with an explicit recovery message; the original manifest remains available in the named Git stash.
 

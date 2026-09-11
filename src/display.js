@@ -2,6 +2,7 @@ const { loadExecutionStates, reconcilePlan } = require("./work-state");
 const { currentIssueEvidenceFromStates } = require("./run-resolver");
 const { assessRunItems } = require("./existing-run");
 const { buildRecommendations, formatRecommendations } = require("./recommendations");
+const { isValidValidatorOverride } = require("./reviews");
 
 function numericSort(left, right) {
   return String(left).localeCompare(String(right), undefined, { numeric: true });
@@ -26,10 +27,17 @@ function describeIssue(config, issue, evidence, plan) {
   if (manifest?.status === "complete" || integration) {
     state = "integrated/complete";
     integrationState = "integrated";
+  } else if (review?.disposition === "discard") {
+    state = "implementation discarded, ready for a fresh run";
+    integrationState = "discarded; branch/worktree preserved and excluded from integration";
+    action = selected ? "maestro start" : null;
   } else if (review?.disposition === "rework-original") {
     state = "human rework disposition recorded, excluded from integration";
     integrationState = "excluded; will be reworked";
     action = `maestro rework ${issue}`;
+  } else if (isValidValidatorOverride(review, validation)) {
+    state = "human override approved, ready to integrate";
+    integrationState = "eligible when every item in its run has a human disposition";
   } else if (review && validation?.verdict === "approve") {
     state = "human approved, ready to integrate";
     integrationState = "eligible when every item in its run has a human disposition";
@@ -42,7 +50,7 @@ function describeIssue(config, issue, evidence, plan) {
     action = `maestro approve ${issue}`;
   } else if (validation?.verdict === "rework") {
     state = "validator requested rework, awaiting human rework disposition";
-    integrationState = "not eligible; record rework-original to exclude it";
+    integrationState = "not eligible; correct, override, or discard it";
   } else if (validation?.verdict === "human_gate") {
     state = "validator requested a human decision, awaiting human disposition";
     integrationState = "not eligible until human disposition";
@@ -95,16 +103,18 @@ function runReadiness(states, currentByIssue) {
     const assessment = assessRunItems(state);
     const integrate = assessment.integrable.map((entry) => entry.issue).filter((issue) => !integrated.has(issue));
     const skip = assessment.rework.map((entry) => entry.issue);
+    const discard = assessment.discarded.map((entry) => entry.issue);
     const missing = assessment.missing;
     const blocked = assessment.problems
       .filter((problem) => !missing.some((entry) => entry.issue === problem.issue))
       .map((problem) => ({ issue: problem.issue, kind: problem.kind || "valid integration state" }));
 
-    if (integrate.length || skip.length || missing.length || blocked.length) {
+    if (integrate.length || skip.length || discard.length || missing.length || blocked.length) {
       summaries.push({
         runId: String(state.runId),
         integrate,
         skip,
+        discard,
         missing,
         blocked,
         ready: !missing.length && !blocked.length && integrate.length > 0,
@@ -150,7 +160,7 @@ function issueHeading(item) {
 
 function formatCommit(lines, run) {
   if (run.ready) {
-    lines.push(`Commit: ready — integrates ${run.integrate.map((issue) => `#${issue}`).join(", ")}${run.skip.length ? `; skips ${run.skip.map((issue) => `#${issue}`).join(", ")} for rework` : ""}`);
+    lines.push(`Commit: ready — integrates ${run.integrate.map((issue) => `#${issue}`).join(", ")}${run.skip.length ? `; skips ${run.skip.map((issue) => `#${issue}`).join(", ")} for rework` : ""}${run.discard.length ? `; excludes discarded ${run.discard.map((issue) => `#${issue}`).join(", ")}` : ""}`);
     return;
   }
   const requirements = [

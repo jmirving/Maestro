@@ -42,8 +42,12 @@ Capabilities are repository-configured. Maestro should not assume that `postgres
 Completed worker runs are persisted so human review can happen after execution without respawning workers. Each issue in an approved run may receive one disposition:
 
 - `approve` — integrate the existing approved worker commit;
+- `approve-override` — explicitly integrate a validator-REWORK worker commit, retaining a snapshot of the overridden validator verdict, exit code, and report;
+- `discard` — exclude a validator-REWORK implementation from integration and return a still-ready manifest item to fresh-run eligibility;
 - `rework-original` — do not integrate; return the source issue to implementation;
 - `approve-with-follow-up` — integrate the source issue and create a linked follow-up issue from the review note.
+
+Override and discard are issue-explicit actions: bulk plain approval cannot select them. Rework remains the primary recommendation. Discard does not mutate GitHub or the manifest and does not delete the isolated branch/worktree; persisted evidence stays auditable while the discarded run stops deferring new execution for that issue. Repeated planning after discard therefore deterministically selects the item according to the normal manifest dependency and concurrency rules.
 
 Normal approval is issue-oriented. Maestro overlays persisted parent and child runs, chooses the newest workflow evidence for each issue, and approves every validator-approved issue that has not already been reviewed. A newer rework, rejection, running state, review, or integration supersedes older approval evidence. Explicit issue selections may therefore record approval provenance in different runs; `--run` remains the escape hatch for deliberate historical review.
 

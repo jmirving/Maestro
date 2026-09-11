@@ -146,3 +146,30 @@ test("maestro details accepts issue positionals and a historical run override", 
   assert.match(result.stdout, new RegExp(`Resolved run: ${runId}`));
   assert.equal(fs.existsSync(manifestPath), true);
 });
+
+test("details renders validator override provenance", async (t) => {
+  const { repoPath } = await fixture(t);
+  const runId = "20260910010101-aaaaaa";
+  const state = persistedRun(runId, "7", {
+    verdict: "rework",
+    validatorReport: "VERDICT: REWORK\nKnown false positive."
+  });
+  state.reviews["7"] = {
+    disposition: "approve-override",
+    validatorOverride: {
+      verdict: "rework",
+      exitCode: 0,
+      report: "VERDICT: REWORK\nKnown false positive."
+    },
+    recordedAt: "2026-09-11T12:00:00.000Z"
+  };
+  await saveRunState(repoPath, runId, state);
+
+  const text = formatDetails(await loadIssueDetails(repoPath, ["7"]));
+  assert.match(text, /Issue state: awaiting-integration/);
+  assert.match(text, /Disposition: approve-override/);
+  assert.match(text, /Overridden validator verdict: rework/);
+  assert.match(text, /Overridden validator exit code: 0/);
+  assert.match(text, /Overridden validator report:/);
+  assert.match(text, /Known false positive/);
+});

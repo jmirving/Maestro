@@ -47,7 +47,7 @@ test("mixed status separates validator results from missing human dispositions",
   assert.match(text, /Issue #13 — blocked, waiting on #2/);
   assert.match(text, /Commit: not ready — #2 needs human approval; #7 needs human rework disposition/);
   assert.match(text, /Recommended: `maestro rework 7`/);
-  assert.match(text, /Also available: `maestro details 7`, `maestro approve 2`/);
+  assert.match(text, /Also available: `maestro details 7`, `maestro approve 7 --override`, `maestro discard 7`, `maestro approve 2`/);
   assert.match(text, /`maestro review --run 20260910010101-aaaaaa --issue 7 --disposition rework-original`/);
   assert.doesNotMatch(text, /Issue #2 .*— approved$/m);
 });
@@ -71,9 +71,10 @@ test("focused issue status includes commit, validator, human review, integration
   assert.match(text, /Worker commit: rework-commit/);
   assert.match(text, /Validator: rework/);
   assert.match(text, /Human review: none/);
-  assert.match(text, /Integration: not eligible; record rework-original to exclude it/);
+  assert.match(text, /Integration: not eligible; correct, override, or discard it/);
   assert.doesNotMatch(text, /Issue #2 —/);
   assert.match(text, /Recommended: `maestro rework 7`/);
+  assert.match(text, /Also available: `maestro details 7`, `maestro approve 7 --override`, `maestro discard 7`/);
   assert.match(text, /`maestro review --run 20260910010101-aaaaaa --issue 7 --disposition rework-original`/);
   assert.match(text, /Commit: not ready — #2 needs human approval; #7 needs human rework disposition/);
 });
@@ -172,4 +173,20 @@ test("a child run does not hide the source disposition still required for siblin
 
   assert.match(text, /Commit: not ready — #7 needs human rework disposition/);
   assert.match(text, /maestro review --run 20260910010101-aaaaaa --issue 7 --disposition rework-original/);
+});
+
+test("override-approved status remains visibly distinct from ordinary approval", async () => {
+  const state = mixedRun();
+  state.reviews["2"] = { disposition: "approve" };
+  state.reviews["7"] = {
+    disposition: "approve-override",
+    validatorOverride: { verdict: "rework", exitCode: null, report: null }
+  };
+  const text = formatStatus(await statusSnapshot(config, "/unused", ["7"], {
+    stateLoader: async () => [state]
+  }));
+
+  assert.match(text, /human override approved, ready to integrate/);
+  assert.match(text, /Human review: approve-override/);
+  assert.match(text, /Integration: eligible when every item in its run has a human disposition/);
 });

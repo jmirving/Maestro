@@ -1,3 +1,5 @@
+const { isValidValidatorOverride } = require("./reviews");
+
 function classifyRunIssue(state, worker) {
   const issue = String(worker.issue);
   const validation = (state.validations || []).find((entry) => String(entry.issue) === issue);
@@ -11,8 +13,14 @@ function classifyRunIssue(state, worker) {
       action: "maestro status"
     };
   }
+  if (review?.disposition === "discard") {
+    return { state: "discarded", action: "maestro start" };
+  }
   if (review?.disposition === "rework-original") {
     return { state: "awaiting-rework", action: `maestro rework ${issue}` };
+  }
+  if (isValidValidatorOverride(review, validation)) {
+    return { state: "awaiting-integration", action: `maestro commit --run ${state.runId}` };
   }
   if (review && validation?.verdict === "approve") {
     return { state: "awaiting-integration", action: `maestro commit --run ${state.runId}` };

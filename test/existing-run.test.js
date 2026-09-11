@@ -32,3 +32,34 @@ test("classifyRunItems refuses non-approved work unless human review explicitly 
     reviews: { "47": { disposition: "approve" } }
   }), /not validator-approved/);
 });
+
+test("classifyRunItems integrates an audited override and excludes discarded work", () => {
+  const result = classifyRunItems({
+    runId: "run-3",
+    workers: [{ issue: "7" }, { issue: "8" }],
+    validations: [
+      { issue: "7", verdict: "rework", exitCode: 1, report: "fix this" },
+      { issue: "8", verdict: "rework" }
+    ],
+    reviews: {
+      "7": {
+        disposition: "approve-override",
+        validatorOverride: { verdict: "rework", exitCode: 1, report: "fix this" }
+      },
+      "8": { disposition: "discard" }
+    }
+  });
+
+  assert.deepEqual(result.integrable.map((entry) => entry.issue), ["7"]);
+  assert.deepEqual(result.discarded.map((entry) => entry.issue), ["8"]);
+  assert.deepEqual(result.rework, []);
+});
+
+test("classifyRunItems refuses override approval without matching validator provenance", () => {
+  assert.throws(() => classifyRunItems({
+    runId: "run-4",
+    workers: [{ issue: "7" }],
+    validations: [{ issue: "7", verdict: "rework" }],
+    reviews: { "7": { disposition: "approve-override" } }
+  }), /not validator-approved/);
+});

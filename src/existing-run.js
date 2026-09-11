@@ -1,5 +1,5 @@
 const { loadRunState, saveRunState } = require("./run-store");
-const { ensureFollowUp } = require("./reviews");
+const { ensureFollowUp, isValidValidatorOverride } = require("./reviews");
 const { integrateApproved } = require("./integrator");
 const { captureBaseline } = require("./baseline");
 
@@ -7,6 +7,7 @@ function assessRunItems(state) {
   const validationByIssue = new Map((state.validations || []).map((entry) => [String(entry.issue), entry]));
   const integrable = [];
   const rework = [];
+  const discarded = [];
   const missing = [];
   const problems = [];
 
@@ -26,6 +27,19 @@ function assessRunItems(state) {
       continue;
     }
 
+    if (review.disposition === "discard") {
+      if (validation?.verdict !== "rework") {
+        problems.push({
+          issue,
+          kind: "consistent validator/review state",
+          message: `Issue #${issue} was discarded without a validator-REWORK verdict; resolve the review disposition before integration.`
+        });
+        continue;
+      }
+      discarded.push({ issue, worker, validation, review });
+      continue;
+    }
+
     if (review.disposition === "rework-original") {
       if (validation?.verdict === "approve") {
         problems.push({
@@ -39,7 +53,8 @@ function assessRunItems(state) {
       continue;
     }
 
-    if (!validation || validation.verdict !== "approve") {
+    const validOverride = isValidValidatorOverride(review, validation);
+    if ((!validation || validation.verdict !== "approve") && !validOverride) {
       problems.push({
         issue,
         kind: "consistent validator/review state",
@@ -51,13 +66,13 @@ function assessRunItems(state) {
     integrable.push({ issue, worker, validation, review });
   }
 
-  return { integrable, rework, missing, problems };
+  return { integrable, rework, discarded, missing, problems };
 }
 
 function classifyRunItems(state) {
   const assessment = assessRunItems(state);
   if (assessment.problems.length) throw new Error(assessment.problems[0].message);
-  return { integrable: assessment.integrable, rework: assessment.rework };
+  return { integrable: assessment.integrable, rework: assessment.rework, discarded: assessment.discarded };
 }
 
 async function integrateExistingRun(config, {
@@ -69,7 +84,7 @@ async function integrateExistingRun(config, {
   shellRunner
 }) {
   const state = await loadRunState(repoPath, runId);
-  const { integrable, rework } = classifyRunItems(state);
+  const { integrable, rework, discarded } = classifyRunItems(state);
 
   for (const entry of integrable) {
     await ensureFollowUp({ config, repoPath, state, issue: entry.issue, runner });
@@ -93,6 +108,7 @@ async function integrateExistingRun(config, {
       baseline: state.baseline,
       integration: state.integration || [],
       rework: rework.map((entry) => ({ issue: entry.issue, verdict: entry.validation?.verdict || "missing" })),
+      discarded: discarded.map((entry) => ({ issue: entry.issue, verdict: entry.validation?.verdict || "missing" })),
       resumed: true,
       nothingToDo: true
     };
@@ -130,7 +146,8 @@ async function integrateExistingRun(config, {
     baseline: state.baseline,
     integration: state.integration,
     newlyIntegrated,
-    rework: rework.map((entry) => ({ issue: entry.issue, verdict: entry.validation?.verdict || "missing" }))
+    rework: rework.map((entry) => ({ issue: entry.issue, verdict: entry.validation?.verdict || "missing" })),
+    discarded: discarded.map((entry) => ({ issue: entry.issue, verdict: entry.validation?.verdict || "missing" }))
   };
 }
 

@@ -7,6 +7,7 @@ const { dryRun, executeRun, executeAndIntegrate, continuousRun } = require("../s
 const { latestRunBundle, copyToClipboard } = require("../src/reporter");
 const { recordReview } = require("../src/reviews");
 const { approveIssues, formatApprovalSummary } = require("../src/approval");
+const { discardIssues, formatDiscardSummary } = require("../src/discard");
 const { integrateExistingRun } = require("../src/existing-run");
 const { resolveIssueReworkSources, executeReworkRun } = require("../src/rework");
 const { executeReconcileRun } = require("../src/reconcile");
@@ -35,7 +36,8 @@ function usage() {
   maestro status [manifest.json] [issue ...] [--repo-path <path>] [--watch]
   maestro details [manifest.json] <issue ...> [--repo-path <path>] [--run <run-id>]
   maestro output [--repo-path <path>]
-  maestro approve [issue ...] [manifest.json] [--repo-path <path>] [--run <run-id>]
+  maestro approve [issue ...] [manifest.json] [--repo-path <path>] [--run <run-id>] [--override]
+  maestro discard <issue ...> [manifest.json] [--repo-path <path>] [--run <run-id>]
   maestro commit [manifest.json] [--repo-path <path>] [--run <run-id>] [--close-issues]
   maestro next [manifest.json] [--repo-path <path>] [--rerun]
 
@@ -66,13 +68,17 @@ function issuePositionals(rest) {
   const issues = [];
   for (let index = start; index < rest.length; index += 1) {
     const value = rest[index];
-    if (value.startsWith("--")) {
+    if (["--repo-path", "--run"].includes(value)) {
+      if (!rest[index + 1] || rest[index + 1].startsWith("--")) throw new Error(`${value} requires a value.`);
       index += 1;
       continue;
     }
-    if (/^\d+$/.test(value)) issues.push(value);
+    if (value === "--override") continue;
+    if (value.startsWith("--")) throw new Error(`Unknown review option: ${value}`);
+    if (!/^[1-9]\d*$/.test(value)) throw new Error(`Invalid issue number: ${value}`);
+    issues.push(value);
   }
-  return issues;
+  return [...new Set(issues)];
 }
 
 function draftIssuePositionals(rest) {
@@ -191,8 +197,8 @@ async function outputLatest(repoPath, { copy = true, print = true, config = null
   return { ...bundle, text };
 }
 
-async function approveLatest({ config, repoPath, runId, requestedIssues }) {
-  const result = await approveIssues({ config, repoPath, runId, requestedIssues });
+async function approveLatest({ config, repoPath, runId, requestedIssues, override = false }) {
+  const result = await approveIssues({ config, repoPath, runId, requestedIssues, override });
   process.stdout.write(formatApprovalSummary(result));
   return result;
 }
@@ -334,8 +340,20 @@ async function main() {
       config,
       repoPath,
       runId: option(args, "--run"),
+      requestedIssues: issuePositionals(rest),
+      override: args.includes("--override")
+    });
+    process.stdout.write(await workflowFooter(config, repoPath));
+    return;
+  }
+
+  if (command === "discard") {
+    const result = await discardIssues({
+      repoPath,
+      runId: option(args, "--run"),
       requestedIssues: issuePositionals(rest)
     });
+    process.stdout.write(formatDiscardSummary(result));
     process.stdout.write(await workflowFooter(config, repoPath));
     return;
   }
