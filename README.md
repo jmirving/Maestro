@@ -42,6 +42,7 @@ cd ~/Nexus
 maestro plan
 maestro start
 maestro status
+maestro details 57
 maestro output
 # review the pretty-printed output; the same output is also on the clipboard
 maestro approve
@@ -86,6 +87,8 @@ maestro approve 57 63
 `maestro commit` integrates the latest reviewed run, updates the matching work items to `complete` in `.maestro.json`, commits that manifest progress, and pushes it so the next invocation advances to newly unblocked work.
 
 `maestro start` and `maestro next` reconcile manifest readiness with every persisted run and active isolated worktree. Work already executing, awaiting review, awaiting rework, or awaiting integration is shown as deferred instead of being started again. Use `--rerun` only when intentionally retrying or discarding that lifecycle protection; reruns are never implicit.
+
+`maestro details <issue...>` is the verbose issue-level evidence view. It resolves each issue's latest relevant persisted run independently and shows worker results, commits, validator verdicts and reports, human review, integration state, and branch/worktree debugging identifiers. Rework and reconciliation children also include their parent/source evidence so the reason for a correction remains visible. Use `--run <run-id>` to inspect an explicit historical run; no workers or validators are rerun.
 
 The resolved manifest may be untracked, ignored, or contain pending edits when `maestro commit` starts. Maestro preserves that file while it integrates approved worker branches, restores it unchanged, and only then records completed work. An ignored manifest is explicitly force-added when that progress is committed. Changes to any other file still block integration. Worker or incoming changes that conflict with the preserved manifest stop with an explicit recovery message; the original manifest remains available in the named Git stash.
 

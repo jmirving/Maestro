@@ -10,6 +10,7 @@ const { executeReworkRun } = require("../src/rework");
 const { executeReconcileRun } = require("../src/reconcile");
 const { latestRunId, loadRunState } = require("../src/run-store");
 const { statusSnapshot, formatStatus, watchStatus } = require("../src/display");
+const { loadIssueDetails, formatDetails } = require("../src/details");
 const { discoverGitHubRepository, loadGitHubIssues } = require("../src/github");
 const { proposeDraft, formatDraftSummary, readExistingManifest, writeManifest } = require("../src/draft");
 const { createAgentPlanner } = require("../src/agent-planner");
@@ -29,6 +30,7 @@ function usage() {
   maestro draft [manifest.json] [issue ...] [--repo-path <path>] [--all] [--agent] [--write]
   maestro start [manifest.json] [--repo-path <path>] [--rerun]
   maestro status [manifest.json] [--repo-path <path>] [--watch]
+  maestro details [manifest.json] <issue ...> [--repo-path <path>] [--run <run-id>]
   maestro output [--repo-path <path>]
   maestro approve [issue ...] [manifest.json] [--repo-path <path>] [--run <run-id>]
   maestro commit [manifest.json] [--repo-path <path>] [--run <run-id>] [--close-issues]
@@ -84,6 +86,25 @@ function draftIssuePositionals(rest) {
     issues.push(value);
   }
   return [...new Set(issues)];
+}
+
+function detailsIssuePositionals(rest) {
+  const manifest = explicitManifest(rest);
+  const issues = [];
+  for (let index = manifest ? 1 : 0; index < rest.length; index += 1) {
+    const value = rest[index];
+    if (["--repo-path", "--run"].includes(value)) {
+      if (!rest[index + 1] || rest[index + 1].startsWith("--")) throw new Error(`${value} requires a value.`);
+      index += 1;
+      continue;
+    }
+    if (value.startsWith("--")) throw new Error(`Unknown maestro details option: ${value}`);
+    if (!/^[1-9]\d*$/.test(value)) throw new Error(`Invalid issue number: ${value}`);
+    issues.push(value);
+  }
+  const unique = [...new Set(issues)];
+  if (!unique.length) throw new Error("maestro details requires at least one issue number.");
+  return unique;
 }
 
 function resolveContext(rest, args, { manifest = true } = {}) {
@@ -244,6 +265,16 @@ async function main() {
   if (command === "status") {
     if (args.includes("--watch")) await watchStatus(config, repoPath);
     else process.stdout.write(formatStatus(await statusSnapshot(config, repoPath)));
+    return;
+  }
+
+  if (command === "details") {
+    const requestedIssues = detailsIssuePositionals(rest);
+    const details = await loadIssueDetails(repoPath, requestedIssues, {
+      runId: option(args, "--run"),
+      config
+    });
+    process.stdout.write(formatDetails(details, { repository: config.repository }));
     return;
   }
 
