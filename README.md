@@ -32,6 +32,12 @@ npm link
 
 `npm link` exposes the repository's existing `bin/maestro.js` as the `maestro` command in the active Node environment.
 
+## CLI help
+
+Start with `maestro help`. It is the canonical interactive guide to Maestro's operating model and groups commands by workflow purpose. `maestro help <command>` and `maestro <command> --help` show the same command-specific guidance, including prerequisites, state changes, likely next actions, and examples. Help resolves before repository discovery, so it also works outside a configured checkout.
+
+Use `maestro help workflow` or [docs/workflows.md](docs/workflows.md) for the expanded supervised lifecycle, mixed outcomes, resume/retry behavior, conflict recovery, and the advanced `run --continuous` compatibility path.
+
 ## Everyday target-repository workflow
 
 When run from a target repository containing `.maestro.json`, Maestro now discovers both the Git root and manifest automatically:

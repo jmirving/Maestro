@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
+const { parseInvocation, resolveHelp } = require("../src/help");
 const { computePlan } = require("../src/planner");
 const { computeEffectivePlan } = require("../src/work-state");
 const { dryRun, executeRun, executeAndIntegrate, continuousRun } = require("../src/controller");
@@ -20,38 +21,12 @@ const { proposeDraft, formatDraftSummary, readExistingManifest, writeManifest } 
 const { createAgentPlanner } = require("../src/agent-planner");
 const { runPlanningAnalyzer } = require("../src/planning-analysis");
 const {
-  normalizeCommand,
   resolveRepoPath,
   resolveManifestPath,
   resolveDraftManifestPath,
   looksLikeManifest,
   persistManifestCompletion
 } = require("../src/cli-context");
-
-function usage() {
-  console.error(`Usage:
-  maestro plan [manifest.json] [--repo-path <path>]
-  maestro draft [manifest.json] [issue ...] [--repo-path <path>] [--all] [--agent] [--write]
-  maestro start [manifest.json] [--repo-path <path>] [--rerun]
-  maestro status [manifest.json] [issue ...] [--repo-path <path>] [--watch]
-  maestro details [manifest.json] <issue ...> [--repo-path <path>] [--run <run-id>]
-  maestro output [--repo-path <path>]
-  maestro approve [issue ...] [manifest.json] [--repo-path <path>] [--run <run-id>] [--override]
-  maestro discard <issue ...> [manifest.json] [--repo-path <path>] [--run <run-id>]
-  maestro commit [manifest.json] [--repo-path <path>] [--run <run-id>] [--close-issues]
-  maestro next [manifest.json] [--repo-path <path>] [--rerun]
-
-Short aliases: s=start, st=status, o=output, a=approve, c=commit, n=next
-
-Advanced commands:
-  maestro run [manifest.json] [--repo-path <path>] [--execute|--integrate|--continuous] [--allow-failing-baseline]
-  maestro rework [issue ...] [manifest.json] [--repo-path <path>] [--run <source-run-id>] [--allow-failing-baseline]
-  maestro reconcile [manifest.json] [--repo-path <path>] --run <source-run-id> [--issue <number>] [--allow-failing-baseline]
-  maestro report [--repo-path <path>] [--copy]
-  maestro review [manifest.json] [--repo-path <path>] --run <run-id> --issue <number> --disposition <approve|rework-original|approve-with-follow-up> [--title <title>] [--notes <notes>]
-  maestro integrate-run [manifest.json] [--repo-path <path>] --run <run-id> [--close-issues]`);
-  process.exit(2);
-}
 
 function option(args, name) {
   const index = args.indexOf(name);
@@ -220,8 +195,13 @@ async function commitLatest({ config, repoPath, manifestPath, runId, closeIssues
 
 async function main() {
   const args = process.argv.slice(2);
-  if (!args.length || ["-h", "--help", "help"].includes(args[0])) usage();
-  const command = normalizeCommand(args[0]);
+  const help = resolveHelp(args);
+  if (help.requested) {
+    process.stdout.write(`${help.text}\n`);
+    return;
+  }
+  const invocation = parseInvocation(args);
+  const command = invocation.command;
   const rest = args.slice(1);
 
   if (command === "output") {
@@ -388,7 +368,6 @@ async function main() {
 
   if (command === "reconcile") {
     const sourceRunId = option(args, "--run");
-    if (!sourceRunId) usage();
     const issue = option(args, "--issue");
     const result = await executeReconcileRun(config, { repoPath, sourceRunId, issueIds: issue ? [issue] : null });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -400,7 +379,6 @@ async function main() {
     const runId = option(args, "--run");
     const issue = option(args, "--issue");
     const disposition = option(args, "--disposition");
-    if (!runId || !issue || !disposition) usage();
     const result = await recordReview({
       config,
       repoPath,
@@ -416,13 +394,10 @@ async function main() {
 
   if (command === "integrate-run") {
     const runId = option(args, "--run");
-    if (!runId) usage();
     const result = await integrateExistingRun(config, { repoPath, manifestPath, runId, closeIssues: args.includes("--close-issues") });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;
   }
-
-  if (command !== "run") usage();
 
   let result;
   if (args.includes("--continuous")) result = await continuousRun(config, { repoPath });
@@ -434,7 +409,7 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(error.stack || error.message);
+  console.error(error.code === "CLI_USAGE" ? error.message : error.stack || error.message);
   if (error.baselineComparison) console.error(`Baseline comparison:\n${JSON.stringify(error.baselineComparison, null, 2)}`);
   if (error.result) {
     const combined = `${error.result.stdout || ""}\n${error.result.stderr || ""}`.trim();

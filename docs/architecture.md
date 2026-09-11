@@ -30,6 +30,12 @@ GitHub, Git, Codex CLI, Docker/PostgreSQL, Playwright, and future agent runtimes
 
 Manifest drafting follows the same boundary. The GitHub adapter discovers the checkout's repository and reads issue facts; the deterministic draft core merges those facts into an existing manifest without invoking workers or making provider mutations. A planning-analysis interface accepts injected advisory analyzers, while the bundled shared-label analyzer only activates for labels explicitly named in repository configuration. Hard dependency parsing is limited to explicit issue syntax and existing manifest truth. Advisory relationships retain analyzer, confidence, reason, and source provenance and never become `blockedBy` entries.
 
+### CLI help and command registration
+
+Implemented command names, aliases, accepted flags, examples, workflow grouping, and operational guidance share a structured command registry. The CLI validates invocations against that registry before repository discovery or runtime dispatch, and the help renderer consumes the same entries. Walkthrough topics are registered separately so expanded task guidance can grow without turning the top-level terminal help into a monolithic document.
+
+Help resolution is an adapter-free boundary: top-level help, command help, and recovery-command help must not discover a repository, load a manifest, invoke an agent, run capability checks, or mutate local/GitHub state. Feature work that adds commands or lifecycle modes owns the matching registry entry, examples, and expanded walkthrough updates.
+
 ### Persisted-run resolution
 
 Issue-oriented commands resolve persisted execution evidence through the shared run resolver. It can select the newest run globally, the newest run containing a requested set of issues, or the newest semantic match by lifecycle state, validator verdict, human-review disposition, run status, mode, or integration state. Callers that operate across diverged issue histories can resolve each issue independently; callers that require one common run fail clearly when the issues resolve to different runs. An explicit run ID always constrains lookup to that historical run.

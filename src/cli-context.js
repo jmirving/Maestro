@@ -2,14 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
-const COMMAND_ALIASES = new Map([
-  ["s", "start"],
-  ["st", "status"],
-  ["o", "output"],
-  ["a", "approve"],
-  ["c", "commit"],
-  ["n", "next"]
-]);
+const { COMMAND_ALIASES } = require("./command-registry");
 
 function normalizeCommand(command) {
   return COMMAND_ALIASES.get(command) || command;
