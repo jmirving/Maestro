@@ -49,9 +49,14 @@ test("validator approval, human approval, and completed integration produce acce
 
   assert.deepEqual(
     buildRecommendations([{ issue: "7", validator: "approve", humanReview: "approve" }], [], [{ id: "8" }], {
-      advanceCommand: "maestro next"
+      states: [{ integration: [{ issue: "7", integratedSha: "integrated" }] }]
     }),
     { recommended: "maestro next", alternatives: [] }
+  );
+
+  assert.deepEqual(
+    buildRecommendations([], [], [{ id: "8" }]),
+    { recommended: "maestro start", alternatives: [] }
   );
 });
 

@@ -7,7 +7,11 @@ function uniqueActions(actions) {
   return actions.filter((action) => action?.command && !seen.has(action.command) && seen.add(action.command));
 }
 
-function buildRecommendations(items, readiness, selected, { advanceCommand = "maestro start" } = {}) {
+function hasRecordedIntegration(states) {
+  return states.some((state) => Array.isArray(state.integration) && state.integration.length > 0);
+}
+
+function buildRecommendations(items, readiness, selected, { states = [] } = {}) {
   const primary = [];
   const alternatives = [];
   const currentRework = items.filter((item) => item.validator === "rework" && !item.humanReview);
@@ -54,7 +58,9 @@ function buildRecommendations(items, readiness, selected, { advanceCommand = "ma
     alternatives.push({ command: `maestro details ${reviewedRework.map((item) => item.issue).join(" ")}` });
   }
 
-  if (!primary.length && selected.length) primary.push({ command: advanceCommand });
+  if (!primary.length && selected.length) {
+    primary.push({ command: hasRecordedIntegration(states) ? "maestro next" : "maestro start" });
+  }
 
   if (!primary.length) {
     const stateActions = [...new Set(items.map((item) => item.action).filter(Boolean))];

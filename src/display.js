@@ -116,8 +116,7 @@ function runReadiness(states, currentByIssue) {
 }
 
 async function statusSnapshot(config, repoPath, requestedIssues = [], {
-  stateLoader = loadExecutionStates,
-  advanceCommand = "maestro start"
+  stateLoader = loadExecutionStates
 } = {}) {
   const states = await stateLoader(repoPath);
   const plan = reconcilePlan(config, states);
@@ -140,7 +139,7 @@ async function statusSnapshot(config, repoPath, requestedIssues = [], {
     focused: requested.length > 0,
     items,
     readiness,
-    recommendations: buildRecommendations(items, readiness, plan.selected || [], { advanceCommand }),
+    recommendations: buildRecommendations(items, readiness, plan.selected || [], { states }),
     selected: plan.selected?.map((item) => String(item.id)) || []
   };
 }

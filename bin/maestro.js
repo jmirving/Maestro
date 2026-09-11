@@ -173,15 +173,15 @@ function setResultExitCode(result) {
   if (result.validations?.some((entry) => entry.verdict !== "approve")) process.exitCode = 1;
 }
 
-async function workflowFooter(config, repoPath, { advanceCommand = "maestro start", includeIssues = true } = {}) {
-  const snapshot = await statusSnapshot(config || { work: {} }, repoPath, [], { advanceCommand });
+async function workflowFooter(config, repoPath, { includeIssues = true } = {}) {
+  const snapshot = await statusSnapshot(config || { work: {} }, repoPath);
   return formatRecommendationFooter(snapshot, { includeIssues });
 }
 
 async function outputLatest(repoPath, { copy = true, print = true, config = null, recommendations = false } = {}) {
   const bundle = await latestRunBundle(repoPath);
   const text = recommendations
-    ? appendRecommendationFooter(bundle.text, await workflowFooter(config, repoPath, { advanceCommand: "maestro next" }))
+    ? appendRecommendationFooter(bundle.text, await workflowFooter(config, repoPath))
     : bundle.text;
   if (print) process.stdout.write(text);
   if (copy) {
@@ -324,9 +324,7 @@ async function main() {
     const plan = args.includes("--rerun") ? computePlan(config) : await computeEffectivePlan(config, repoPath);
     const result = await executeRun(config, { repoPath, plan });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    process.stdout.write(await workflowFooter(config, repoPath, {
-      advanceCommand: command === "next" ? "maestro next" : "maestro start"
-    }));
+    process.stdout.write(await workflowFooter(config, repoPath));
     setResultExitCode(result);
     return;
   }
@@ -350,7 +348,7 @@ async function main() {
       runId: option(args, "--run"),
       closeIssues: args.includes("--close-issues")
     });
-    process.stdout.write(await workflowFooter(loadConfig(manifestPath, args), repoPath, { advanceCommand: "maestro next" }));
+    process.stdout.write(await workflowFooter(loadConfig(manifestPath, args), repoPath));
     return;
   }
 

@@ -95,6 +95,55 @@ test("status CLI accepts issue positionals and resolves the latest relevant run"
   assert.doesNotMatch(result.stdout, /Issue #2 —/);
 });
 
+test("repository status derives start versus next from persisted integration history", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-status-advance-"));
+  const repoPath = path.join(root, "target");
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  const runId = "20260910030303-cccccc";
+  const advancedConfig = {
+    repository: "example/repo",
+    defaultConcurrency: 1,
+    work: {
+      "2": { status: "complete", title: "Integrated work" },
+      "3": { status: "ready", title: "Newly ready work", blockedBy: ["2"] }
+    }
+  };
+  const integratedRun = {
+    runId,
+    mode: "execute",
+    status: "awaiting-review",
+    plan: { selected: [{ id: "2", title: "Integrated work" }] },
+    workers: [{ issue: "2", exitCode: 0, headSha: "head-2" }],
+    validations: [{ issue: "2", verdict: "approve" }],
+    reviews: { "2": { disposition: "approve" } },
+    integration: [{ issue: "2", integratedSha: "integrated-2" }],
+    integratedAt: "2026-09-10T03:03:03.000Z"
+  };
+  await fs.mkdir(repoPath);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(manifestPath, `${JSON.stringify(advancedConfig)}\n`);
+  await saveRunState(repoPath, runId, integratedRun);
+
+  const initial = formatStatus(await statusSnapshot({
+    repository: "example/repo",
+    defaultConcurrency: 1,
+    work: { "2": { status: "ready", title: "Initial work" } }
+  }, "/unused", [], { stateLoader: async () => [] }));
+  assert.match(initial, /Recommended: `maestro start`/);
+
+  const snapshotText = formatStatus(await statusSnapshot(advancedConfig, repoPath));
+  assert.match(snapshotText, /Next wave: #3/);
+  assert.match(snapshotText, /Recommended: `maestro next`/);
+  assert.doesNotMatch(snapshotText, /Recommended: `maestro start`/);
+
+  const cli = path.resolve(__dirname, "../bin/maestro.js");
+  const result = spawnSync(process.execPath, [cli, "status", "--repo-path", repoPath], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Next wave: #3/);
+  assert.match(result.stdout, /Recommended: `maestro next`/);
+  assert.doesNotMatch(result.stdout, /Recommended: `maestro start`/);
+});
+
 test("focused status rejects issues absent from both manifest and persisted workflow", async () => {
   await assert.rejects(
     statusSnapshot(config, "/unused", ["404"], { stateLoader: async () => [mixedRun()] }),
