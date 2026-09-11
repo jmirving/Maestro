@@ -1,6 +1,7 @@
 const { loadExecutionStates, reconcilePlan } = require("./work-state");
 const { currentIssueEvidenceFromStates } = require("./run-resolver");
 const { assessRunItems } = require("./existing-run");
+const { buildRecommendations, formatRecommendations } = require("./recommendations");
 
 function numericSort(left, right) {
   return String(left).localeCompare(String(right), undefined, { numeric: true });
@@ -82,10 +83,6 @@ function describeIssue(config, issue, evidence, plan) {
   };
 }
 
-function reviewCommand(entry, disposition) {
-  return `maestro review --run ${entry.runId} --issue ${entry.issue} --disposition ${disposition}`;
-}
-
 function runReadiness(states, currentByIssue) {
   const latestRunId = [...states].map((state) => String(state.runId)).sort().at(-1) || null;
   const summaries = [];
@@ -118,40 +115,10 @@ function runReadiness(states, currentByIssue) {
   return summaries;
 }
 
-function buildActions(items, readiness, selected) {
-  const actions = [];
-  const approvals = items.filter((item) => item.validator === "approve" && !item.humanReview);
-  if (approvals.length) actions.push({ recommended: true, command: `maestro approve ${approvals.map((item) => item.issue).join(" ")}` });
-
-  for (const item of items.filter((entry) => ["rework", "human_gate"].includes(entry.validator) && !entry.humanReview)) {
-    actions.push({ recommended: !actions.length, command: reviewCommand(item, "rework-original") });
-  }
-  for (const run of readiness) {
-    for (const missing of run.missing.filter((entry) => entry.kind === "human rework disposition")) {
-      actions.push({
-        recommended: !actions.length,
-        command: `maestro review --run ${run.runId} --issue ${missing.issue} --disposition rework-original`
-      });
-    }
-  }
-  for (const run of readiness.filter((entry) => entry.ready)) {
-    actions.push({ recommended: !actions.length, command: run.command });
-  }
-  for (const item of items.filter((entry) => entry.humanReview === "rework-original")) {
-    actions.push({ recommended: !actions.length, command: `maestro rework ${item.issue}` });
-  }
-  if (!actions.length && selected.length) actions.push({ recommended: true, command: "maestro start" });
-  if (!actions.length) {
-    for (const command of [...new Set(items.map((item) => item.action).filter(Boolean))]) {
-      actions.push({ recommended: !actions.length, command });
-    }
-  }
-
-  const seen = new Set();
-  return actions.filter((entry) => !seen.has(entry.command) && seen.add(entry.command));
-}
-
-async function statusSnapshot(config, repoPath, requestedIssues = [], { stateLoader = loadExecutionStates } = {}) {
+async function statusSnapshot(config, repoPath, requestedIssues = [], {
+  stateLoader = loadExecutionStates,
+  advanceCommand = "maestro start"
+} = {}) {
   const states = await stateLoader(repoPath);
   const plan = reconcilePlan(config, states);
   const requested = [...new Set(requestedIssues.map(String))];
@@ -173,7 +140,7 @@ async function statusSnapshot(config, repoPath, requestedIssues = [], { stateLoa
     focused: requested.length > 0,
     items,
     readiness,
-    actions: buildActions(items, readiness, plan.selected || []),
+    recommendations: buildRecommendations(items, readiness, plan.selected || [], { advanceCommand }),
     selected: plan.selected?.map((item) => String(item.id)) || []
   };
 }
@@ -215,12 +182,8 @@ function formatStatus(snapshot) {
   if (snapshot.selected.length && !snapshot.items.some((item) => item.action && item.action !== "maestro start")) {
     lines.push(`Next wave: ${snapshot.selected.map((issue) => `#${issue}`).join(", ")}`);
   }
-  if (snapshot.actions.length) {
-    lines.push("");
-    snapshot.actions.forEach((action, index) => {
-      lines.push(`${action.recommended ? "Recommended" : index === 0 ? "Next" : "Also available"}: ${action.command}`);
-    });
-  }
+  const recommendations = formatRecommendations(snapshot.recommendations);
+  if (recommendations) lines.push("", recommendations.trimEnd());
   return `${lines.join("\n")}\n`;
 }
 

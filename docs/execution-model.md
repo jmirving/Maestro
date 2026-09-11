@@ -51,6 +51,8 @@ The corresponding `maestro rework <issue...>` command uses the same current-stat
 
 Status is a read-only projection over that current-state overlay and the effective manifest plan. It presents validator outcome, human disposition, and integration eligibility as separate dimensions. Commit readiness is evaluated against every item in each relevant persisted run, including source-run items superseded by a child correction, so a newer child cannot hide a disposition still required to integrate an approved sibling. Repository-wide status stays issue-oriented; focused status adds the latest worker commit and explicit evidence fields without becoming a replacement for verbose `details` output.
 
+User-facing workflow commands consume one shared recommendation projection built from that persisted/current state. It emits at most one primary command and compact valid alternatives. Rework is primary for mixed validator results, details and unaffected approvals remain available, validator-approved work advances to human approval, fully reviewed work advances to commit, and a completed integration advances with `next` when the effective plan exposes more work. Raw process exit codes do not choose the recommendation.
+
 Workers must provide a `### Human review` section that identifies where a visual or behavioral change should appear, the relevant persona/state, and the highest-value regression check. Human review is intentionally lightweight; it is not a duplicate automated test plan.
 
 `integrate-run` consumes the exact persisted worker branches and validator verdicts. It must not respawn implementation workers. Follow-up issues are created before integration with source issue, run ID, and implementation commit provenance.

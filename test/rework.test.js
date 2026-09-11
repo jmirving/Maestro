@@ -8,6 +8,10 @@ const { buildWorkerPrompt } = require("../src/worker");
 const { executeReworkRun, resolveIssueReworkSources } = require("../src/rework");
 const { saveRunState } = require("../src/run-store");
 
+function parseLeadingJson(stdout) {
+  return JSON.parse(stdout.split("\n\nIssue #", 1)[0]);
+}
+
 
 test("rework prompt preserves prior implementation and includes validator corrections", () => {
   const prompt = buildWorkerPrompt({
@@ -282,7 +286,7 @@ if (index >= 0) fs.writeFileSync(process.argv[index + 1], "Result: complete\\n")
   });
 
   assert.equal(result.status, 0, result.stderr);
-  const rework = JSON.parse(result.stdout);
+  const rework = parseLeadingJson(result.stdout);
   assert.equal(rework.parentRunId, sourceRunId);
   assert.deepEqual(rework.plan.selected.map((entry) => entry.id), ["7", "13"]);
 

@@ -109,7 +109,9 @@ c   commit
 n   next
 ```
 
-`maestro output` always pretty-prints the latest combined worker/validator bundle to the terminal and copies the identical text to the clipboard.
+`maestro start`, `next`, `rework`, `approve`, `commit`, `status`, and `output` end with the same state-derived recommendation footer. Mixed validator results prioritize issue-oriented rework while keeping inspection and unaffected approvals available; validator-approved work recommends human approval, fully reviewed runs recommend commit, and integrated work with another ready wave recommends `maestro next`. Recommendations omit run IDs unless a historical run is required by the accepted command.
+
+`maestro output` always pretty-prints the latest combined worker/validator bundle plus its compact operational summary and recommendation footer to the terminal, and copies that identical shareable text to the clipboard.
 
 ## Explicit / advanced CLI
 

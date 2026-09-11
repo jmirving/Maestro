@@ -111,13 +111,6 @@ function formatApprovalSummary(result) {
   } else {
     lines.push("Still actionable: none");
   }
-  const rework = result.actionable.filter((entry) => entry.reason === "rework-required");
-  if (rework.length) {
-    const command = result.explicitRunId
-      ? `maestro rework --run ${result.explicitRunId}`
-      : `maestro rework ${rework.map((entry) => entry.issue).join(" ")}`;
-    lines.push(`Next: ${command}`);
-  }
   return `${lines.join("\n")}\n`;
 }
 

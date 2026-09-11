@@ -36,6 +36,8 @@ Issue-oriented commands resolve persisted execution evidence through the shared 
 
 The details projection is a read-only consumer of that resolver. It formats only requested issues, follows recorded `parentRunId` links for rework/reconciliation provenance, and exposes the persisted worker, validator, review, and integration evidence without invoking execution adapters. Raw combined artifacts remain the responsibility of `maestro output`.
 
+The recommendation formatter is another consumer of the shared current-state projection. It centralizes command eligibility and priority instead of letting individual CLI handlers infer actions from their own exit status. `status` renders the footer beneath its concise decision view; execution commands append the same issue summary and footer; and `output` includes the footer in both terminal and clipboard copies of the artifact.
+
 The optional agent planner uses that planning-analysis interface but keeps model execution in a provider adapter. Maestro assembles and hashes a bounded snapshot of tracked repository context, enforcing the byte cap against the exact prompt including its schema and all serialized inputs. It invokes Codex read-only from a temporary directory with user configuration, external tools, and hooks disabled, then schema-validates its JSON response. The pure draft merger applies explicit precedence and confidence policy, validates references and cycles, and produces the same inspect-before-write proposal flow as deterministic drafting. This keeps provider availability, retries, and timeouts outside scheduling and makes semantic merging testable without Codex or GitHub.
 
 ## Isolation

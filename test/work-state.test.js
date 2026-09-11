@@ -6,6 +6,10 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { computePlan } = require("../src/planner");
 const { saveRunState } = require("../src/run-store");
+
+function parseLeadingJson(stdout) {
+  return JSON.parse(stdout.split("\n\nIssue #", 1)[0]);
+}
 const { reportRootForRepo } = require("../src/reporter");
 const { reconcilePlan, computeEffectivePlan } = require("../src/work-state");
 
@@ -165,8 +169,8 @@ test("repeated maestro next invocations do not execute a persisted item again", 
 
   assert.equal(first.status, 0, first.stderr);
   assert.equal(repeated.status, 0, repeated.stderr);
-  assert.deepEqual(JSON.parse(first.stdout).plan.selected, []);
-  assert.deepEqual(JSON.parse(repeated.stdout).plan.selected, []);
+  assert.deepEqual(parseLeadingJson(first.stdout).plan.selected, []);
+  assert.deepEqual(parseLeadingJson(repeated.stdout).plan.selected, []);
   assert.match(first.stdout, /maestro approve 2 --run 20260910060606-ffffff/);
 });
 
@@ -195,11 +199,11 @@ test("legacy reports defer work after their disposable worktree is removed", asy
 
   assert.equal(status.status, 0, status.stderr);
   assert.match(status.stdout, /Issue #14 — validator approved, awaiting human approval/);
-  assert.match(status.stdout, /Recommended: maestro approve 14/);
+  assert.match(status.stdout, /Recommended: `maestro approve 14`/);
   assert.equal(first.status, 0, first.stderr);
   assert.equal(repeated.status, 0, repeated.stderr);
-  assert.deepEqual(JSON.parse(first.stdout).plan.selected, []);
-  assert.deepEqual(JSON.parse(repeated.stdout).plan.selected, []);
+  assert.deepEqual(parseLeadingJson(first.stdout).plan.selected, []);
+  assert.deepEqual(parseLeadingJson(repeated.stdout).plan.selected, []);
 });
 
 test("a HUMAN_GATE recommendation is an executable review resolution", async (t) => {

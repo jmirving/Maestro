@@ -46,8 +46,9 @@ test("mixed status separates validator results from missing human dispositions",
   assert.match(text, /Issue #12 — integrated\/complete/);
   assert.match(text, /Issue #13 — blocked, waiting on #2/);
   assert.match(text, /Commit: not ready — #2 needs human approval; #7 needs human rework disposition/);
-  assert.match(text, /Recommended: maestro approve 2/);
-  assert.match(text, /Also available: maestro review --run 20260910010101-aaaaaa --issue 7 --disposition rework-original/);
+  assert.match(text, /Recommended: `maestro rework 7`/);
+  assert.match(text, /Also available: `maestro details 7`, `maestro approve 2`/);
+  assert.match(text, /`maestro review --run 20260910010101-aaaaaa --issue 7 --disposition rework-original`/);
   assert.doesNotMatch(text, /Issue #2 .*— approved$/m);
 });
 
@@ -58,8 +59,8 @@ test("reviewed mixed status shows exactly what commit integrates and skips", asy
   assert.match(text, /Issue #2 — Passing change — human approved, ready to integrate/);
   assert.match(text, /Issue #7 — Needs correction — human rework disposition recorded, excluded from integration/);
   assert.match(text, /Commit: ready — integrates #2; skips #7 for rework/);
-  assert.match(text, /Recommended: maestro commit/);
-  assert.match(text, /Also available: maestro rework 7/);
+  assert.match(text, /Recommended: `maestro commit`/);
+  assert.match(text, /Also available: `maestro rework 7`/);
 });
 
 test("focused issue status includes commit, validator, human review, integration, and next action", async () => {
@@ -72,7 +73,8 @@ test("focused issue status includes commit, validator, human review, integration
   assert.match(text, /Human review: none/);
   assert.match(text, /Integration: not eligible; record rework-original to exclude it/);
   assert.doesNotMatch(text, /Issue #2 —/);
-  assert.match(text, /Recommended: maestro review --run 20260910010101-aaaaaa --issue 7 --disposition rework-original/);
+  assert.match(text, /Recommended: `maestro rework 7`/);
+  assert.match(text, /`maestro review --run 20260910010101-aaaaaa --issue 7 --disposition rework-original`/);
   assert.match(text, /Commit: not ready — #2 needs human approval; #7 needs human rework disposition/);
 });
 

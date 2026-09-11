@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 const fs = require("node:fs");
+const path = require("node:path");
 const { computePlan } = require("../src/planner");
 const { computeEffectivePlan } = require("../src/work-state");
 const { dryRun, executeRun, executeAndIntegrate, continuousRun } = require("../src/controller");
@@ -11,6 +12,7 @@ const { resolveIssueReworkSources, executeReworkRun } = require("../src/rework")
 const { executeReconcileRun } = require("../src/reconcile");
 const { latestRunId } = require("../src/run-store");
 const { statusSnapshot, formatStatus, watchStatus } = require("../src/display");
+const { formatRecommendationFooter, appendRecommendationFooter } = require("../src/recommendations");
 const { loadIssueDetails, formatDetails } = require("../src/details");
 const { discoverGitHubRepository, loadGitHubIssues } = require("../src/github");
 const { proposeDraft, formatDraftSummary, readExistingManifest, writeManifest } = require("../src/draft");
@@ -171,14 +173,22 @@ function setResultExitCode(result) {
   if (result.validations?.some((entry) => entry.verdict !== "approve")) process.exitCode = 1;
 }
 
-async function outputLatest(repoPath, { copy = true, print = true } = {}) {
+async function workflowFooter(config, repoPath, { advanceCommand = "maestro start", includeIssues = true } = {}) {
+  const snapshot = await statusSnapshot(config || { work: {} }, repoPath, [], { advanceCommand });
+  return formatRecommendationFooter(snapshot, { includeIssues });
+}
+
+async function outputLatest(repoPath, { copy = true, print = true, config = null, recommendations = false } = {}) {
   const bundle = await latestRunBundle(repoPath);
-  if (print) process.stdout.write(bundle.text);
+  const text = recommendations
+    ? appendRecommendationFooter(bundle.text, await workflowFooter(config, repoPath, { advanceCommand: "maestro next" }))
+    : bundle.text;
+  if (print) process.stdout.write(text);
   if (copy) {
-    const clipboard = copyToClipboard(bundle.text);
+    const clipboard = copyToClipboard(text);
     console.error(`Copied Maestro run ${bundle.runId} to clipboard using ${clipboard}.`);
   }
-  return bundle;
+  return { ...bundle, text };
 }
 
 async function approveLatest({ config, repoPath, runId, requestedIssues }) {
@@ -210,7 +220,9 @@ async function main() {
 
   if (command === "output") {
     const { repoPath } = resolveContext(rest, args, { manifest: false });
-    await outputLatest(repoPath, { copy: true, print: true });
+    const defaultManifestPath = path.join(repoPath, ".maestro.json");
+    const config = fs.existsSync(defaultManifestPath) ? loadConfig(defaultManifestPath, args) : null;
+    await outputLatest(repoPath, { copy: true, print: true, config, recommendations: true });
     return;
   }
 
@@ -312,6 +324,9 @@ async function main() {
     const plan = args.includes("--rerun") ? computePlan(config) : await computeEffectivePlan(config, repoPath);
     const result = await executeRun(config, { repoPath, plan });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    process.stdout.write(await workflowFooter(config, repoPath, {
+      advanceCommand: command === "next" ? "maestro next" : "maestro start"
+    }));
     setResultExitCode(result);
     return;
   }
@@ -323,6 +338,7 @@ async function main() {
       runId: option(args, "--run"),
       requestedIssues: issuePositionals(rest)
     });
+    process.stdout.write(await workflowFooter(config, repoPath));
     return;
   }
 
@@ -334,6 +350,7 @@ async function main() {
       runId: option(args, "--run"),
       closeIssues: args.includes("--close-issues")
     });
+    process.stdout.write(await workflowFooter(loadConfig(manifestPath, args), repoPath, { advanceCommand: "maestro next" }));
     return;
   }
 
@@ -348,6 +365,7 @@ async function main() {
       results.push(await executeReworkRun(config, { repoPath, ...source }));
     }
     process.stdout.write(`${JSON.stringify(results.length === 1 ? results[0] : results, null, 2)}\n`);
+    process.stdout.write(await workflowFooter(config, repoPath));
     for (const result of results) setResultExitCode(result);
     return;
   }

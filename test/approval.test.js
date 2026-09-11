@@ -7,6 +7,10 @@ const { spawnSync } = require("node:child_process");
 const { approveIssues, formatApprovalSummary } = require("../src/approval");
 const { loadRunState, saveRunState } = require("../src/run-store");
 
+function parseLeadingJson(stdout) {
+  return JSON.parse(stdout.split("\n\nIssue #", 1)[0]);
+}
+
 function worker(issue) {
   return { issue: String(issue), exitCode: 0, baseSha: "base", headSha: `head-${issue}` };
 }
@@ -68,9 +72,9 @@ test("plain approval settles passing siblings and leaves the newest rework gener
   assert.match(result.stdout, /Approved: #2 .*#5 .*#12 /);
   assert.match(result.stdout, new RegExp(`#7 \\(rework-required; run ${latestReworkId}\\)`));
   assert.match(result.stdout, /Still actionable: #7 remains rework-required/);
-  assert.match(result.stdout, /Next: maestro rework 7/);
+  assert.match(result.stdout, /Recommended: `maestro rework 7`/);
 
-  const recommendation = result.stdout.match(/^Next: (maestro rework .+)$/m)[1];
+  const recommendation = result.stdout.match(/^Recommended: `(maestro rework .+)`$/m)[1];
   const latest = await loadRunState(repoPath, latestReworkId);
   latest.workers[0].worktreePath = repoPath;
   latest.workers[0].branch = "maestro/7";
@@ -87,7 +91,7 @@ test("plain approval settles passing siblings and leaves the newest rework gener
     env: { ...process.env, PATH: `${binPath}${path.delimiter}${process.env.PATH}` }
   });
   assert.equal(reworked.status, 0, reworked.stderr);
-  const reworkRun = JSON.parse(reworked.stdout);
+  const reworkRun = parseLeadingJson(reworked.stdout);
   assert.equal(reworkRun.parentRunId, latestReworkId);
   assert.deepEqual(reworkRun.plan.selected.map((entry) => entry.id), ["7"]);
 
