@@ -1,143 +1,234 @@
-const fs = require("node:fs/promises");
-const path = require("node:path");
-const { computeEffectivePlan } = require("./work-state");
-const { reportRootForRepo, parseReportName } = require("./reporter");
-const { statePath } = require("./run-store");
+const { loadExecutionStates, reconcilePlan } = require("./work-state");
+const { currentIssueEvidenceFromStates } = require("./run-resolver");
+const { assessRunItems } = require("./existing-run");
 
-function worktreeRootForRepo(repoPath) {
-  return path.dirname(reportRootForRepo(repoPath));
+function numericSort(left, right) {
+  return String(left).localeCompare(String(right), undefined, { numeric: true });
 }
 
-async function safeReadDir(dir) {
-  try { return await fs.readdir(dir, { withFileTypes: true }); } catch (error) {
-    if (error.code === "ENOENT") return [];
-    throw error;
+function titleFor(config, issue, evidence) {
+  return [evidence?.selected?.title, evidence?.worker?.title, config.work?.[issue]?.title]
+    .find((value) => typeof value === "string" && value.trim())?.trim() || null;
+}
+
+function describeIssue(config, issue, evidence, plan) {
+  const manifest = config.work?.[issue] || null;
+  const deferred = plan.deferred?.find((entry) => String(entry.id) === issue);
+  const selected = plan.selected?.some((entry) => String(entry.id) === issue);
+  const validation = evidence?.validation || null;
+  const review = evidence?.review || null;
+  const integration = evidence?.integration || null;
+  let state;
+  let integrationState = "not eligible";
+  let action = null;
+
+  if (manifest?.status === "complete" || integration) {
+    state = "integrated/complete";
+    integrationState = "integrated";
+  } else if (review?.disposition === "rework-original") {
+    state = "human rework disposition recorded, excluded from integration";
+    integrationState = "excluded; will be reworked";
+    action = `maestro rework ${issue}`;
+  } else if (review && validation?.verdict === "approve") {
+    state = "human approved, ready to integrate";
+    integrationState = "eligible when every item in its run has a human disposition";
+  } else if (review) {
+    state = `blocked: human ${review.disposition} conflicts with validator ${validation?.verdict || "state"}`;
+    integrationState = "blocked by inconsistent review state";
+  } else if (validation?.verdict === "approve") {
+    state = "validator approved, awaiting human approval";
+    integrationState = "not eligible until human approval";
+    action = `maestro approve ${issue}`;
+  } else if (validation?.verdict === "rework") {
+    state = "validator requested rework, awaiting human rework disposition";
+    integrationState = "not eligible; record rework-original to exclude it";
+  } else if (validation?.verdict === "human_gate") {
+    state = "validator requested a human decision, awaiting human disposition";
+    integrationState = "not eligible until human disposition";
+  } else if (evidence?.state === "running" || evidence?.state === "rework-running") {
+    state = evidence.state === "rework-running" ? "rework in progress" : "worker in progress";
+    action = "maestro status --watch";
+  } else if (evidence?.state === "failed-awaiting-retry" || evidence?.worker?.exitCode > 0) {
+    state = "failed, awaiting explicit retry";
+    action = "maestro start --rerun";
+  } else if (evidence) {
+    state = "pending validation or review";
+    action = "maestro status --watch";
+  } else if (manifest?.status === "human_gate") {
+    state = `blocked by human gate${manifest.humanGate ? `: ${manifest.humanGate}` : ""}`;
+  } else if (manifest?.status === "blocked" || plan.blocked?.some((entry) => String(entry.id) === issue)) {
+    const waiting = (manifest?.blockedBy || []).filter((dependency) => config.work?.[dependency]?.status !== "complete");
+    state = `blocked${waiting.length ? `, waiting on ${waiting.map((id) => `#${id}`).join(", ")}` : ""}`;
+  } else if (deferred) {
+    state = deferred.lifecycle?.state || "in flight";
+    action = deferred.lifecycle?.action || null;
+  } else if (manifest?.status === "ready") {
+    state = selected ? "ready to start next" : "ready";
+    action = selected ? "maestro start" : null;
+  } else {
+    state = manifest?.status || "unknown";
   }
-}
 
-function runIdFromWorktreeName(name) {
-  const match = name.match(/^.+-(\d{14}-[a-f0-9]+)$/);
-  return match ? match[1] : null;
-}
-
-async function discoverRuns(repoPath) {
-  const reportRoot = reportRootForRepo(repoPath);
-  const worktreeRoot = worktreeRootForRepo(repoPath);
-  const runIds = new Set();
-
-  for (const entry of await safeReadDir(reportRoot)) {
-    const report = parseReportName(entry.name);
-    if (report) runIds.add(report.runId);
-    const state = entry.name.match(/^run-(\d{14}-[a-f0-9]+)\.json$/);
-    if (state) runIds.add(state[1]);
-  }
-  for (const entry of await safeReadDir(worktreeRoot)) {
-    if (!entry.isDirectory() || entry.name === ".maestro-reports") continue;
-    const runId = runIdFromWorktreeName(entry.name);
-    if (runId) runIds.add(runId);
-  }
-  return [...runIds].sort();
-}
-
-async function readStateIfPresent(repoPath, runId) {
-  try { return JSON.parse(await fs.readFile(statePath(repoPath, runId), "utf8")); }
-  catch (error) {
-    if (error.code === "ENOENT") return null;
-    throw error;
-  }
-}
-
-async function runIssueStatus(repoPath, runId) {
-  const reportRoot = reportRootForRepo(repoPath);
-  const worktreeRoot = worktreeRootForRepo(repoPath);
-  const state = await readStateIfPresent(repoPath, runId);
-  const entries = await safeReadDir(reportRoot);
-  const reports = entries.map((entry) => parseReportName(entry.name)).filter((entry) => entry?.runId === runId);
-  const dirs = (await safeReadDir(worktreeRoot)).filter((entry) => entry.isDirectory() && runIdFromWorktreeName(entry.name) === runId);
-  const issues = new Set([
-    ...reports.map((entry) => String(entry.issue)),
-    ...dirs.map((entry) => entry.name.slice(0, -1 * (`-${runId}`).length)),
-    ...((state?.workers || []).map((entry) => String(entry.issue)))
-  ]);
-  const validations = new Map((state?.validations || []).map((entry) => [String(entry.issue), entry.verdict]));
-  for (const report of reports.filter((entry) => entry.kind === "validator")) {
-    if (!validations.has(String(report.issue))) {
-      try {
-        const text = await fs.readFile(path.join(reportRoot, report.name), "utf8");
-        const match = text.match(/^VERDICT:\s*(APPROVE|REWORK|HUMAN_GATE)\b/m);
-        validations.set(String(report.issue), match ? match[1].toLowerCase() : "invalid");
-      } catch {}
-    }
-  }
-  const integrated = new Set((state?.integration || []).map((entry) => String(entry.issue)));
-
-  return [...issues].sort((a, b) => Number(a) - Number(b)).map((issue) => {
-    const hasWorkerReport = reports.some((entry) => entry.kind === "worker" && String(entry.issue) === issue);
-    const review = state?.reviews?.[issue];
-    let status = "working";
-    if (hasWorkerReport) status = "worker done";
-    if (validations.has(issue)) status = `validated ${validations.get(issue)}`;
-    if (review) status = `reviewed ${review.disposition}`;
-    if (integrated.has(issue)) status = "integrated";
-    return { issue, status };
-  });
-}
-
-async function statusSnapshot(config, repoPath) {
-  const plan = await computeEffectivePlan(config, repoPath);
-  const runs = await discoverRuns(repoPath);
-  const runId = runs.at(-1) || null;
-  const runIssues = runId ? await runIssueStatus(repoPath, runId) : [];
-  const complete = Object.entries(config.work || {}).filter(([, item]) => item.status === "complete").map(([id]) => id);
-  const ready = plan.ready?.map((item) => item.id) || [];
-  const selected = plan.selected?.map((item) => item.id) || [];
-  const blocked = plan.blocked?.map((item) => item.id) || [];
   return {
-    repository: config.repository,
-    runId,
-    runIssues,
-    selected,
-    ready,
-    blocked,
-    complete,
-    deferred: plan.deferred || [],
-    recommendations: plan.recommendations || [],
-    humanGates: plan.humanGates || []
+    issue,
+    title: titleFor(config, issue, evidence),
+    state,
+    action,
+    workerCommit: evidence?.worker?.headSha || null,
+    validator: validation?.verdict || null,
+    humanReview: review?.disposition || null,
+    integrationState,
+    runId: evidence?.runId || null
   };
 }
 
+function reviewCommand(entry, disposition) {
+  return `maestro review --run ${entry.runId} --issue ${entry.issue} --disposition ${disposition}`;
+}
+
+function runReadiness(states, currentByIssue) {
+  const latestRunId = [...states].map((state) => String(state.runId)).sort().at(-1) || null;
+  const summaries = [];
+
+  for (const state of [...states].sort((a, b) => String(b.runId).localeCompare(String(a.runId)))) {
+    const issues = [...new Set((state.workers || []).map((worker) => String(worker.issue)))];
+    if (!issues.length || !issues.some((issue) => currentByIssue.get(issue)?.runId === String(state.runId))) continue;
+    if (["running", "failed"].includes(state.status)) continue;
+    const integrated = new Set((state.integration || []).map((entry) => String(entry.issue)));
+    const assessment = assessRunItems(state);
+    const integrate = assessment.integrable.map((entry) => entry.issue).filter((issue) => !integrated.has(issue));
+    const skip = assessment.rework.map((entry) => entry.issue);
+    const missing = assessment.missing;
+    const blocked = assessment.problems
+      .filter((problem) => !missing.some((entry) => entry.issue === problem.issue))
+      .map((problem) => ({ issue: problem.issue, kind: problem.kind || "valid integration state" }));
+
+    if (integrate.length || skip.length || missing.length || blocked.length) {
+      summaries.push({
+        runId: String(state.runId),
+        integrate,
+        skip,
+        missing,
+        blocked,
+        ready: !missing.length && !blocked.length && integrate.length > 0,
+        command: String(state.runId) === latestRunId ? "maestro commit" : `maestro commit --run ${state.runId}`
+      });
+    }
+  }
+  return summaries;
+}
+
+function buildActions(items, readiness, selected) {
+  const actions = [];
+  const approvals = items.filter((item) => item.validator === "approve" && !item.humanReview);
+  if (approvals.length) actions.push({ recommended: true, command: `maestro approve ${approvals.map((item) => item.issue).join(" ")}` });
+
+  for (const item of items.filter((entry) => ["rework", "human_gate"].includes(entry.validator) && !entry.humanReview)) {
+    actions.push({ recommended: !actions.length, command: reviewCommand(item, "rework-original") });
+  }
+  for (const run of readiness) {
+    for (const missing of run.missing.filter((entry) => entry.kind === "human rework disposition")) {
+      actions.push({
+        recommended: !actions.length,
+        command: `maestro review --run ${run.runId} --issue ${missing.issue} --disposition rework-original`
+      });
+    }
+  }
+  for (const run of readiness.filter((entry) => entry.ready)) {
+    actions.push({ recommended: !actions.length, command: run.command });
+  }
+  for (const item of items.filter((entry) => entry.humanReview === "rework-original")) {
+    actions.push({ recommended: !actions.length, command: `maestro rework ${item.issue}` });
+  }
+  if (!actions.length && selected.length) actions.push({ recommended: true, command: "maestro start" });
+  if (!actions.length) {
+    for (const command of [...new Set(items.map((item) => item.action).filter(Boolean))]) {
+      actions.push({ recommended: !actions.length, command });
+    }
+  }
+
+  const seen = new Set();
+  return actions.filter((entry) => !seen.has(entry.command) && seen.add(entry.command));
+}
+
+async function statusSnapshot(config, repoPath, requestedIssues = [], { stateLoader = loadExecutionStates } = {}) {
+  const states = await stateLoader(repoPath);
+  const plan = reconcilePlan(config, states);
+  const requested = [...new Set(requestedIssues.map(String))];
+  const current = states.length ? currentIssueEvidenceFromStates(states) : [];
+  const currentByIssue = new Map(current.map((entry) => [entry.issue, entry]));
+  const allIssues = [...new Set([...Object.keys(config.work || {}), ...currentByIssue.keys()])].sort(numericSort);
+  const issueIds = requested.length ? requested : allIssues;
+  const missing = requested.filter((issue) => !allIssues.includes(issue));
+  if (missing.length) throw new Error(`No Maestro workflow state for ${missing.map((issue) => `issue #${issue}`).join(", ")}.`);
+
+  const items = issueIds.map((issue) => {
+    const resolved = currentByIssue.get(issue);
+    const evidence = resolved ? { ...resolved.evidence, runId: resolved.runId } : null;
+    return describeIssue(config, issue, evidence, plan);
+  });
+  const readiness = runReadiness(states, currentByIssue);
+  return {
+    repository: config.repository,
+    focused: requested.length > 0,
+    items,
+    readiness,
+    actions: buildActions(items, readiness, plan.selected || []),
+    selected: plan.selected?.map((item) => String(item.id)) || []
+  };
+}
+
+function issueHeading(item) {
+  return `Issue #${item.issue}${item.title ? ` — ${item.title}` : ""}`;
+}
+
+function formatCommit(lines, run) {
+  if (run.ready) {
+    lines.push(`Commit: ready — integrates ${run.integrate.map((issue) => `#${issue}`).join(", ")}${run.skip.length ? `; skips ${run.skip.map((issue) => `#${issue}`).join(", ")} for rework` : ""}`);
+    return;
+  }
+  const requirements = [
+    ...run.missing.map((entry) => `#${entry.issue} needs ${entry.kind}`),
+    ...run.blocked.map((entry) => `#${entry.issue} needs ${entry.kind}`)
+  ];
+  if (requirements.length) lines.push(`Commit: not ready — ${requirements.join("; ")}`);
+}
+
 function formatStatus(snapshot) {
-  const lines = [];
-  lines.push(`MAESTRO  ${snapshot.repository || "repository"}`);
-  lines.push("=".repeat(Math.max(24, lines[0].length)));
-  lines.push(`Latest run: ${snapshot.runId || "none"}`);
-  if (snapshot.runIssues.length) {
+  const heading = `MAESTRO  ${snapshot.repository || "repository"}`;
+  const lines = [heading, "=".repeat(Math.max(24, heading.length))];
+
+  if (snapshot.focused) {
+    for (const item of snapshot.items) {
+      lines.push("", `${issueHeading(item)} — ${item.state}`);
+      lines.push(`  Worker commit: ${item.workerCommit || "none"}`);
+      lines.push(`  Validator: ${item.validator || "none"}`);
+      lines.push(`  Human review: ${item.humanReview || "none"}`);
+      lines.push(`  Integration: ${item.integrationState}`);
+    }
+  } else {
     lines.push("");
-    lines.push("RUN");
-    for (const item of snapshot.runIssues) lines.push(`  #${item.issue.padEnd(4)} ${item.status}`);
+    for (const item of snapshot.items) lines.push(`${issueHeading(item)} — ${item.state}`);
   }
-  lines.push("");
-  lines.push(`NEXT       ${snapshot.selected.length ? snapshot.selected.map((id) => `#${id}`).join(", ") : "none"}`);
-  lines.push(`READY      ${snapshot.ready.length ? snapshot.ready.map((id) => `#${id}`).join(", ") : "none"}`);
-  lines.push(`BLOCKED    ${snapshot.blocked.length ? snapshot.blocked.map((id) => `#${id}`).join(", ") : "none"}`);
-  lines.push(`COMPLETE   ${snapshot.complete.length ? snapshot.complete.map((id) => `#${id}`).join(", ") : "none"}`);
-  if (snapshot.deferred?.length) {
-    lines.push(`IN FLIGHT  ${snapshot.deferred.map((item) => `#${item.id} (${item.lifecycle.state})`).join(", ")}`);
+
+  for (const run of snapshot.readiness) formatCommit(lines, run);
+  if (snapshot.selected.length && !snapshot.items.some((item) => item.action && item.action !== "maestro start")) {
+    lines.push(`Next wave: ${snapshot.selected.map((issue) => `#${issue}`).join(", ")}`);
   }
-  if (snapshot.humanGates.length) lines.push(`HUMAN GATE ${snapshot.humanGates.map((item) => `#${item.id}`).join(", ")}`);
-  if (!snapshot.selected.length && snapshot.recommendations?.length) {
+  if (snapshot.actions.length) {
     lines.push("");
-    lines.push("CURRENT WORK MUST BE SETTLED BEFORE IT CAN RUN AGAIN");
-    for (const action of snapshot.recommendations) lines.push(`  ${action}`);
+    snapshot.actions.forEach((action, index) => {
+      lines.push(`${action.recommended ? "Recommended" : index === 0 ? "Next" : "Also available"}: ${action.command}`);
+    });
   }
   return `${lines.join("\n")}\n`;
 }
 
-async function watchStatus(config, repoPath, { intervalMs = 2000 } = {}) {
+async function watchStatus(config, repoPath, requestedIssues = [], { intervalMs = 2000 } = {}) {
   const interactive = Boolean(process.stdout.isTTY);
   let first = true;
   for (;;) {
-    const text = formatStatus(await statusSnapshot(config, repoPath));
+    const text = formatStatus(await statusSnapshot(config, repoPath, requestedIssues));
     if (interactive && !first) process.stdout.write("\x1b[2J\x1b[H");
     process.stdout.write(text);
     first = false;
@@ -145,4 +236,4 @@ async function watchStatus(config, repoPath, { intervalMs = 2000 } = {}) {
   }
 }
 
-module.exports = { discoverRuns, statusSnapshot, formatStatus, watchStatus };
+module.exports = { describeIssue, runReadiness, statusSnapshot, formatStatus, watchStatus };

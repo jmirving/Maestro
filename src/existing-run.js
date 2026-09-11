@@ -3,10 +3,12 @@ const { ensureFollowUp } = require("./reviews");
 const { integrateApproved } = require("./integrator");
 const { captureBaseline } = require("./baseline");
 
-function classifyRunItems(state) {
+function assessRunItems(state) {
   const validationByIssue = new Map((state.validations || []).map((entry) => [String(entry.issue), entry]));
   const integrable = [];
   const rework = [];
+  const missing = [];
+  const problems = [];
 
   for (const worker of state.workers || []) {
     const issue = String(worker.issue);
@@ -14,25 +16,48 @@ function classifyRunItems(state) {
     const review = state.reviews?.[issue];
 
     if (!review) {
-      throw new Error(`Human review is missing for issue #${issue}. Record it before integration.`);
+      missing.push({
+        issue,
+        kind: validation?.verdict === "approve"
+          ? "human approval"
+          : ["rework", "human_gate"].includes(validation?.verdict) ? "human rework disposition" : "validator result"
+      });
+      problems.push({ issue, message: `Human review is missing for issue #${issue}. Record it before integration.` });
+      continue;
     }
 
     if (review.disposition === "rework-original") {
       if (validation?.verdict === "approve") {
-        throw new Error(`Issue #${issue} is validator-approved but human review requested rework; resolve the review disposition before integration.`);
+        problems.push({
+          issue,
+          kind: "consistent validator/review state",
+          message: `Issue #${issue} is validator-approved but human review requested rework; resolve the review disposition before integration.`
+        });
+        continue;
       }
       rework.push({ issue, worker, validation, review });
       continue;
     }
 
     if (!validation || validation.verdict !== "approve") {
-      throw new Error(`Run ${state.runId} issue #${issue} is not validator-approved. Use rework-original for rejected work before integrating the approved items.`);
+      problems.push({
+        issue,
+        kind: "consistent validator/review state",
+        message: `Run ${state.runId} issue #${issue} is not validator-approved. Use rework-original for rejected work before integrating the approved items.`
+      });
+      continue;
     }
 
     integrable.push({ issue, worker, validation, review });
   }
 
-  return { integrable, rework };
+  return { integrable, rework, missing, problems };
+}
+
+function classifyRunItems(state) {
+  const assessment = assessRunItems(state);
+  if (assessment.problems.length) throw new Error(assessment.problems[0].message);
+  return { integrable: assessment.integrable, rework: assessment.rework };
 }
 
 async function integrateExistingRun(config, {
@@ -109,4 +134,4 @@ async function integrateExistingRun(config, {
   };
 }
 
-module.exports = { classifyRunItems, integrateExistingRun };
+module.exports = { assessRunItems, classifyRunItems, integrateExistingRun };

@@ -30,7 +30,7 @@ function usage() {
   maestro plan [manifest.json] [--repo-path <path>]
   maestro draft [manifest.json] [issue ...] [--repo-path <path>] [--all] [--agent] [--write]
   maestro start [manifest.json] [--repo-path <path>] [--rerun]
-  maestro status [manifest.json] [--repo-path <path>] [--watch]
+  maestro status [manifest.json] [issue ...] [--repo-path <path>] [--watch]
   maestro details [manifest.json] <issue ...> [--repo-path <path>] [--run <run-id>]
   maestro output [--repo-path <path>]
   maestro approve [issue ...] [manifest.json] [--repo-path <path>] [--run <run-id>]
@@ -106,6 +106,24 @@ function detailsIssuePositionals(rest) {
   const unique = [...new Set(issues)];
   if (!unique.length) throw new Error("maestro details requires at least one issue number.");
   return unique;
+}
+
+function statusIssuePositionals(rest) {
+  const manifest = explicitManifest(rest);
+  const issues = [];
+  for (let index = manifest ? 1 : 0; index < rest.length; index += 1) {
+    const value = rest[index];
+    if (value === "--repo-path") {
+      if (!rest[index + 1] || rest[index + 1].startsWith("--")) throw new Error("--repo-path requires a value.");
+      index += 1;
+      continue;
+    }
+    if (value === "--watch") continue;
+    if (value.startsWith("--")) throw new Error(`Unknown maestro status option: ${value}`);
+    if (!/^[1-9]\d*$/.test(value)) throw new Error(`Invalid issue number: ${value}`);
+    issues.push(value);
+  }
+  return [...new Set(issues)];
 }
 
 function resolveContext(rest, args, { manifest = true } = {}) {
@@ -241,8 +259,9 @@ async function main() {
   }
 
   if (command === "status") {
-    if (args.includes("--watch")) await watchStatus(config, repoPath);
-    else process.stdout.write(formatStatus(await statusSnapshot(config, repoPath)));
+    const requestedIssues = statusIssuePositionals(rest);
+    if (args.includes("--watch")) await watchStatus(config, repoPath, requestedIssues);
+    else process.stdout.write(formatStatus(await statusSnapshot(config, repoPath, requestedIssues)));
     return;
   }
 
