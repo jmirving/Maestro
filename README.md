@@ -98,7 +98,7 @@ Use `maestro approve --run <run-id>` only when intentionally reviewing one histo
 
 `maestro rework` selects every currently relevant validator-rejected item from the newest actionable source run. `maestro rework <issue...>` resolves each requested issue to its current rework-required run, so the `Next:` command printed by approval can be executed directly. If selected issues belong to different source runs, Maestro creates one rework child per source run. Use `maestro rework --run <run-id>` for deliberate historical or whole-run rework.
 
-`maestro commit` integrates the latest reviewed run, updates the matching work items to `complete` in `.maestro.json`, commits that manifest progress, and pushes it so the next invocation advances to newly unblocked work.
+`maestro commit` integrates the latest reviewed run, updates the matching work items to `complete` in `.maestro.json`, commits that manifest progress, and pushes it so the next invocation advances to newly unblocked work. If a prior attempt integrated only part of a run, invoking `commit` again skips the recorded integrations and resumes the remaining approved items. Its summary distinguishes newly integrated work, already integrated work, and a run with nothing remaining; `--run <run-id>` provides the same idempotent behavior for an explicitly selected run.
 
 `maestro start` and `maestro next` reconcile manifest readiness with every persisted run and active isolated worktree. Work already executing, awaiting review, awaiting rework, or awaiting integration is shown as deferred instead of being started again. Use `--rerun` only when intentionally retrying or discarding that lifecycle protection; reruns are never implicit.
 

@@ -187,8 +187,17 @@ async function commitLatest({ config, repoPath, manifestPath, runId, closeIssues
     closeIssues
   });
   const integratedIssues = [...new Set((result.integration || []).map((entry) => String(entry.issue)))];
+  const newlyIntegratedIssues = [...new Set((result.newlyIntegrated || []).map((entry) => String(entry.issue)))];
+  const newlyIntegrated = new Set(newlyIntegratedIssues);
+  const alreadyIntegratedIssues = integratedIssues.filter((issue) => !newlyIntegrated.has(issue));
   const progress = persistManifestCompletion({ repoPath, manifestPath, issueIds: integratedIssues });
-  console.log(`Committed Maestro run ${resolvedRunId}: ${integratedIssues.length ? integratedIssues.map((issue) => `#${issue}`).join(", ") : "nothing new"}`);
+  const outcome = result.nothingToDo
+    ? `nothing remaining${alreadyIntegratedIssues.length ? `; already integrated ${alreadyIntegratedIssues.map((issue) => `#${issue}`).join(", ")}` : ""}`
+    : [
+        newlyIntegratedIssues.length ? `newly integrated ${newlyIntegratedIssues.map((issue) => `#${issue}`).join(", ")}` : null,
+        alreadyIntegratedIssues.length ? `already integrated ${alreadyIntegratedIssues.map((issue) => `#${issue}`).join(", ")}` : null
+      ].filter(Boolean).join("; ") || "nothing remaining";
+  console.log(`Committed Maestro run ${resolvedRunId}: ${outcome}`);
   if (progress.changed.length) console.log(`Advanced ${manifestPath}: ${progress.changed.map((issue) => `#${issue}`).join(", ")}`);
   return { ...result, manifestProgress: progress };
 }
