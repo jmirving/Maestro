@@ -6,6 +6,7 @@ const path = require("node:path");
 const { saveRunState } = require("../src/run-store");
 const {
   evidenceForIssue,
+  currentIssueEvidenceFromStates,
   resolveFromStates,
   resolveLatestRun,
   resolveRunsForIssues
@@ -159,4 +160,21 @@ test("issue evidence includes selected-only and integrated lifecycle states", ()
   assert.equal(evidenceForIssue(selected, "7").state, "running");
   assert.equal(evidenceForIssue({ ...selected, mode: "rework" }, "7").state, "rework-running");
   assert.equal(evidenceForIssue(run("20260910020202-bbbbbb", "7", { integrated: true }), "7").state, "integrated-pending-manifest");
+});
+
+test("current issue state overlays diverged child runs without reviving older evidence", () => {
+  const original = run("20260910010101-aaaaaa", "2");
+  original.plan.selected.push({ id: "7" });
+  original.workers.push({ issue: "7", exitCode: 0, headSha: "7-original" });
+  original.validations.push({ issue: "7", verdict: "approve" });
+  const firstRework = run("20260910020202-bbbbbb", "7", { verdict: "rework", mode: "rework" });
+  firstRework.parentRunId = original.runId;
+  const secondRework = run("20260910030303-cccccc", "7", { verdict: "rework", mode: "rework" });
+  secondRework.parentRunId = firstRework.runId;
+
+  const current = currentIssueEvidenceFromStates([secondRework, original, firstRework]);
+  assert.deepEqual(current.map(({ issue, runId, evidence }) => [issue, runId, evidence.verdict]), [
+    ["2", original.runId, "approve"],
+    ["7", secondRework.runId, "rework"]
+  ]);
 });

@@ -120,6 +120,31 @@ function matchingEvidence(state, issueIds, filter) {
     .filter((evidence) => evidence && matchesFilter(state, evidence, filter));
 }
 
+function currentIssueEvidenceFromStates(states, issueIds = []) {
+  const requested = normalizeIssueIds(issueIds);
+  const requestedSet = requested.length ? new Set(requested) : null;
+  const current = new Map();
+
+  for (const state of newestFirst(states)) {
+    for (const issue of issueIdsForRun(state)) {
+      if (requestedSet && !requestedSet.has(issue)) continue;
+      if (current.has(issue)) continue;
+      const evidence = evidenceForIssue(state, issue);
+      if (evidence) current.set(issue, { issue, runId: String(state.runId), state, evidence });
+    }
+  }
+
+  if (requested.length) {
+    const missing = requested.filter((issue) => !current.has(issue));
+    if (missing.length) {
+      throw new Error(`No relevant Maestro run for ${missing.map((issue) => `issue #${issue}`).join(", ")}.`);
+    }
+    return requested.map((issue) => current.get(issue));
+  }
+
+  return [...current.values()].sort((a, b) => a.issue.localeCompare(b.issue, undefined, { numeric: true }));
+}
+
 function resolveFromStates(states, { issueIds = [], filter = {}, explicitRunId = null } = {}) {
   validateFilter(filter);
   const issues = normalizeIssueIds(issueIds);
@@ -206,11 +231,19 @@ async function resolveRunsForIssues(repoPath, issueIds, options = {}) {
   }
 }
 
+async function resolveCurrentIssueStates(repoPath, issueIds = []) {
+  const states = await loadPersistedRunStates(repoPath);
+  if (!states.length) throw new Error(`No Maestro runs found for ${path.resolve(repoPath)}.`);
+  return currentIssueEvidenceFromStates(states, issueIds);
+}
+
 module.exports = {
   issueIdsForRun,
   evidenceForIssue,
+  currentIssueEvidenceFromStates,
   matchesFilter,
   resolveFromStates,
   resolveLatestRun,
-  resolveRunsForIssues
+  resolveRunsForIssues,
+  resolveCurrentIssueStates
 };

@@ -78,11 +78,13 @@ Advisory overlap is stored separately under `planning.advisoryConflicts`; it can
 }
 ```
 
-`maestro approve` without issue numbers approves every validator-approved, unreviewed item in the latest run. Supply issue numbers to approve only a subset:
+`maestro approve` without issue numbers approves every currently relevant validator-approved, unreviewed item across the active workflow state. Passing siblings remain approvable when another issue has moved into a child rework run. Rework-required items are skipped and reported with an issue-oriented next command. Supply issue numbers to approve their latest current approvable states, even when those states belong to different runs:
 
 ```bash
 maestro approve 57 63
 ```
+
+Use `maestro approve --run <run-id>` only when intentionally reviewing one historical run.
 
 `maestro commit` integrates the latest reviewed run, updates the matching work items to `complete` in `.maestro.json`, commits that manifest progress, and pushes it so the next invocation advances to newly unblocked work.
 

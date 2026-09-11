@@ -5,10 +5,11 @@ const { computeEffectivePlan } = require("../src/work-state");
 const { dryRun, executeRun, executeAndIntegrate, continuousRun } = require("../src/controller");
 const { latestRunBundle, copyToClipboard } = require("../src/reporter");
 const { recordReview } = require("../src/reviews");
+const { approveIssues, formatApprovalSummary } = require("../src/approval");
 const { integrateExistingRun } = require("../src/existing-run");
 const { executeReworkRun } = require("../src/rework");
 const { executeReconcileRun } = require("../src/reconcile");
-const { latestRunId, loadRunState } = require("../src/run-store");
+const { latestRunId } = require("../src/run-store");
 const { statusSnapshot, formatStatus, watchStatus } = require("../src/display");
 const { loadIssueDetails, formatDetails } = require("../src/details");
 const { discoverGitHubRepository, loadGitHubIssues } = require("../src/github");
@@ -138,32 +139,9 @@ async function outputLatest(repoPath, { copy = true, print = true } = {}) {
 }
 
 async function approveLatest({ config, repoPath, runId, requestedIssues }) {
-  const resolvedRunId = runId || await latestRunId(repoPath);
-  const state = await loadRunState(repoPath, resolvedRunId);
-  const validationByIssue = new Map((state.validations || []).map((entry) => [String(entry.issue), entry]));
-  const workerIssues = new Set((state.workers || []).map((worker) => String(worker.issue)));
-  const targets = requestedIssues.length
-    ? requestedIssues.map(String)
-    : [...workerIssues].filter((issue) => validationByIssue.get(issue)?.verdict === "approve" && !state.reviews?.[issue]);
-
-  if (!targets.length) {
-    console.log(`No validator-approved, unreviewed work remains in Maestro run ${resolvedRunId}.`);
-    return { runId: resolvedRunId, approved: [] };
-  }
-
-  const approved = [];
-  for (const issue of targets) {
-    if (!workerIssues.has(issue)) throw new Error(`Issue #${issue} is not part of Maestro run ${resolvedRunId}.`);
-    const validation = validationByIssue.get(issue);
-    if (validation?.verdict !== "approve") {
-      throw new Error(`Issue #${issue} is not validator-approved (${validation?.verdict || "missing"}); it cannot be approved by the shorthand command.`);
-    }
-    await recordReview({ config, repoPath, runId: resolvedRunId, issue, disposition: "approve" });
-    approved.push(issue);
-  }
-
-  console.log(`Approved Maestro run ${resolvedRunId}: ${approved.map((issue) => `#${issue}`).join(", ")}`);
-  return { runId: resolvedRunId, approved };
+  const result = await approveIssues({ config, repoPath, runId, requestedIssues });
+  process.stdout.write(formatApprovalSummary(result));
+  return result;
 }
 
 async function commitLatest({ config, repoPath, manifestPath, runId, closeIssues }) {
