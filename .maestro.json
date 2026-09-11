@@ -43,7 +43,7 @@
       ]
     },
     "4": {
-      "status": "ready",
+      "status": "complete",
       "mode": "execute",
       "priority": 75,
       "blockedBy": [
