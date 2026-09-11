@@ -22,13 +22,15 @@ test("mixed validator results recommend rework and keep inspect and approval com
   ], [{ runId: "run-1", ready: false, missing: [], blocked: [] }], []);
 
   assert.equal(recommendations.recommended, "maestro rework 7");
-  assert.deepEqual(recommendations.alternatives.slice(0, 2), [
+  assert.deepEqual(recommendations.alternatives.slice(0, 4), [
     "maestro details 7",
+    "maestro approve 7 --override",
+    "maestro discard 7",
     "maestro approve 2 5 12"
   ]);
   assert.equal(
     formatRecommendations(recommendations),
-    "Recommended: `maestro rework 7`\nAlso available: `maestro details 7`, `maestro approve 2 5 12`\n"
+    "Recommended: `maestro rework 7`\nAlso available: `maestro details 7`, `maestro approve 7 --override`, `maestro discard 7`, `maestro approve 2 5 12`\n"
   );
 });
 

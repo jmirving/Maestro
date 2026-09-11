@@ -22,6 +22,10 @@ function buildRecommendations(items, readiness, selected, { states = [] } = {}) 
   if (currentRework.length) {
     primary.push({ command: `maestro rework ${currentRework.map((item) => item.issue).join(" ")}` });
     alternatives.push({ command: `maestro details ${currentRework.map((item) => item.issue).join(" ")}` });
+    for (const item of currentRework) {
+      alternatives.push({ command: `maestro approve ${item.issue} --override` });
+      alternatives.push({ command: `maestro discard ${item.issue}` });
+    }
   }
 
   if (approvals.length) {

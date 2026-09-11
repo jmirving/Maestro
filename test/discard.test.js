@@ -67,7 +67,7 @@ test("discard records the disposition and makes ready manifest work eligible aga
 
   const status = formatStatus(await statusSnapshot(config, repoPath));
   assert.match(status, /Issue #7 — Rejected implementation — implementation discarded, ready for a fresh run/);
-  assert.match(status, /Recommended: maestro start/);
+  assert.match(status, /Recommended: `maestro start`/);
   const details = formatDetails(await loadIssueDetails(repoPath, ["7"], { config }));
   assert.match(details, /Issue state: discarded/);
   assert.match(details, /Disposition: discard/);
