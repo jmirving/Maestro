@@ -13,6 +13,32 @@ function titleFor(config, issue, evidence) {
     .find((value) => typeof value === "string" && value.trim())?.trim() || null;
 }
 
+function planEntry(entries, issue) {
+  return entries?.find((entry) => String(entry.id) === issue) || null;
+}
+
+function discardedManifestState(issue, manifest, plan, selected) {
+  const humanGate = planEntry(plan.humanGates, issue);
+  if (humanGate) {
+    return `implementation discarded; blocked by human gate${humanGate.humanGate ? `: ${humanGate.humanGate}` : ""}`;
+  }
+
+  const blocked = planEntry(plan.blocked, issue);
+  if (blocked) {
+    return `implementation discarded; blocked${blocked.unresolved?.length
+      ? `, waiting on ${blocked.unresolved.map((id) => `#${id}`).join(", ")}`
+      : ""}`;
+  }
+
+  if (planEntry(plan.ready, issue)) {
+    return selected
+      ? "implementation discarded, ready for a fresh run"
+      : "implementation discarded, eligible for a fresh run";
+  }
+
+  return `implementation discarded; manifest state ${manifest?.status || "unknown"} is not eligible for a fresh run`;
+}
+
 function describeIssue(config, issue, evidence, plan) {
   const manifest = config.work?.[issue] || null;
   const deferred = plan.deferred?.find((entry) => String(entry.id) === issue);
@@ -28,7 +54,7 @@ function describeIssue(config, issue, evidence, plan) {
     state = "integrated/complete";
     integrationState = "integrated";
   } else if (review?.disposition === "discard") {
-    state = "implementation discarded, ready for a fresh run";
+    state = discardedManifestState(issue, manifest, plan, selected);
     integrationState = "discarded; branch/worktree preserved and excluded from integration";
     action = selected ? "maestro start" : null;
   } else if (review?.disposition === "rework-original") {

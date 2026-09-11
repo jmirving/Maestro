@@ -73,6 +73,59 @@ test("discard records the disposition and makes ready manifest work eligible aga
   assert.match(details, /Disposition: discard/);
 });
 
+test("discarded work stays blocked by manifest dependencies until they complete", async (t) => {
+  const { repoPath, config } = await fixture(t);
+  const runId = "20260910020202-bbbbbb";
+  config.defaultConcurrency = 1;
+  config.work = {
+    "2": { status: "ready", title: "Dependency" },
+    "7": { status: "ready", title: "Rejected implementation", blockedBy: ["2"] }
+  };
+  await saveRunState(repoPath, runId, rejectedRun(runId));
+  await discardIssues({ repoPath, requestedIssues: ["7"] });
+
+  const blockedPlan = await computeEffectivePlan(config, repoPath);
+  assert.deepEqual(blockedPlan.selected.map((item) => item.id), ["2"]);
+  assert.deepEqual(blockedPlan.blocked.map((item) => item.id), ["7"]);
+  assert.deepEqual(blockedPlan.blocked[0].unresolved, ["2"]);
+  const blockedStatus = formatStatus(await statusSnapshot(config, repoPath));
+  assert.match(blockedStatus, /Issue #7 — Rejected implementation — implementation discarded; blocked, waiting on #2/);
+  assert.doesNotMatch(blockedStatus, /Issue #7 .*ready for a fresh run/);
+  assert.match(blockedStatus, /Next wave: #2/);
+
+  config.work["2"].status = "complete";
+  const readyPlan = await computeEffectivePlan(config, repoPath);
+  assert.deepEqual(readyPlan.selected.map((item) => item.id), ["7"]);
+  const readyStatus = formatStatus(await statusSnapshot(config, repoPath));
+  assert.match(readyStatus, /Issue #7 — Rejected implementation — implementation discarded, ready for a fresh run/);
+});
+
+test("discarded work stays behind a manifest human gate until the gate clears", async (t) => {
+  const { repoPath, config } = await fixture(t);
+  const runId = "20260910030303-cccccc";
+  config.work["7"] = {
+    status: "human_gate",
+    title: "Rejected implementation",
+    humanGate: "owner authorizes production access"
+  };
+  await saveRunState(repoPath, runId, rejectedRun(runId));
+  await discardIssues({ repoPath, requestedIssues: ["7"] });
+
+  const gatedPlan = await computeEffectivePlan(config, repoPath);
+  assert.deepEqual(gatedPlan.selected, []);
+  assert.deepEqual(gatedPlan.humanGates.map((item) => item.id), ["7"]);
+  const gatedStatus = formatStatus(await statusSnapshot(config, repoPath));
+  assert.match(gatedStatus, /Issue #7 — Rejected implementation — implementation discarded; blocked by human gate: owner authorizes production access/);
+  assert.doesNotMatch(gatedStatus, /ready for a fresh run/);
+  assert.doesNotMatch(gatedStatus, /Recommended: `maestro start`/);
+
+  config.work["7"].status = "ready";
+  const readyPlan = await computeEffectivePlan(config, repoPath);
+  assert.deepEqual(readyPlan.selected.map((item) => item.id), ["7"]);
+  const readyStatus = formatStatus(await statusSnapshot(config, repoPath));
+  assert.match(readyStatus, /Issue #7 — Rejected implementation — implementation discarded, ready for a fresh run/);
+});
+
 test("discard CLI is explicit, refuses non-REWORK work, and leaves the manifest unchanged", async (t) => {
   const { repoPath, manifestPath } = await fixture(t);
   const runId = "20260910010101-aaaaaa";
