@@ -65,7 +65,7 @@
       ]
     },
     "6": {
-      "status": "ready",
+      "status": "complete",
       "mode": "execute",
       "priority": 60,
       "blockedBy": [
