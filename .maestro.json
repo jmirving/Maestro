@@ -78,7 +78,7 @@
       ]
     },
     "7": {
-      "status": "ready",
+      "status": "complete",
       "mode": "execute",
       "priority": 55,
       "blockedBy": [
