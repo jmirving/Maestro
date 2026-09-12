@@ -17,6 +17,16 @@ maestro start
 
 The first draft command is a preview. `--write` saves the schema-valid proposal to `.maestro.json`; neither form launches work or grants integration permission. `plan` is also read-only. `start` executes the current ready wave in isolated worktrees and validates changed branches in fresh agent contexts, but it does not approve or integrate results.
 
+For routine validator-guided correction, opt in to the bounded loop:
+
+```bash
+maestro start --auto-rework
+# or, while continuing/resuming:
+maestro next --auto-rework
+```
+
+Each validator `REWORK` is corrected and validated again, up to three persisted attempts per issue. Approval returns to the normal human-review step. A genuine human gate, worker/tool or refresh failure, invalid/missing validator output, or exhaustion stops that issue and preserves actionable evidence in `maestro details`; independent siblings may still finish. Automatic rework never approves or integrates code.
+
 Inspect persisted state before deciding what to do:
 
 ```bash

@@ -32,12 +32,16 @@ function formatRunLifecycle(state) {
     const validation = validationByIssue.get(issue);
     const review = reviews[issue];
     const integrated = integrationByIssue.get(issue);
+    const correction = state.correction?.attempts?.[issue];
+    const automatic = state.autoRework?.[issue];
     const parts = [];
     if (validation?.verdict) parts.push(`validator=${validation.verdict}`);
     if (review?.disposition) parts.push(`review=${review.disposition}`);
     if (review?.followUp?.issueNumber) parts.push(`follow-up=#${review.followUp.issueNumber}`);
     if (integrated?.integratedSha) parts.push(`integrated=${integrated.integratedSha}`);
     else if (integrated) parts.push("integrated=yes");
+    if (correction) parts.push(`correction=${correction.number} (${correction.outcome || correction.phase})`);
+    if (automatic) parts.push(`auto-rework=${automatic.status} (${automatic.attemptsUsed}/${automatic.retryLimit})`);
     lines.push(`- #${issue}: ${parts.join(", ") || "recorded"}`);
   }
   if (state.integratedAt) lines.push(`- integration completed at ${state.integratedAt}`);

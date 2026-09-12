@@ -10,7 +10,7 @@ const { recordReview } = require("../src/reviews");
 const { approveIssues, formatApprovalSummary } = require("../src/approval");
 const { discardIssues, formatDiscardSummary } = require("../src/discard");
 const { integrateExistingRun } = require("../src/existing-run");
-const { resolveIssueReworkSources, executeReworkRun } = require("../src/rework");
+const { resolveIssueReworkSources, executeReworkRun, autoRework } = require("../src/rework");
 const { executeReconcileRun } = require("../src/reconcile");
 const { latestRunId } = require("../src/run-store");
 const { statusSnapshot, formatStatus, watchStatus } = require("../src/display");
@@ -150,8 +150,13 @@ function loadConfig(manifestPath, args) {
 }
 
 function setResultExitCode(result) {
+  if (result.status === "failed") process.exitCode = 1;
   if (result.workers?.some((worker) => worker.exitCode !== 0)) process.exitCode = 1;
   if (result.validations?.some((entry) => entry.verdict !== "approve")) process.exitCode = 1;
+}
+
+function setAutoReworkExitCode(result) {
+  if (result.issues?.some((entry) => entry.outcome !== "approved")) process.exitCode = 1;
 }
 
 async function workflowFooter(config, repoPath, { includeIssues = true } = {}) {
@@ -318,9 +323,23 @@ async function main() {
   if (command === "start" || command === "next") {
     const plan = args.includes("--rerun") ? computePlan(config) : await computeEffectivePlan(config, repoPath);
     const result = await executeRun(config, { repoPath, plan });
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    let automatic = null;
+    if (args.includes("--auto-rework")) {
+      const newlyExecuted = result.plan?.selected?.map((item) => String(item.id)) || [];
+      const resumable = plan.deferred
+        ?.filter((item) => item.lifecycle?.state === "awaiting-rework")
+        .map((item) => String(item.id)) || [];
+      const issueIds = newlyExecuted.length ? newlyExecuted : resumable;
+      automatic = await autoRework(config, {
+        repoPath,
+        issueIds,
+        capacity: plan.availableConcurrency ?? plan.concurrency ?? config.defaultConcurrency ?? 2
+      });
+    }
+    process.stdout.write(`${JSON.stringify(automatic ? { ...result, autoRework: automatic } : result, null, 2)}\n`);
     process.stdout.write(await workflowFooter(config, repoPath));
-    setResultExitCode(result);
+    if (automatic) setAutoReworkExitCode(automatic);
+    else setResultExitCode(result);
     return;
   }
 

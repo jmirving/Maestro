@@ -7,6 +7,54 @@ const { runChecked } = require("./process");
 const { newRunId } = require("./controller");
 const { resolveCurrentIssueStates } = require("./run-resolver");
 
+const DEFAULT_AUTO_REWORK_LIMIT = 3;
+
+function correctionAttempt(state, issue) {
+  return state.correction?.attempts?.[String(issue)] || null;
+}
+
+async function loadCorrectionLineage(repoPath, sourceRunId, issue, stateLoader = loadRunState) {
+  const lineage = [];
+  const seen = new Set();
+  let runId = String(sourceRunId);
+  let rootRunId = runId;
+
+  while (runId) {
+    if (seen.has(runId)) throw new Error(`Maestro correction provenance contains a cycle at ${runId}.`);
+    seen.add(runId);
+    const state = await stateLoader(repoPath, runId);
+    rootRunId = runId;
+    const attempt = correctionAttempt(state, issue);
+    if (attempt) lineage.push({ runId, ...attempt });
+    runId = state.parentRunId ? String(state.parentRunId) : null;
+  }
+
+  return { rootRunId, attempts: lineage.reverse() };
+}
+
+function validationSnapshot(validation) {
+  if (!validation) return null;
+  return {
+    verdict: validation.verdict ?? null,
+    exitCode: validation.exitCode ?? null,
+    report: validation.report ?? null
+  };
+}
+
+function resultOutcome(result, issue) {
+  const worker = (result.workers || []).find((entry) => String(entry.issue) === String(issue));
+  const validation = (result.validations || []).find((entry) => String(entry.issue) === String(issue));
+  if (!worker || worker.exitCode !== 0) return { status: "worker-failure", verdict: null };
+  if (!validation) return { status: "validator-failure", verdict: null };
+  if (validation.exitCode !== 0 || !["approve", "rework", "human_gate"].includes(validation.verdict)) {
+    return { status: "validator-failure", verdict: validation.verdict || null };
+  }
+  return {
+    status: validation.verdict === "approve" ? "approved" : validation.verdict === "human_gate" ? "human-gate" : "rework",
+    verdict: validation.verdict
+  };
+}
+
 async function resolveIssueReworkSources(repoPath, issueIds) {
   const requested = [...new Set((issueIds || []).map(String))];
   const resolved = await resolveCurrentIssueStates(repoPath, requested);
@@ -50,7 +98,14 @@ async function refreshWorker(worker, { defaultBranch = "main", runner = runCheck
   await runner("git", ["fetch", "origin", defaultBranch], { cwd: worker.worktreePath });
   await runner("git", ["rebase", `origin/${defaultBranch}`], { cwd: worker.worktreePath }).catch(async (error) => {
     try { await runner("git", ["rebase", "--abort"], { cwd: worker.worktreePath }); } catch {}
-    throw error;
+    const wrapped = new Error(
+      `Rework refresh for issue #${worker.issue} failed before its correction worker started. ` +
+      `Maestro attempted to abort its rebase so the implementation remains at ${worker.worktreePath}. ` +
+      `Inspect \`maestro details ${worker.issue}\`; after resolving the refresh safely, rerun \`maestro rework ${worker.issue}\`. ` +
+      `Cause: ${error.message}`
+    );
+    wrapped.cause = error;
+    throw wrapped;
   });
   const baseSha = (await runner("git", ["rev-parse", `origin/${defaultBranch}`], { cwd: worker.worktreePath })).stdout.trim();
   return { ...worker, baseSha };
@@ -66,7 +121,10 @@ async function executeReworkRun(config, {
   baselineRunner,
   workerExecutor = executeWorker,
   validatorExecutor = validateWorker,
-  stateSaver = saveRunState
+  stateSaver = saveRunState,
+  stateLoader = loadRunState,
+  automatic = false,
+  retryLimit = null
 } = {}) {
   const source = await loadRunState(repoPath, sourceRunId);
   const workersByIssue = new Map();
@@ -113,6 +171,29 @@ async function executeReworkRun(config, {
     return { id: String(worker.issue), ...configured, mode: "rework" };
   });
 
+  const attempts = {};
+  for (const worker of candidates) {
+    const issue = String(worker.issue);
+    const lineage = await loadCorrectionLineage(repoPath, sourceRunId, issue, stateLoader);
+    attempts[issue] = {
+      number: lineage.attempts.length + 1,
+      automatic,
+      sourceRunId,
+      rootRunId: lineage.rootRunId,
+      retryLimit,
+      chargedAt: "child-run-created-before-preflight",
+      phase: "preparing",
+      outcome: null,
+      trigger: validationSnapshot(validationByIssue.get(issue)),
+      implementation: {
+        branch: worker.branch || null,
+        worktreePath: worker.worktreePath || null,
+        baseSha: worker.baseSha || null,
+        targetBranch: config.defaultBranch || "main"
+      }
+    };
+  }
+
   const result = {
     runId,
     parentRunId: sourceRunId,
@@ -124,7 +205,8 @@ async function executeReworkRun(config, {
     preflights: [],
     workers: [],
     validations: [],
-    reviews: {}
+    reviews: {},
+    correction: { attempts }
   };
   await stateSaver(repoPath, runId, result);
 
@@ -138,6 +220,8 @@ async function executeReworkRun(config, {
     for (const worker of candidates) {
       console.error(`[Maestro] rework #${worker.issue}: rebasing existing implementation onto current ${config.defaultBranch || "main"}`);
       refreshed.push(await refreshWorker(worker, { defaultBranch: config.defaultBranch || "main", runner }));
+      result.correction.attempts[String(worker.issue)].phase = "worker-pending";
+      await stateSaver(repoPath, runId, result);
     }
 
     result.workers = await Promise.all(refreshed.map((worker) => {
@@ -162,19 +246,216 @@ async function executeReworkRun(config, {
       });
     }));
 
+    for (const worker of result.workers) {
+      result.correction.attempts[String(worker.issue)].phase = worker.exitCode === 0 ? "validation-pending" : "stopped";
+    }
+    await stateSaver(repoPath, runId, result);
+
     result.validations = await Promise.all(result.workers
       .filter((worker) => worker.exitCode === 0 && worker.headSha !== worker.baseSha)
       .map((worker) => validatorExecutor({ repository: config.repository, worker, baseline: result.baseline, runId })));
 
-    result.status = "awaiting-review";
+    const outcomes = candidates.map((worker) => ({
+      issue: String(worker.issue),
+      ...resultOutcome(result, worker.issue)
+    }));
+    for (const outcome of outcomes) {
+      const attempt = result.correction.attempts[outcome.issue];
+      attempt.phase = "completed";
+      attempt.outcome = outcome.status;
+      attempt.finalVerdict = outcome.verdict;
+    }
+    const failed = outcomes.filter((entry) => ["worker-failure", "validator-failure"].includes(entry.status));
+    result.status = failed.length ? "failed" : "awaiting-review";
+    if (failed.length) {
+      result.failure = failed.map((entry) => `#${entry.issue} ${entry.status}`).join("; ");
+    }
     await stateSaver(repoPath, runId, result);
     return result;
   } catch (error) {
     result.status = "failed";
     result.failure = error.message;
+    for (const attempt of Object.values(result.correction.attempts)) {
+      if (attempt.phase !== "completed") {
+        attempt.phase = "stopped";
+        attempt.outcome = "infrastructure-failure";
+      }
+    }
     await stateSaver(repoPath, runId, result);
     throw error;
   }
 }
 
-module.exports = { resolveIssueReworkSources, refreshWorker, executeReworkRun };
+async function autoReworkIssue(config, {
+  repoPath,
+  issue,
+  retryLimit,
+  resolver,
+  stateLoader,
+  stateSaver,
+  recordOutcome,
+  reworkExecutor,
+  reworkOptions
+}) {
+  const runs = [];
+  for (;;) {
+    const [resolved] = await resolver(repoPath, [String(issue)]);
+    const evidence = resolved.evidence;
+    const worker = evidence.worker;
+    const validation = evidence.validation;
+
+    if (resolved.state.status === "failed") {
+      const persistedOutcome = evidence.correction?.outcome;
+      const outcome = persistedOutcome === "validator-failure" || persistedOutcome === "worker-failure"
+        ? persistedOutcome
+        : "infrastructure-failure";
+      await recordOutcome(resolved.runId, issue, { status: outcome, finalVerdict: validation?.verdict || null });
+      return { issue: String(issue), outcome, finalRunId: resolved.runId, finalVerdict: validation?.verdict || null, runs };
+    }
+    if (!worker || worker.exitCode !== 0) {
+      await recordOutcome(resolved.runId, issue, { status: "worker-failure", finalVerdict: null });
+      return { issue: String(issue), outcome: "worker-failure", finalRunId: resolved.runId, runs };
+    }
+    if (!validation || validation.exitCode !== 0 || !["approve", "rework", "human_gate"].includes(validation.verdict)) {
+      await recordOutcome(resolved.runId, issue, { status: "validator-failure", finalVerdict: validation?.verdict || null });
+      return { issue: String(issue), outcome: "validator-failure", finalRunId: resolved.runId, finalVerdict: validation?.verdict || null, runs };
+    }
+    if (validation.verdict === "approve") {
+      await recordOutcome(resolved.runId, issue, { status: "approved", finalVerdict: "approve" });
+      return { issue: String(issue), outcome: "approved", finalRunId: resolved.runId, finalVerdict: "approve", runs };
+    }
+    if (validation.verdict === "human_gate") {
+      await recordOutcome(resolved.runId, issue, { status: "human-gate", finalVerdict: "human_gate" });
+      return { issue: String(issue), outcome: "human-gate", finalRunId: resolved.runId, finalVerdict: "human_gate", runs };
+    }
+
+    const lineage = await loadCorrectionLineage(repoPath, resolved.runId, issue, stateLoader);
+    if (lineage.attempts.length >= retryLimit) {
+      await recordOutcome(resolved.runId, issue, {
+        status: "retry-exhausted",
+        attemptsUsed: lineage.attempts.length,
+        finalVerdict: "rework"
+      });
+      return {
+        issue: String(issue),
+        outcome: "retry-exhausted",
+        finalRunId: resolved.runId,
+        finalVerdict: "rework",
+        attemptsUsed: lineage.attempts.length,
+        retryLimit,
+        runs
+      };
+    }
+
+    const runId = newRunId();
+    try {
+      const result = await reworkExecutor(config, {
+        repoPath,
+        sourceRunId: resolved.runId,
+        issueIds: [String(issue)],
+        runId,
+        stateLoader,
+        stateSaver,
+        automatic: true,
+        retryLimit,
+        ...reworkOptions
+      });
+      runs.push(result);
+      const outcome = resultOutcome(result, issue);
+      if (outcome.status === "worker-failure" || outcome.status === "validator-failure") {
+        await recordOutcome(result.runId, issue, { status: outcome.status, finalVerdict: outcome.verdict });
+        return {
+          issue: String(issue),
+          outcome: outcome.status,
+          finalRunId: result.runId,
+          finalVerdict: outcome.verdict,
+          runs
+        };
+      }
+    } catch (error) {
+      await recordOutcome(runId, issue, { status: "infrastructure-failure", finalVerdict: null });
+      return {
+        issue: String(issue),
+        outcome: "worker-or-infrastructure-failure",
+        finalRunId: runId,
+        error: error.message,
+        runs
+      };
+    }
+  }
+}
+
+async function autoRework(config, {
+  repoPath,
+  issueIds,
+  retryLimit = DEFAULT_AUTO_REWORK_LIMIT,
+  capacity = config.defaultConcurrency || 2,
+  resolver = resolveCurrentIssueStates,
+  stateLoader = loadRunState,
+  stateSaver = saveRunState,
+  reworkExecutor = executeReworkRun,
+  reworkOptions = {}
+} = {}) {
+  const issues = [...new Set((issueIds || []).map(String))];
+  if (!Number.isInteger(retryLimit) || retryLimit < 1) {
+    throw new Error("Automatic rework retry limit must be a positive integer.");
+  }
+  if (!Number.isInteger(capacity) || capacity < 0) throw new Error("Automatic rework capacity must be a non-negative integer.");
+  if (!issues.length || capacity === 0) {
+    return { mode: "auto-rework", retryLimit, capacity, issues: [] };
+  }
+
+  const results = new Array(issues.length);
+  let cursor = 0;
+  let outcomeWrite = Promise.resolve();
+  function recordOutcome(runId, issue, outcome) {
+    outcomeWrite = outcomeWrite.then(async () => {
+      const state = await stateLoader(repoPath, runId);
+      const attempt = correctionAttempt(state, issue);
+      state.autoRework = state.autoRework || {};
+      state.autoRework[String(issue)] = {
+        status: outcome.status,
+        retryLimit,
+        attemptsUsed: outcome.attemptsUsed ?? attempt?.number ?? 0,
+        finalVerdict: outcome.finalVerdict ?? null,
+        action: ["approved"].includes(outcome.status)
+          ? `maestro approve ${issue}`
+          : outcome.status === "human-gate"
+            ? `maestro review --run ${runId} --issue ${issue} --disposition rework-original`
+            : `maestro details ${issue}`
+      };
+      await stateSaver(repoPath, runId, state);
+    });
+    return outcomeWrite;
+  }
+  async function runNext() {
+    for (;;) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= issues.length) return;
+      results[index] = await autoReworkIssue(config, {
+        repoPath,
+        issue: issues[index],
+        retryLimit,
+        resolver,
+        stateLoader,
+        stateSaver,
+        recordOutcome,
+        reworkExecutor,
+        reworkOptions
+      });
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(capacity, issues.length) }, () => runNext()));
+  return { mode: "auto-rework", retryLimit, capacity, issues: results };
+}
+
+module.exports = {
+  DEFAULT_AUTO_REWORK_LIMIT,
+  resolveIssueReworkSources,
+  refreshWorker,
+  loadCorrectionLineage,
+  resultOutcome,
+  executeReworkRun,
+  autoRework
+};

@@ -45,9 +45,11 @@ function evidenceForIssue(state, issueId) {
   const validation = (state.validations || []).find((entry) => String(entry.issue) === issue) || null;
   const review = state.reviews?.[issue] || null;
   const integration = (state.integration || []).find((entry) => String(entry.issue) === issue) || null;
+  const autoRework = state.autoRework?.[issue] || null;
+  const correction = state.correction?.attempts?.[issue] || null;
   const selected = (state.plan?.selected || []).find((entry) => String(entry.id) === issue) || null;
   if (!worker && !validation && !review && !integration && !selected) return null;
-  const evidence = { issue, worker, validation, review, integration, selected };
+  const evidence = { issue, worker, validation, review, integration, selected, autoRework, correction, runFailure: state.failure || null };
   return {
     ...evidence,
     state: lifecycleState(state, evidence),
@@ -127,13 +129,36 @@ function currentIssueEvidenceFromStates(states, issueIds = []) {
   const requested = normalizeIssueIds(issueIds);
   const requestedSet = requested.length ? new Set(requested) : null;
   const current = new Map();
+  const byRunId = new Map(states.map((state) => [String(state.runId), state]));
+  const issues = [...new Set(states.flatMap(issueIdsForRun))]
+    .filter((issue) => !requestedSet || requestedSet.has(issue));
 
-  for (const state of newestFirst(states)) {
-    for (const issue of issueIdsForRun(state)) {
-      if (requestedSet && !requestedSet.has(issue)) continue;
-      if (current.has(issue)) continue;
-      const evidence = evidenceForIssue(state, issue);
-      if (evidence) current.set(issue, { issue, runId: String(state.runId), state, evidence });
+  function descendsFrom(state, ancestorRunId) {
+    const seen = new Set();
+    let parentRunId = state.parentRunId ? String(state.parentRunId) : null;
+    while (parentRunId && !seen.has(parentRunId)) {
+      if (parentRunId === ancestorRunId) return true;
+      seen.add(parentRunId);
+      parentRunId = byRunId.get(parentRunId)?.parentRunId
+        ? String(byRunId.get(parentRunId).parentRunId)
+        : null;
+    }
+    return false;
+  }
+
+  for (const issue of issues) {
+    const candidates = newestFirst(states).filter((state) => evidenceForIssue(state, issue));
+    const leaves = candidates.filter((candidate) => !candidates.some((other) => (
+      other !== candidate && descendsFrom(other, String(candidate.runId))
+    )));
+    const state = leaves[0];
+    if (state) {
+      current.set(issue, {
+        issue,
+        runId: String(state.runId),
+        state,
+        evidence: evidenceForIssue(state, issue)
+      });
     }
   }
 

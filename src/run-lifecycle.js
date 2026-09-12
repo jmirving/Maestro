@@ -19,6 +19,12 @@ function classifyRunIssue(state, worker) {
   if (review?.disposition === "rework-original") {
     return { state: "awaiting-rework", action: `maestro rework ${issue}` };
   }
+  if (state.autoRework?.[issue]?.status === "retry-exhausted") {
+    return { state: "rework-exhausted", action: `maestro details ${issue}` };
+  }
+  if (["worker-failure", "validator-failure", "infrastructure-failure"].includes(state.autoRework?.[issue]?.status)) {
+    return { state: "failed-awaiting-retry", action: `maestro details ${issue}` };
+  }
   if (isValidValidatorOverride(review, validation)) {
     return { state: "awaiting-integration", action: `maestro commit --run ${state.runId}` };
   }

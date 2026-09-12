@@ -61,6 +61,12 @@ function describeIssue(config, issue, evidence, plan) {
     state = "human rework disposition recorded, excluded from integration";
     integrationState = "excluded; will be reworked";
     action = `maestro rework ${issue}`;
+  } else if (evidence?.autoRework?.status === "retry-exhausted") {
+    const attempts = evidence.autoRework.attemptsUsed;
+    const limit = evidence.autoRework.retryLimit;
+    state = `automatic rework exhausted after ${attempts} of ${limit} correction attempts; human review required`;
+    integrationState = "not eligible; inspect the correction lineage and decide whether to rework manually, override, or discard";
+    action = `maestro details ${issue}`;
   } else if (isValidValidatorOverride(review, validation)) {
     state = "human override approved, ready to integrate";
     integrationState = "eligible when every item in its run has a human disposition";
@@ -80,6 +86,12 @@ function describeIssue(config, issue, evidence, plan) {
   } else if (validation?.verdict === "human_gate") {
     state = "validator requested a human decision, awaiting human disposition";
     integrationState = "not eligible until human disposition";
+  } else if (["worker-failure", "validator-failure", "infrastructure-failure"].includes(evidence?.autoRework?.status || evidence?.correction?.outcome)) {
+    const outcome = evidence.autoRework?.status || evidence.correction.outcome;
+    const attempt = evidence.autoRework?.attemptsUsed ?? evidence.correction?.number ?? 0;
+    state = `automatic correction stopped${attempt ? ` after attempt ${attempt}` : " before a correction attempt"}: ${outcome}; human attention required`;
+    integrationState = "not eligible; failure evidence is preserved";
+    action = `maestro details ${issue}`;
   } else if (evidence?.state === "running" || evidence?.state === "rework-running") {
     state = evidence.state === "rework-running" ? "rework in progress" : "worker in progress";
     action = "maestro status --watch";
@@ -112,6 +124,8 @@ function describeIssue(config, issue, evidence, plan) {
     workerCommit: evidence?.worker?.headSha || null,
     validator: validation?.verdict || null,
     humanReview: review?.disposition || null,
+    autoReworkStatus: evidence?.autoRework?.status || null,
+    correctionAttempt: evidence?.correction?.number || null,
     integrationState,
     runId: evidence?.runId || null
   };

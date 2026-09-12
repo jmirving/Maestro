@@ -5,11 +5,42 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { buildWorkerPrompt } = require("../src/worker");
-const { executeReworkRun, resolveIssueReworkSources } = require("../src/rework");
-const { saveRunState } = require("../src/run-store");
+const { executeReworkRun, resolveIssueReworkSources, autoRework, loadCorrectionLineage } = require("../src/rework");
+const { saveRunState, loadRunState, loadPersistedRunStates } = require("../src/run-store");
 
 function parseLeadingJson(stdout) {
   return JSON.parse(stdout.split("\n\nIssue #", 1)[0]);
+}
+
+async function autoFixture(t, issues = ["7"]) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-auto-rework-"));
+  const repoPath = path.join(root, "target");
+  const sourceRunId = "20260910010101-aaaaaa";
+  await fs.mkdir(repoPath);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await saveRunState(repoPath, sourceRunId, {
+    runId: sourceRunId,
+    mode: "execute",
+    status: "awaiting-review",
+    plan: { selected: issues.map((id) => ({ id })) },
+    workers: issues.map((issue) => ({
+      issue,
+      exitCode: 0,
+      baseSha: `base-${issue}`,
+      headSha: `head-${issue}`,
+      branch: `maestro/${issue}`,
+      worktreePath: repoPath,
+      report: `worker ${issue}`
+    })),
+    validations: issues.map((issue) => ({ issue, exitCode: 0, verdict: "rework", report: `fix ${issue}` })),
+    reviews: {}
+  });
+  return {
+    repoPath,
+    sourceRunId,
+    config: { repository: "example/repo", defaultConcurrency: 2, work: Object.fromEntries(issues.map((issue) => [issue, { status: "ready" }])) },
+    runner: async (_command, args) => ({ stdout: args[0] === "rev-parse" ? "base-new\n" : "" })
+  };
 }
 
 
@@ -267,12 +298,12 @@ test("maestro rework executes the latest actionable set without a run ID", async
     reviews: {}
   });
   await fs.writeFile(path.join(binPath, "git"), `#!/usr/bin/env node
-if (process.argv[2] === "rev-parse") process.stdout.write("base\\n");
+if (process.argv[2] === "rev-parse") process.stdout.write(process.argv[3] === "HEAD" ? "head-new\\n" : "base\\n");
 `);
   await fs.writeFile(path.join(binPath, "codex"), `#!/usr/bin/env node
 const fs = require("node:fs");
 const index = process.argv.indexOf("--output-last-message");
-if (index >= 0) fs.writeFileSync(process.argv[index + 1], "Result: complete\\n");
+if (index >= 0) fs.writeFileSync(process.argv[index + 1], process.argv.includes("read-only") ? "VERDICT: APPROVE\\n" : "Result: complete\\n");
 `);
   await fs.chmod(path.join(binPath, "git"), 0o755);
   await fs.chmod(path.join(binPath, "codex"), 0o755);
@@ -295,4 +326,186 @@ if (index >= 0) fs.writeFileSync(process.argv[index + 1], "Result: complete\\n")
   ], { encoding: "utf8" });
   assert.equal(invalid.status, 1);
   assert.match(invalid.stderr, /Invalid issue number: not-an-issue/);
+});
+
+test("automatic rework corrects and revalidates until approval while persisting trigger lineage", async (t) => {
+  const fixture = await autoFixture(t);
+  const verdicts = ["rework", "approve"];
+  let workers = 0;
+  const result = await autoRework(fixture.config, {
+    repoPath: fixture.repoPath,
+    issueIds: ["7"],
+    reworkOptions: {
+      runner: fixture.runner,
+      workerExecutor: async ({ worktree }) => ({ issue: "7", exitCode: 0, ...worktree, headSha: `corrected-${++workers}`, report: "corrected" }),
+      validatorExecutor: async () => ({ issue: "7", exitCode: 0, verdict: verdicts.shift(), report: "fresh validation" })
+    }
+  });
+
+  assert.equal(result.issues[0].outcome, "approved");
+  assert.equal(workers, 2);
+  const states = await loadPersistedRunStates(fixture.repoPath);
+  const children = states.filter((state) => state.mode === "rework");
+  assert.equal(children.length, 2);
+  assert.deepEqual(children.map((state) => state.correction.attempts["7"].number).sort(), [1, 2]);
+  const first = children.find((state) => state.correction.attempts["7"].number === 1);
+  const second = children.find((state) => state.correction.attempts["7"].number === 2);
+  assert.equal(first.correction.attempts["7"].trigger.verdict, "rework");
+  assert.equal(second.correction.attempts["7"].outcome, "approved");
+  assert.equal((await loadCorrectionLineage(fixture.repoPath, second.runId, "7")).attempts.length, 2);
+});
+
+test("automatic rework stops at HUMAN_GATE and never launches a correction for an existing gate", async (t) => {
+  const fixture = await autoFixture(t, ["7", "8"]);
+  let calls = 0;
+  const first = await autoRework(fixture.config, {
+    repoPath: fixture.repoPath,
+    issueIds: ["7"],
+    reworkOptions: {
+      runner: fixture.runner,
+      workerExecutor: async ({ worktree }) => ({ issue: "7", exitCode: 0, ...worktree, headSha: "corrected", report: "needs decision" }),
+      validatorExecutor: async () => ({ issue: "7", exitCode: 0, verdict: "human_gate", report: "choose an API" })
+    }
+  });
+  assert.equal(first.issues[0].outcome, "human-gate");
+
+  const gatedRun = await loadRunState(fixture.repoPath, first.issues[0].finalRunId);
+  const second = await autoRework(fixture.config, {
+    repoPath: fixture.repoPath,
+    issueIds: ["7"],
+    reworkExecutor: async () => { calls += 1; }
+  });
+  assert.equal(gatedRun.validations[0].verdict, "human_gate");
+  assert.equal(second.issues[0].outcome, "human-gate");
+  assert.equal(calls, 0);
+});
+
+test("automatic rework exhausts a durable three-attempt budget across child runs and resume", async (t) => {
+  const fixture = await autoFixture(t);
+  let workers = 0;
+  const alwaysRework = {
+    runner: fixture.runner,
+    workerExecutor: async ({ worktree }) => ({ issue: "7", exitCode: 0, ...worktree, headSha: `corrected-${++workers}`, report: "attempted" }),
+    validatorExecutor: async () => ({ issue: "7", exitCode: 0, verdict: "rework", report: "still failing" })
+  };
+  const first = await autoRework(fixture.config, {
+    repoPath: fixture.repoPath,
+    issueIds: ["7"],
+    retryLimit: 1,
+    reworkOptions: alwaysRework
+  });
+  assert.equal(first.issues[0].outcome, "retry-exhausted");
+  assert.equal(workers, 1);
+
+  const resumed = await autoRework(fixture.config, {
+    repoPath: fixture.repoPath,
+    issueIds: ["7"],
+    retryLimit: 3,
+    reworkOptions: alwaysRework
+  });
+  assert.equal(resumed.issues[0].outcome, "retry-exhausted");
+  assert.equal(resumed.issues[0].attemptsUsed, 3);
+  assert.equal(workers, 3);
+  const terminal = await loadRunState(fixture.repoPath, resumed.issues[0].finalRunId);
+  assert.deepEqual(terminal.autoRework["7"], {
+    status: "retry-exhausted",
+    retryLimit: 3,
+    attemptsUsed: 3,
+    finalVerdict: "rework",
+    action: "maestro details 7"
+  });
+});
+
+test("automatic rework fails safely on worker, validator, and pre-worker refresh failures", async (t) => {
+  const workerFixture = await autoFixture(t);
+  const workerFailure = await autoRework(workerFixture.config, {
+    repoPath: workerFixture.repoPath,
+    issueIds: ["7"],
+    reworkOptions: {
+      runner: workerFixture.runner,
+      workerExecutor: async ({ worktree }) => ({ issue: "7", exitCode: 2, ...worktree, headSha: "unchanged", report: "failed" })
+    }
+  });
+  assert.equal(workerFailure.issues[0].outcome, "worker-failure");
+
+  const validatorFixture = await autoFixture(t);
+  const validatorFailure = await autoRework(validatorFixture.config, {
+    repoPath: validatorFixture.repoPath,
+    issueIds: ["7"],
+    reworkOptions: {
+      runner: validatorFixture.runner,
+      workerExecutor: async ({ worktree }) => ({ issue: "7", exitCode: 0, ...worktree, headSha: "changed", report: "done" }),
+      validatorExecutor: async () => ({ issue: "7", exitCode: 0, verdict: "invalid", report: "malformed" })
+    }
+  });
+  assert.equal(validatorFailure.issues[0].outcome, "validator-failure");
+  const invalidState = await loadRunState(validatorFixture.repoPath, validatorFailure.issues[0].finalRunId);
+  assert.equal(invalidState.correction.attempts["7"].outcome, "validator-failure");
+
+  const refreshFixture = await autoFixture(t);
+  const refreshFailure = await autoRework(refreshFixture.config, {
+    repoPath: refreshFixture.repoPath,
+    issueIds: ["7"],
+    reworkOptions: { runner: async () => { throw new Error("refresh failed"); } }
+  });
+  assert.equal(refreshFailure.issues[0].outcome, "worker-or-infrastructure-failure");
+  const refreshState = await loadRunState(refreshFixture.repoPath, refreshFailure.issues[0].finalRunId);
+  assert.equal(refreshState.correction.attempts["7"].number, 1);
+  assert.equal(refreshState.correction.attempts["7"].phase, "stopped");
+  assert.equal(refreshState.correction.attempts["7"].outcome, "infrastructure-failure");
+});
+
+test("issue-local automatic rework lets an independent sibling approve after another gates", async (t) => {
+  const fixture = await autoFixture(t, ["7", "8"]);
+  const result = await autoRework(fixture.config, {
+    repoPath: fixture.repoPath,
+    issueIds: ["7", "8"],
+    capacity: 2,
+    reworkOptions: {
+      runner: fixture.runner,
+      workerExecutor: async ({ item, worktree }) => ({ issue: item.id, exitCode: 0, ...worktree, headSha: `corrected-${item.id}`, report: "corrected" }),
+      validatorExecutor: async ({ worker }) => ({
+        issue: worker.issue,
+        exitCode: 0,
+        verdict: worker.issue === "7" ? "human_gate" : "approve",
+        report: "fresh"
+      })
+    }
+  });
+  assert.deepEqual(result.issues.map((entry) => [entry.issue, entry.outcome]), [
+    ["7", "human-gate"],
+    ["8", "approved"]
+  ]);
+});
+
+test("maestro next --auto-rework resumes persisted REWORK without a run ID", async (t) => {
+  const fixture = await autoFixture(t);
+  const manifestPath = path.join(fixture.repoPath, ".maestro.json");
+  const binPath = path.join(path.dirname(fixture.repoPath), "bin");
+  await fs.mkdir(binPath);
+  await fs.writeFile(manifestPath, `${JSON.stringify(fixture.config)}\n`);
+  await fs.writeFile(path.join(binPath, "git"), `#!/usr/bin/env node
+if (process.argv[2] === "rev-parse") process.stdout.write(process.argv[3] === "HEAD" ? "head-new\\n" : "base-new\\n");
+`);
+  await fs.writeFile(path.join(binPath, "codex"), `#!/usr/bin/env node
+const fs = require("node:fs");
+const index = process.argv.indexOf("--output-last-message");
+if (index >= 0) fs.writeFileSync(process.argv[index + 1], process.argv.includes("read-only") ? "VERDICT: APPROVE\\n" : "Result: complete\\n");
+`);
+  await fs.chmod(path.join(binPath, "git"), 0o755);
+  await fs.chmod(path.join(binPath, "codex"), 0o755);
+
+  const result = spawnSync(process.execPath, [
+    path.resolve(__dirname, "../bin/maestro.js"), "next", "--auto-rework", "--repo-path", fixture.repoPath
+  ], {
+    encoding: "utf8",
+    env: { ...process.env, PATH: `${binPath}${path.delimiter}${process.env.PATH}` }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const output = parseLeadingJson(result.stdout);
+  assert.deepEqual(output.plan.selected, []);
+  assert.equal(output.autoRework.issues[0].outcome, "approved");
+  assert.equal(output.autoRework.issues[0].runs[0].correction.attempts["7"].automatic, true);
+  assert.match(result.stdout, /Recommended: `maestro approve 7`/);
 });

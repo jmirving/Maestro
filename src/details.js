@@ -70,6 +70,7 @@ function appendEvidence(lines, state, evidence, { heading = null } = {}) {
   lines.push(`Run: ${state.runId}`);
   lines.push(`Mode: ${valueOrNone(state.mode)}`);
   lines.push(`Run status: ${valueOrNone(state.status)}`);
+  if (state.failure) lines.push(`Run failure: ${state.failure}`);
 
   if (!evidence) {
     lines.push("Issue evidence: not recorded in this parent run");
@@ -77,6 +78,32 @@ function appendEvidence(lines, state, evidence, { heading = null } = {}) {
   }
 
   lines.push(`Issue state: ${valueOrNone(evidence.state)}`);
+  if (evidence.correction) {
+    lines.push("Correction attempt:");
+    lines.push(`  Number: ${valueOrNone(evidence.correction.number)}`);
+    lines.push(`  Automatic: ${evidence.correction.automatic === true ? "yes" : "no"}`);
+    lines.push(`  Root run: ${valueOrNone(evidence.correction.rootRunId)}`);
+    lines.push(`  Source run: ${valueOrNone(evidence.correction.sourceRunId)}`);
+    lines.push(`  Phase: ${valueOrNone(evidence.correction.phase)}`);
+    lines.push(`  Outcome: ${valueOrNone(evidence.correction.outcome)}`);
+    if (evidence.correction.implementation) {
+      lines.push(`  Implementation branch: ${valueOrNone(evidence.correction.implementation.branch)}`);
+      lines.push(`  Implementation worktree: ${valueOrNone(evidence.correction.implementation.worktreePath)}`);
+      lines.push(`  Original base: ${valueOrNone(evidence.correction.implementation.baseSha)}`);
+      lines.push(`  Target branch: ${valueOrNone(evidence.correction.implementation.targetBranch)}`);
+    }
+    if (evidence.correction.trigger) {
+      lines.push(`  Trigger verdict: ${valueOrNone(evidence.correction.trigger.verdict)}`);
+      appendReport(lines, "Trigger report", evidence.correction.trigger.report);
+    }
+  }
+  if (evidence.autoRework) {
+    lines.push("Automatic rework:");
+    lines.push(`  Status: ${valueOrNone(evidence.autoRework.status)}`);
+    lines.push(`  Attempts used: ${valueOrNone(evidence.autoRework.attemptsUsed)}`);
+    lines.push(`  Retry limit: ${valueOrNone(evidence.autoRework.retryLimit)}`);
+    lines.push(`  Next action: ${valueOrNone(evidence.autoRework.action)}`);
+  }
   lines.push("Worker:");
   if (evidence.worker) {
     const worker = evidence.worker;

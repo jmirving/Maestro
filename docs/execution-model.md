@@ -53,6 +53,10 @@ Normal approval is issue-oriented. Maestro overlays persisted parent and child r
 
 The corresponding `maestro rework <issue...>` command uses the same current-state overlay and only accepts issues whose newest evidence is awaiting rework. Selected issues are grouped by their resolved source runs before execution, preserving correction provenance across diverged lineages. With no issue selection, the command chooses all currently relevant validator-rejected items in the newest actionable source run; newer unrelated runs do not hide that set. Explicit `--run` remains available for historical or whole-run rework.
 
+`start --auto-rework` and `next --auto-rework` use that correction transition as a bounded service rather than a separate scheduler. Each issue advances independently: `REWORK` creates one correction child and triggers fresh validation; `APPROVE` returns to ordinary human review; `HUMAN_GATE` stops without another worker. Worker, validator, invalid-output, and infrastructure failures also stop only that issue, allowing an independent authorized sibling to finish. The caller supplies the issue workset and capacity; the service never adds unrelated pending work to fill a slot.
+
+The default automatic budget is three correction attempts per issue. Every child stores its source/root lineage, triggering validator snapshot, attempt number, implementation branch/worktree, phase, and outcome. The attempt is charged when the child run is first persisted, before preflight or refresh. Thus a refresh failure is recorded as an incomplete infrastructure attempt rather than a completed correction or an unbounded free retry. Attempt counts are reconstructed from persisted parent lineage on resume, not reset by a process restart or entrypoint change. Exhaustion is recorded on the current run and requires human inspection. Manual rework shares this attempt record but remains an explicit human action.
+
 Status is a read-only projection over that current-state overlay and the effective manifest plan. It presents validator outcome, human disposition, and integration eligibility as separate dimensions. Commit readiness is evaluated against every item in each relevant persisted run, including source-run items superseded by a child correction, so a newer child cannot hide a disposition still required to integrate an approved sibling. Repository-wide status stays issue-oriented; focused status adds the latest worker commit and explicit evidence fields without becoming a replacement for verbose `details` output.
 
 User-facing workflow commands consume one shared recommendation projection built from that persisted/current state. It emits at most one primary command and compact valid alternatives. Rework is primary for mixed validator results, details and unaffected approvals remain available, validator-approved work advances to human approval, fully reviewed work advances to commit, and a completed integration advances with `next` when the effective plan exposes more work. Raw process exit codes do not choose the recommendation.
@@ -73,6 +77,7 @@ Continuous execution pauses when:
 - mandatory capability preflight fails;
 - the worker discovers a new long-lived product/domain decision;
 - validation rejects the change;
+- automatic validator correction reaches a human gate, fails, or exhausts its three-attempt budget;
 - required human review chooses `rework-original`;
 - integration cannot safely rebase/merge;
 - a live or destructive mutation lacks explicit authorization;

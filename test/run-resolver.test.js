@@ -178,3 +178,13 @@ test("current issue state overlays diverged child runs without reviving older ev
     ["7", secondRework.runId, "rework"]
   ]);
 });
+
+test("current issue state prefers a descendant even when same-second random run suffixes sort backwards", () => {
+  const parent = run("20260910010101-ffffff", "7", { verdict: "rework" });
+  const child = run("20260910010101-000001", "7", { verdict: "approve", mode: "rework" });
+  child.parentRunId = parent.runId;
+
+  const [current] = currentIssueEvidenceFromStates([parent, child], ["7"]);
+  assert.equal(current.runId, child.runId);
+  assert.equal(current.evidence.verdict, "approve");
+});

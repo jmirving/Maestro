@@ -43,12 +43,12 @@ async function fakeReworkProcesses(root) {
   const binPath = path.join(root, "bin");
   await fs.mkdir(binPath);
   await fs.writeFile(path.join(binPath, "git"), `#!/usr/bin/env node
-if (process.argv[2] === "rev-parse") process.stdout.write("base\\n");
+if (process.argv[2] === "rev-parse") process.stdout.write(process.argv[3] === "HEAD" ? "head-new\\n" : "base\\n");
 `);
   await fs.writeFile(path.join(binPath, "codex"), `#!/usr/bin/env node
 const fs = require("node:fs");
 const index = process.argv.indexOf("--output-last-message");
-if (index >= 0) fs.writeFileSync(process.argv[index + 1], "Result: complete\\n");
+if (index >= 0) fs.writeFileSync(process.argv[index + 1], process.argv.includes("read-only") ? "VERDICT: APPROVE\\n" : "Result: complete\\n");
 `);
   await fs.chmod(path.join(binPath, "git"), 0o755);
   await fs.chmod(path.join(binPath, "codex"), 0o755);

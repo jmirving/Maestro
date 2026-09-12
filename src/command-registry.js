@@ -47,17 +47,18 @@ const COMMANDS = [
     category: "Execution",
     summary: "Execute the current ready wave in isolated workers and fresh validators.",
     when: "Use after planning when status shows ready work and required capabilities are available.",
-    usages: ["maestro start [manifest.json] [--repo-path <path>] [--rerun]"],
+    usages: ["maestro start [manifest.json] [--repo-path <path>] [--rerun] [--auto-rework]"],
     positionals: "Optional manifest path; defaults to .maestro.json in the target repository.",
     options: {
       "--repo-path": COMMON_REPO_OPTION,
-      "--rerun": { description: "Intentionally bypass persisted lifecycle deferrals and retry manifest-ready work." }
+      "--rerun": { description: "Intentionally bypass persisted lifecycle deferrals and retry manifest-ready work." },
+      "--auto-rework": { description: "Automatically correct and revalidate validator-REWORK results, up to three attempts per issue." }
     },
     prerequisites: "Ready manifest work, a clean usable repository, and every capability required by the selected items.",
-    effects: "Persists a run, creates isolated branches/worktrees, runs workers, then validates changed branches in fresh agent contexts.",
-    cautions: "Does not approve, integrate, push the default branch, or close issues. --rerun is an explicit retry, not normal resume behavior.",
+    effects: "Persists a run, creates isolated branches/worktrees, runs workers, then validates changed branches in fresh agent contexts. --auto-rework may create bounded correction children.",
+    cautions: "Does not approve, integrate, push the default branch, or close issues. Successful automatic rework still requires human review. --rerun is an explicit retry, not normal resume behavior.",
     next: ["maestro status", "maestro details <issue>", "maestro output"],
-    examples: [["start"], ["start", "--repo-path", "../target"]],
+    examples: [["start"], ["start", "--auto-rework"]],
     positionalKind: "optional-manifest"
   },
   {
@@ -66,17 +67,18 @@ const COMMANDS = [
     category: "Execution",
     summary: "Start the next ready wave while respecting all persisted lifecycle deferrals.",
     when: "Use after reviewed work is integrated, or whenever status recommends the next eligible wave.",
-    usages: ["maestro next [manifest.json] [--repo-path <path>] [--rerun]"],
+    usages: ["maestro next [manifest.json] [--repo-path <path>] [--rerun] [--auto-rework]"],
     positionals: "Optional manifest path; defaults to .maestro.json in the target repository.",
     options: {
       "--repo-path": COMMON_REPO_OPTION,
-      "--rerun": { description: "Intentionally retry manifest-ready work despite prior lifecycle evidence." }
+      "--rerun": { description: "Intentionally retry manifest-ready work despite prior lifecycle evidence." },
+      "--auto-rework": { description: "Automatically correct and revalidate validator-REWORK results, up to three attempts per issue." }
     },
     prerequisites: "The same requirements as start. Existing running, review, rework, and integration states remain deferred.",
-    effects: "Runs workers and validators for newly eligible work; it does not integrate prior or new work.",
-    cautions: "No ready work is not proof that all repository work is complete; inspect status for gates and deferred items.",
+    effects: "Runs workers and validators for newly eligible work; --auto-rework may also resume or create bounded correction children. It does not integrate work.",
+    cautions: "No ready work is not proof that all repository work is complete; inspect status for gates and deferred items. Automatic correction never satisfies human review or integration gates.",
     next: ["maestro status", "maestro output"],
-    examples: [["next"], ["next", "--repo-path", "../target"]],
+    examples: [["next"], ["next", "--auto-rework"]],
     positionalKind: "optional-manifest"
   },
   {
@@ -156,7 +158,7 @@ const COMMANDS = [
     options: { "--repo-path": COMMON_REPO_OPTION, "--run": { ...RUN_OPTION, description: "Deliberately select a historical source run." }, "--allow-failing-baseline": { description: "Explicitly continue despite a failing configured baseline." } },
     prerequisites: "Current rejected evidence, or an explicitly selected historical source run containing eligible work.",
     effects: "Creates child run(s), reuses the existing implementation worktree, runs bounded correction workers, and validates again.",
-    cautions: "Rework preserves source evidence and does not approve or integrate the corrected result.",
+    cautions: "Manual rework performs one correction generation. start/next --auto-rework repeat validator-directed corrections up to three attempts. Neither form approves or integrates the corrected result.",
     next: ["maestro status", "maestro details <issue>", "maestro approve <issue>"],
     examples: [["rework", "57"], ["rework"]],
     positionalKind: "loose-manifest-issues"
@@ -284,6 +286,7 @@ const WALKTHROUGHS = [
                 maestro draft --write     Save a reviewed manifest proposal.
 2. Preview:     maestro plan              See the next ready wave.
 3. Execute:     maestro start             Run isolated workers and fresh validators.
+                maestro start --auto-rework  Also cycle actionable REWORK results (max 3).
 4. Inspect:     maestro status            Read states and the recommended next command.
                 maestro details 57        Review issue-level evidence when needed.
 5. Resolve:     maestro rework 57         Correct rejected work, then inspect again.
@@ -299,6 +302,9 @@ Mixed outcomes
 Boundaries
   A saved draft is scope, not launch or integration authorization.
   Validator approval, human approval, and integration are separate gates.
+  Automatic and manual rework create new evidence; neither grants human approval.
+  HUMAN_GATE, technical failure/conflict, invalid validation, and retry exhaustion stop
+  automatic correction for that issue while independent passing siblings stay usable.
   Rework and Git-conflict reconciliation create new evidence; neither completes work.
   Resume with status/next. Use --rerun only to intentionally retry deferred work.
   "No ready work" can still mean blocked, human-gated, or bookkeeping-pending work.

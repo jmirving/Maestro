@@ -87,12 +87,28 @@ test("rework details relate the correction to source worker and validator eviden
     workerReport: "Result: complete\nAdded regression coverage.",
     validatorReport: "VERDICT: APPROVE\nCoverage is present."
   });
+  child.correction = { attempts: { "7": {
+    number: 1,
+    automatic: true,
+    rootRunId: source.runId,
+    sourceRunId: source.runId,
+    phase: "completed",
+    outcome: "approved",
+    trigger: { verdict: "rework", report: "VERDICT: REWORK\nMissing regression coverage." },
+    implementation: { branch: "maestro/7", worktreePath: "/tmp/7", baseSha: "base-7", targetBranch: "main" }
+  } } };
   await saveRunState(repoPath, source.runId, source);
   await saveRunState(repoPath, child.runId, child);
 
   const text = formatDetails(await loadIssueDetails(repoPath, ["7"]));
   assert.match(text, new RegExp(`Provenance: rework child run of ${source.runId}`));
   assert.match(text, /Added regression coverage/);
+  assert.match(text, /Correction attempt:/);
+  assert.match(text, /Number: 1/);
+  assert.match(text, /Automatic: yes/);
+  assert.match(text, /Outcome: approved/);
+  assert.match(text, /Trigger verdict: rework/);
+  assert.match(text, /Implementation worktree: \/tmp\/7/);
   assert.match(text, /## Original\/source evidence for #7/);
   assert.match(text, /Verdict: rework/);
   assert.match(text, /Missing regression coverage/);

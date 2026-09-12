@@ -190,3 +190,20 @@ test("override-approved status remains visibly distinct from ordinary approval",
   assert.match(text, /Human review: approve-override/);
   assert.match(text, /Integration: eligible when every item in its run has a human disposition/);
 });
+
+test("retry exhaustion is a human-review stop with lineage details instead of another automatic recommendation", async () => {
+  const run = mixedRun();
+  run.workers = run.workers.filter((worker) => worker.issue === "7");
+  run.validations = run.validations.filter((validation) => validation.issue === "7");
+  run.plan.selected = run.plan.selected.filter((item) => item.id === "7");
+  run.autoRework = {
+    "7": { status: "retry-exhausted", retryLimit: 3, attemptsUsed: 3, finalVerdict: "rework", action: "maestro details 7" }
+  };
+  const text = formatStatus(await statusSnapshot(config, "/unused", ["7"], {
+    stateLoader: async () => [run]
+  }));
+  assert.match(text, /automatic rework exhausted after 3 of 3 correction attempts; human review required/);
+  assert.match(text, /Recommended: `maestro details 7`/);
+  assert.doesNotMatch(text, /Recommended: `maestro rework 7`/);
+  assert.match(text, /Also available: `maestro rework 7`/);
+});

@@ -14,7 +14,8 @@ function hasRecordedIntegration(states) {
 function buildRecommendations(items, readiness, selected, { states = [] } = {}) {
   const primary = [];
   const alternatives = [];
-  const currentRework = items.filter((item) => item.validator === "rework" && !item.humanReview);
+  const exhaustedRework = items.filter((item) => item.autoReworkStatus === "retry-exhausted");
+  const currentRework = items.filter((item) => item.validator === "rework" && !item.humanReview && item.autoReworkStatus !== "retry-exhausted");
   const reviewedRework = items.filter((item) => item.humanReview === "rework-original");
   const approvals = items.filter((item) => item.validator === "approve" && !item.humanReview);
   const humanGates = items.filter((item) => item.validator === "human_gate" && !item.humanReview);
@@ -23,6 +24,16 @@ function buildRecommendations(items, readiness, selected, { states = [] } = {}) 
     primary.push({ command: `maestro rework ${currentRework.map((item) => item.issue).join(" ")}` });
     alternatives.push({ command: `maestro details ${currentRework.map((item) => item.issue).join(" ")}` });
     for (const item of currentRework) {
+      alternatives.push({ command: `maestro approve ${item.issue} --override` });
+      alternatives.push({ command: `maestro discard ${item.issue}` });
+    }
+  }
+
+  if (exhaustedRework.length) {
+    const action = { command: `maestro details ${exhaustedRework.map((item) => item.issue).join(" ")}` };
+    (primary.length ? alternatives : primary).push(action);
+    for (const item of exhaustedRework) {
+      alternatives.push({ command: `maestro rework ${item.issue}` });
       alternatives.push({ command: `maestro approve ${item.issue} --override` });
       alternatives.push({ command: `maestro discard ${item.issue}` });
     }
