@@ -274,6 +274,8 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
   const agentUnresolved = [];
   const agentDiagnostics = [];
   const acceptedAgentDependencies = [];
+  const acceptedAgentWork = [];
+  const agentChangedIssues = new Set();
   const acceptedAgentConflicts = [];
   if (agentAnalysis) {
     validateAgentOutput(agentAnalysis.output);
@@ -308,6 +310,7 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
       if (addedDependency) {
         blockedBy.push(recommendation.blockedBy);
         manifest.work[recommendation.issue].blockedBy = blockedBy;
+        agentChangedIssues.add(recommendation.issue);
       }
       const source = agentSource(agentAnalysis, recommendation);
       const existingSource = dependencySources.find((entry) => entry.issue === recommendation.issue && entry.dependency === recommendation.blockedBy);
@@ -323,6 +326,7 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
         continue;
       }
       const item = manifest.work[recommendation.issue];
+      const before = clone(item);
       if (recommendation.mode && item.mode == null) item.mode = recommendation.mode;
       if (recommendation.priority != null && item.priority == null) item.priority = recommendation.priority;
       if (recommendation.requires?.length) item.requires = [...new Set([...(item.requires || []), ...recommendation.requires])];
@@ -331,6 +335,10 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
         item.humanGate = recommendation.humanGate;
       } else if (recommendation.humanGate && item.humanGate !== recommendation.humanGate) {
         agentUnresolved.push({ issue: recommendation.issue, reason: `Agent recommends human gate "${recommendation.humanGate}", but existing manifest state takes precedence.` });
+      }
+      if (!same(before, item)) {
+        agentChangedIssues.add(recommendation.issue);
+        acceptedAgentWork.push(recommendation);
       }
     }
 
@@ -409,6 +417,13 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
   conflicts.sort((a, b) => issueOrder(a.issue, b.issue) || a.type.localeCompare(b.type));
   preserved.sort((a, b) => issueOrder(a.issue, b.issue) || a.reason.localeCompare(b.reason));
   dependencySources.sort((a, b) => issueOrder(a.issue, b.issue) || issueOrder(a.dependency, b.dependency) || a.source.localeCompare(b.source));
+  const addedSet = new Set(added);
+  const examined = [...new Set(normalized.filter(({ id }) => !ambiguous.has(id)).map(({ id }) => id))].sort(issueOrder);
+  const updated = [...new Set([...changedIssues, ...agentChangedIssues])]
+    .filter((id) => !addedSet.has(id))
+    .sort(issueOrder);
+  const updatedSet = new Set(updated);
+  const unchanged = examined.filter((id) => !addedSet.has(id) && !updatedSet.has(id));
   return {
     manifest,
     added,
@@ -421,6 +436,9 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
     inferredConflicts,
     agentRecommendations: agentAnalysis?.output || null,
     acceptedAgentDependencies,
+    acceptedAgentWork,
+    agentChangedIssues: [...agentChangedIssues].sort(issueOrder),
+    changes: { added: [...added], updated, unchanged },
     planning,
     created: !existingConfig,
     changed: !existingConfig || JSON.stringify(existingConfig) !== JSON.stringify(manifest),
@@ -428,7 +446,192 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
   };
 }
 
-function formatDraftSummary({ repository, manifestPath, result, write }) {
+function normalizedOutcome({ result, write = false, outcome = null }) {
+  if (outcome) return outcome;
+  if (!write) return { requested: false, status: "preview" };
+  if (!result.writable) return { requested: true, status: "blocked" };
+  return { requested: true, status: result.changed ? "pending" : "no-op" };
+}
+
+function cleanText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function shorten(value, length) {
+  const text = cleanText(value);
+  if (text.length <= length) return text;
+  if (length <= 3) return text.slice(0, Math.max(0, length));
+  return `${text.slice(0, length - 3).trimEnd()}...`;
+}
+
+function terminalWidth(width) {
+  const parsed = Number(width);
+  return Number.isFinite(parsed) ? Math.max(40, Math.floor(parsed)) : 80;
+}
+
+function fitLine(prefix, value, width) {
+  return `${prefix}${shorten(value, Math.max(8, width - prefix.length))}`;
+}
+
+function issueTitle(result, id) {
+  const title = cleanText(result.manifest.work?.[String(id)]?.github?.title);
+  return title || null;
+}
+
+function issueLabel(result, id, maxLength = 50) {
+  const number = `#${id}`;
+  const title = issueTitle(result, id);
+  return title ? `${number} ${shorten(title, Math.max(8, maxLength - number.length - 1))}` : number;
+}
+
+function joinedIssueLabels(result, ids, maxLength) {
+  const labels = ids.map((id) => issueLabel(result, id, Math.max(12, Math.floor(maxLength / Math.max(1, ids.length)))));
+  if (labels.length < 2) return labels[0] || "";
+  return `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}`;
+}
+
+function appendBounded(lines, entries, { limit = 5, command = "maestro draft --verbose" } = {}) {
+  lines.push(...entries.slice(0, limit));
+  if (entries.length > limit) lines.push(`  ... ${entries.length - limit} more; inspect with ${command}.`);
+}
+
+function currentPrerequisites(result, width) {
+  const work = result.manifest.work || {};
+  const activeStatuses = new Set(["ready", "blocked", "human_gate"]);
+  return Object.entries(work)
+    .filter(([, item]) => activeStatuses.has(item.status))
+    .map(([id, item]) => ({
+      id,
+      dependencies: (item.blockedBy || []).map(String).filter((dependency) => work[dependency]?.status !== "complete")
+    }))
+    .filter((entry) => entry.dependencies.length)
+    .sort((left, right) => issueOrder(left.id, right.id))
+    .map(({ id, dependencies }) => {
+      const visible = dependencies.slice(0, 2);
+      const omitted = dependencies.length - visible.length;
+      const suffix = omitted ? `, plus ${omitted} more` : "";
+      let description = `${issueLabel(result, id, 32)} - waits for ${joinedIssueLabels(result, visible, 60)}${suffix}.`;
+      if (description.length + 4 > width) {
+        description = `${issueLabel(result, id, 20)} - waits for ${visible.map((dependency) => `#${dependency}`).join(" and ")}${suffix}.`;
+      }
+      if (description.length + 4 > width) description = `#${id} - waits for ${visible.map((dependency) => `#${dependency}`).join(" and ")}${suffix}.`;
+      return fitLine("  - ", description, width);
+    });
+}
+
+function formatDraftSummary({
+  repository,
+  manifestPath,
+  result,
+  write = false,
+  outcome = null,
+  width = 80,
+  writeCommand = "maestro draft --write",
+  verboseCommand = "maestro draft --verbose",
+  jsonCommand = "maestro draft --json"
+}) {
+  const columns = terminalWidth(width);
+  const finalOutcome = normalizedOutcome({ result, write, outcome });
+  const changeCounts = result.changes || {
+    added: result.added || [],
+    updated: [...new Set((result.drift || []).filter((entry) => entry.type !== "missing-open").map((entry) => entry.issue))],
+    unchanged: []
+  };
+  const lines = [
+    `Maestro draft for ${repository}`,
+    "",
+    "What changed?",
+    `  Added ${changeCounts.added.length}, updated ${changeCounts.updated.length}, unchanged ${changeCounts.unchanged.length}.`
+  ];
+
+  const changeLines = [];
+  for (const id of changeCounts.added) {
+    changeLines.push(fitLine("  + ", `${issueLabel(result, id, 44)} - added as ${result.manifest.work[id].status}.`, columns));
+  }
+  for (const change of result.drift.filter((entry) => entry.type !== "missing-open")) {
+    changeLines.push(fitLine("  ~ ", `${issueLabel(result, change.issue, 34)} - ${change.reason}`, columns));
+  }
+  for (const id of result.agentChangedIssues || []) {
+    if (!changeCounts.added.includes(id) && !result.drift.some((entry) => entry.issue === id && entry.type !== "missing-open")) {
+      changeLines.push(fitLine("  ~ ", `${issueLabel(result, id, 42)} - agent-proposed planning metadata.`, columns));
+    }
+  }
+  appendBounded(lines, changeLines, { limit: 6, command: verboseCommand });
+  if (!changeLines.length && !result.changed) lines.push("  (no changes)");
+  else if (!changeLines.length && result.changed) lines.push("  ~ Planning metadata updated.");
+  if (result.agentRecommendations) {
+    const addedAgentDependencies = (result.dependencySources || []).filter((entry) => entry.added && cleanText(entry.source).includes("agent:")).length;
+    const agentWork = (result.acceptedAgentWork || []).length;
+    const advisory = (result.inferredConflicts || []).filter((entry) => entry.analyzer === "agent").length;
+    lines.push(`  Agent proposal: ${addedAgentDependencies} dependencies, ${agentWork} work items, ${advisory} advisory overlaps changed.`);
+  }
+
+  lines.push("", "What would run next?", "  Draft projection (manifest only; execution reconciles live lifecycle state).");
+  const nextWave = result.planning.waves[0] || [];
+  if (nextWave.length) {
+    const visible = nextWave.slice(0, 6);
+    const omitted = nextWave.length - visible.length;
+    const suffix = omitted ? `, plus ${omitted} more` : "";
+    let description = `${visible.map((id) => issueLabel(result, id, 24)).join(", ")}${suffix}.`;
+    if (description.length + 13 > columns) description = `${visible.map((id) => `#${id}`).join(", ")}${suffix}.`;
+    lines.push(fitLine("  Next wave: ", description, columns));
+  } else {
+    lines.push("  Next wave: none schedulable.");
+  }
+  lines.push(`  Effective concurrency limit: ${result.planning.concurrency}.`);
+
+  lines.push("", "What needs attention?");
+  const attention = [];
+  attention.push(...currentPrerequisites(result, columns));
+  const active = new Set(Object.entries(result.manifest.work || {})
+    .filter(([, item]) => ["ready", "blocked", "human_gate"].includes(item.status))
+    .map(([id]) => id));
+  const advisoryLines = (result.manifest.planning?.advisoryConflicts || [])
+    .filter((conflict) => conflict.issues.every((id) => active.has(String(id))))
+    .map((conflict) => fitLine("  - ", `${conflict.issues.map((id) => issueLabel(result, id, 24)).join(" / ")} - scheduled separately: ${conflict.reason}`, columns));
+  attention.push(...advisoryLines);
+  for (const item of result.unresolved) {
+    attention.push(fitLine("  ! ", `${item.issue ? `${issueLabel(result, item.issue, 30)} - ` : ""}${item.reason}`, columns));
+  }
+  for (const item of result.conflicts) {
+    attention.push(fitLine("  ! ", `${issueLabel(result, item.issue, 30)} - ${item.reason}`, columns));
+  }
+  for (const [id, item] of Object.entries(result.manifest.work || {}).sort(([left], [right]) => issueOrder(left, right))) {
+    if (item.status === "human_gate") attention.push(fitLine("  ! ", `${issueLabel(result, id, 30)} - human gate: ${item.humanGate || "approval required"}.`, columns));
+    else if (item.status === "blocked" && !(item.blockedBy || []).length) attention.push(fitLine("  ! ", `${issueLabel(result, id, 30)} - blocked in the manifest.`, columns));
+  }
+  appendBounded(lines, attention, { limit: 8, command: verboseCommand });
+  if (!attention.length && !result.diagnostics.length) lines.push("  (none)");
+  if (result.diagnostics.length) {
+    lines.push("  Write-blocking errors:");
+    for (const diagnostic of result.diagnostics) {
+      lines.push(fitLine("  ! ", `${diagnostic.issue ? `${issueLabel(result, diagnostic.issue, 28)} - ` : ""}${diagnostic.reason}`, columns));
+    }
+  }
+
+  lines.push("", "What happens next?");
+  if (finalOutcome.status === "preview") {
+    if (result.changed) lines.push(`  Preview only; no files written. Next: ${writeCommand}`);
+    else lines.push("  Preview only; manifest is already current. Next: maestro plan");
+  } else if (finalOutcome.status === "written") {
+    lines.push(`  Manifest written successfully: ${manifestPath}`);
+    lines.push("  Next: maestro plan");
+  } else if (finalOutcome.status === "no-op") {
+    lines.push("  No-op; manifest is already current and nothing was written.", "  Next: maestro plan");
+  } else if (finalOutcome.status === "blocked") {
+    lines.push(`  Write blocked; no files written. Resolve the errors above, then run: ${writeCommand}`);
+  } else if (finalOutcome.status === "failed") {
+    lines.push(fitLine("  Write failed; no update was reported: ", finalOutcome.error || "unknown persistence error", columns));
+    lines.push(`  Next: resolve the persistence error, then run: ${writeCommand}`);
+  } else {
+    lines.push("  Write requested; persistence has not been confirmed.");
+  }
+  lines.push(`  Full evidence: ${verboseCommand}; structured result: ${jsonCommand}`);
+  return `${lines.join("\n")}\n`;
+}
+
+function formatDraftVerbose({ repository, manifestPath, result, write = false, outcome = null }) {
+  const finalOutcome = normalizedOutcome({ result, write, outcome });
   const lines = [
     `Maestro draft for ${repository}`,
     `Manifest: ${manifestPath}`,
@@ -438,12 +641,8 @@ function formatDraftSummary({ repository, manifestPath, result, write }) {
   if (result.added.length) {
     for (const id of result.added) lines.push(`  + #${id} ${result.manifest.work[id].status}`);
   }
-  for (const change of result.drift.filter((entry) => entry.type !== "missing-open")) {
-    lines.push(`  ~ #${change.issue} ${change.reason}`);
-  }
-  if (!result.drift.length && !result.created) {
-    lines.push("  (no changes)");
-  }
+  for (const change of result.drift.filter((entry) => entry.type !== "missing-open")) lines.push(`  ~ #${change.issue} ${change.reason}`);
+  if (!result.drift.length && !result.created) lines.push("  (no changes)");
   if (result.preserved.length) {
     lines.push("Preserved Maestro-owned state:");
     for (const item of result.preserved) lines.push(`  = #${item.issue}: ${item.reason}`);
@@ -458,25 +657,17 @@ function formatDraftSummary({ repository, manifestPath, result, write }) {
   }
   if (result.dependencySources.length) {
     lines.push("Hard dependencies:");
-    for (const dependency of result.dependencySources) {
-      lines.push(`  ${dependency.added ? "+ " : "  "}#${dependency.issue} blocked by #${dependency.dependency} (${dependency.source})`);
-    }
+    for (const dependency of result.dependencySources) lines.push(`  ${dependency.added ? "+ " : "  "}#${dependency.issue} blocked by #${dependency.dependency} (${dependency.source})`);
   }
   if (result.inferredConflicts.length) {
     lines.push("Advisory conflict risk:");
-    for (const conflict of result.inferredConflicts) {
-      lines.push(`  ~ #${conflict.issues[0]} / #${conflict.issues[1]}: ${conflict.reason} (${conflict.confidence}; ${conflict.source})`);
-    }
+    for (const conflict of result.inferredConflicts) lines.push(`  ~ #${conflict.issues[0]} / #${conflict.issues[1]}: ${conflict.reason} (${conflict.confidence}; ${conflict.source})`);
   }
   if (result.agentRecommendations) {
     lines.push("Agent-assisted recommendations:");
     lines.push(`  ${result.acceptedAgentDependencies.length} high-confidence hard dependencies accepted into the proposal.`);
-    for (const recommendation of result.agentRecommendations.work) {
-      lines.push(`  ~ #${recommendation.issue}: ${recommendation.reason} (${recommendation.confidence}; ${recommendation.evidence.join(" | ")})`);
-    }
-    for (const recommendation of result.agentRecommendations.waves) {
-      lines.push(`  ~ suggested wave ${recommendation.issues.map((id) => `#${id}`).join(", ")}: ${recommendation.reason} (${recommendation.confidence})`);
-    }
+    for (const recommendation of result.agentRecommendations.work) lines.push(`  ~ #${recommendation.issue}: ${recommendation.reason} (${recommendation.confidence}; ${recommendation.evidence.join(" | ")})`);
+    for (const recommendation of result.agentRecommendations.waves) lines.push(`  ~ suggested wave ${recommendation.issues.map((id) => `#${id}`).join(", ")}: ${recommendation.reason} (${recommendation.confidence})`);
   }
   lines.push("Expected execution waves:");
   if (result.planning.waves.length) {
@@ -494,11 +685,24 @@ function formatDraftSummary({ repository, manifestPath, result, write }) {
     for (const diagnostic of result.diagnostics) lines.push(`  ! ${diagnostic.issue ? `#${diagnostic.issue}: ` : ""}${diagnostic.reason}`);
   }
   lines.push("Proposed manifest:", JSON.stringify(result.manifest, null, 2));
-  if (!write) lines.push("Dry run; use --write to persist this manifest.");
-  else if (!result.writable) lines.push("Write blocked; resolve dependency diagnostics and draft again.");
-  else if (result.changed) lines.push("Writing schema-valid manifest.");
-  else lines.push("Schema-valid manifest is already current; nothing written.");
+  if (finalOutcome.status === "preview") lines.push("Dry run; use --write to persist this manifest.");
+  else if (finalOutcome.status === "blocked") lines.push("Write blocked; resolve dependency diagnostics and draft again.");
+  else if (finalOutcome.status === "written") lines.push("Schema-valid manifest written successfully.");
+  else if (finalOutcome.status === "no-op") lines.push("Schema-valid manifest is already current; nothing written.");
+  else if (finalOutcome.status === "failed") lines.push(`Write failed: ${finalOutcome.error}`);
+  else lines.push("Write requested; persistence has not been confirmed.");
   return `${lines.join("\n")}\n`;
+}
+
+function formatDraftJson({ repository, manifestPath, result, write = false, outcome = null }) {
+  return `${JSON.stringify({
+    version: 1,
+    command: "draft",
+    repository,
+    manifestPath,
+    outcome: normalizedOutcome({ result, write, outcome }),
+    result
+  }, null, 2)}\n`;
 }
 
 function readExistingManifest(manifestPath) {
@@ -544,4 +748,4 @@ function writeManifest(manifestPath, manifest, { expectedContents } = {}) {
   return true;
 }
 
-module.exports = { proposeDraft, formatDraftSummary, readExistingManifest, readManifestSnapshot, writeManifest, explicitDependencies, detectExecutionDrift };
+module.exports = { proposeDraft, formatDraftSummary, formatDraftVerbose, formatDraftJson, readExistingManifest, readManifestSnapshot, writeManifest, explicitDependencies, detectExecutionDrift };

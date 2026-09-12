@@ -111,6 +111,8 @@ test("every registered help example passes the same pre-dispatch syntax parser a
 });
 
 test("aliases and important documented flags are accepted by the shared registry", () => {
+  assert.equal(parseInvocation(["draft", "--json", "--agent", "57"]).options["--json"], true);
+  assert.throws(() => parseInvocation(["draft", "--verbose", "--json"]), /only one/);
   assert.equal(parseInvocation(["s"]).command, "start");
   assert.equal(parseInvocation(["start", "--auto-rework"]).options["--auto-rework"], true);
   assert.equal(parseInvocation(["next", "--auto-rework"]).options["--auto-rework"], true);

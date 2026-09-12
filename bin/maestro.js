@@ -22,7 +22,7 @@ const { statusSnapshot, formatStatus, watchStatus } = require("../src/display");
 const { formatRecommendationFooter, appendRecommendationFooter } = require("../src/recommendations");
 const { loadIssueDetails, formatDetails } = require("../src/details");
 const { discoverGitHubRepository, loadGitHubIssues } = require("../src/github");
-const { proposeDraft, formatDraftSummary, readManifestSnapshot, writeManifest, detectExecutionDrift } = require("../src/draft");
+const { proposeDraft, formatDraftSummary, formatDraftVerbose, formatDraftJson, readManifestSnapshot, writeManifest, detectExecutionDrift } = require("../src/draft");
 const { createAgentPlanner } = require("../src/agent-planner");
 const { runPlanningAnalyzer } = require("../src/planning-analysis");
 const {
@@ -36,6 +36,15 @@ const {
 function option(args, name) {
   const index = args.indexOf(name);
   return index >= 0 ? args[index + 1] : null;
+}
+
+function shellArgument(value) {
+  return /^[A-Za-z0-9_./:-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+function draftModeCommand(args, mode) {
+  const retained = args.filter((value) => !["--write", "--verbose", "--json"].includes(value));
+  return ["maestro", ...retained, mode].map(shellArgument).join(" ");
 }
 
 function explicitManifest(rest) {
@@ -287,12 +296,38 @@ async function main() {
       executionStates
     }) : deterministicResult;
     const write = args.includes("--write");
-    process.stdout.write(formatDraftSummary({ repository, manifestPath, result, write }));
+    const formatter = args.includes("--json") ? formatDraftJson : args.includes("--verbose") ? formatDraftVerbose : formatDraftSummary;
+    const format = (outcome) => formatter({
+      repository,
+      manifestPath,
+      result,
+      write,
+      outcome,
+      width: process.stdout.columns || 80,
+      writeCommand: draftModeCommand(args, "--write"),
+      verboseCommand: draftModeCommand(args, "--verbose"),
+      jsonCommand: draftModeCommand(args, "--json")
+    });
     if (write && !result.writable) {
+      process.stdout.write(format({ requested: true, status: "blocked" }));
       process.exitCode = 1;
       return;
     }
-    if (write && result.changed) writeManifest(manifestPath, result.manifest, { expectedContents: manifestSnapshot.contents });
+    if (!write) {
+      process.stdout.write(format({ requested: false, status: "preview" }));
+      return;
+    }
+    if (!result.changed) {
+      process.stdout.write(format({ requested: true, status: "no-op" }));
+      return;
+    }
+    try {
+      const written = writeManifest(manifestPath, result.manifest, { expectedContents: manifestSnapshot.contents });
+      process.stdout.write(format({ requested: true, status: written ? "written" : "no-op" }));
+    } catch (error) {
+      process.stdout.write(format({ requested: true, status: "failed", error: error.message }));
+      process.exitCode = 1;
+    }
     return;
   }
 

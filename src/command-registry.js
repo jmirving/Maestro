@@ -7,24 +7,27 @@ const COMMANDS = [
     category: "Planning",
     summary: "Preview or reconcile GitHub issue truth with repository work.",
     when: "Use before planning and whenever GitHub issue state, dependencies, or mapped labels may have changed.",
-    usages: ["maestro draft [manifest.json] [issue ...] [--all] [--agent] [--write]"],
+    usages: ["maestro draft [manifest.json] [issue ...] [--all] [--agent] [--write] [--verbose|--json]"],
     positionals: "Optional manifest path followed by issue numbers. Omit issues to reconcile the full issue set.",
     options: {
       "--repo-path": COMMON_REPO_OPTION,
       "--all": { description: "Explicitly reconsider the full open and closed issue set; cannot be combined with issue numbers." },
       "--agent": { description: "Add bounded, read-only semantic planning recommendations." },
-      "--write": { description: "Persist the schema-valid proposal; otherwise draft is a preview." }
+      "--write": { description: "Persist the schema-valid proposal; otherwise draft is a preview." },
+      "--verbose": { description: "Show complete planning evidence, provenance, all projected waves, and the proposed manifest." },
+      "--json": { description: "Emit only the complete structured draft result as parseable JSON." }
     },
     prerequisites: "A Git checkout and readable GitHub repository. Writing requires a safe, schema-valid dependency graph.",
     effects: "Reads issues and builds a proposal; only --write changes the manifest.",
     cautions: "Saving a draft does not launch work, expand delegated scope, grant human approval, or authorize integration. Lifecycle conflicts remain fail-closed; drafting never mutates GitHub.",
     next: ["maestro plan", "maestro start"],
     examples: [
-      ["draft", "--agent"],
+      ["draft", "--agent", "--verbose"],
       ["draft", "101", "102", "--write"]
     ],
     positionalKind: "manifest-issues",
-    conflicts: [["--all", "$issues"]]
+    conflicts: [["--all", "$issues"]],
+    exclusive: [["--verbose", "--json"]]
   },
   {
     name: "plan",

@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
-const { proposeDraft, writeManifest, detectExecutionDrift } = require("../src/draft");
+const { proposeDraft, formatDraftSummary, formatDraftVerbose, formatDraftJson, writeManifest, detectExecutionDrift } = require("../src/draft");
 const { loadGitHubIssues } = require("../src/github");
 
 function tempDir() {
@@ -322,7 +322,7 @@ else process.exit(3);
   });
   assert.equal(firstDraft.status, 0, firstDraft.stderr);
   assert.doesNotMatch(firstDraft.stdout, /Reconciliation conflicts/);
-  assert.match(firstDraft.stdout, /Manifest completion is preserved/);
+  assert.match(firstDraft.stdout, /Manifest written successfully/);
   const reconciled = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   assert.equal(reconciled.work["7"].status, "complete");
   assert.equal(reconciled.work["7"].github.state, "OPEN");
@@ -336,7 +336,8 @@ else process.exit(3);
   });
   assert.equal(repeatedDraft.status, 0, repeatedDraft.stderr);
   assert.doesNotMatch(repeatedDraft.stdout, /Reconciliation conflicts/);
-  assert.match(repeatedDraft.stdout, /\(no changes\)/);
+  assert.match(repeatedDraft.stdout, /Added 0, updated 0, unchanged 1/);
+  assert.match(repeatedDraft.stdout, /No-op/);
   assert.equal(fs.readFileSync(manifestPath, "utf8"), firstContents);
 
   const persistedEntries = fs.readdirSync(reportRoot).sort();
@@ -539,6 +540,96 @@ test("invalid existing metadata fails schema validation before it can be written
   }), /repository-config schema/);
 });
 
+test("compact draft answers the four operational questions with grouped active dependencies", () => {
+  const result = proposeDraft({
+    repository: "owner/repo",
+    existingConfig: {
+      repository: "owner/repo",
+      defaultConcurrency: 3,
+      work: {
+        "1": { status: "complete" },
+        "2": { status: "ready" },
+        "3": { status: "blocked" },
+        "6": { status: "human_gate", humanGate: "Security approval" }
+      }
+    },
+    issues: [
+      { ...issue(1), title: "Finished foundation" },
+      { ...issue(2), title: "Status improvements" },
+      { ...issue(3), title: "" },
+      { ...issue(4), title: "Next-action guidance", body: "Blocked by #1, #2, and #3" },
+      { ...issue(5), title: "Nearby formatter" },
+      { ...issue(6), title: "Security launch" }
+    ],
+    analyzers: [{
+      name: "overlap",
+      analyze: () => [{ issues: ["4", "5"], confidence: "medium", source: "paths", reason: "likely code overlap" }]
+    }]
+  });
+  const output = formatDraftSummary({ repository: "owner/repo", manifestPath: "/repo/.maestro.json", result, width: 100 });
+
+  const headings = ["What changed?", "What would run next?", "What needs attention?", "What happens next?"];
+  assert.deepEqual(headings.map((heading) => output.indexOf(heading)), [...headings.map((heading) => output.indexOf(heading))].sort((a, b) => a - b));
+  assert.match(output, /#4 Next-action guidance - waits for #2 Status improvements and #3\./);
+  assert.doesNotMatch(output, /waits for[^\n]*#1/);
+  assert.match(output, /#4 Next-action guidance \/ #5 Nearby formatter - scheduled separately: likely code overlap/);
+  assert.match(output, /#6 Security launch - human gate: Security approval/);
+  assert.match(output, /Draft projection \(manifest only/);
+  assert.doesNotMatch(output, /Proposed manifest:|contextDigest|manifest blockedBy|Expected execution waves/);
+});
+
+test("compact draft bounds large change and attention lists and shortens narrow-terminal text", () => {
+  const issues = Array.from({ length: 12 }, (_, index) => ({
+    ...issue(index + 1),
+    title: `A very long issue title ${index + 1} that should be shortened predictably for a narrow terminal`,
+    body: index > 0 ? "Blocked by #1" : ""
+  }));
+  const result = proposeDraft({ repository: "owner/repo", issues });
+  const output = formatDraftSummary({ repository: "owner/repo", manifestPath: "/repo/.maestro.json", result, width: 50 });
+
+  assert.match(output, /\.\.\. 6 more; inspect with maestro draft --verbose/);
+  assert.match(output, /\.\.\. 3 more; inspect with maestro draft --verbose/);
+  assert.ok(output.split("\n").filter((line) => /^[ ]+[+!~-]/.test(line)).every((line) => line.length <= 50));
+  assert.ok(output.split("\n").length < 35, "representative large output should remain bounded");
+});
+
+test("no-change compact drafts stay short while verbose and JSON retain complete evidence", () => {
+  const initial = proposeDraft({ repository: "owner/repo", issues: [issue(1), issue(2)] }).manifest;
+  const result = proposeDraft({ repository: "owner/repo", existingConfig: initial, issues: [issue(1), issue(2)] });
+  assert.equal(result.changed, false);
+
+  const compact = formatDraftSummary({ repository: "owner/repo", manifestPath: "/repo/.maestro.json", result });
+  assert.match(compact, /Added 0, updated 0, unchanged 2/);
+  assert.match(compact, /\(no changes\)/);
+  assert.ok(compact.split("\n").length < 22);
+
+  const verbose = formatDraftVerbose({ repository: "owner/repo", manifestPath: "/repo/.maestro.json", result });
+  assert.match(verbose, /Expected execution waves:/);
+  assert.match(verbose, /Proposed manifest:/);
+  assert.match(verbose, /"work":/);
+
+  const structured = JSON.parse(formatDraftJson({ repository: "owner/repo", manifestPath: "/repo/.maestro.json", result }));
+  assert.equal(structured.outcome.status, "preview");
+  assert.deepEqual(structured.result.manifest, result.manifest);
+  assert.deepEqual(structured.result.changes, { added: [], updated: [], unchanged: ["1", "2"] });
+  assert.ok(Array.isArray(structured.result.planning.decisions));
+});
+
+test("compact agent output summarizes material changes without audit metadata", () => {
+  const result = proposeDraft({
+    repository: "owner/repo",
+    issues: [issue(1), issue(2)],
+    agentAnalysis: agentAnalysis({
+      dependencies: [{ issue: "2", blockedBy: "1", confidence: "high", reason: "Core first.", evidence: ["private-evidence-marker"] }],
+      work: [{ issue: "1", confidence: "high", reason: "Needs database tests.", evidence: ["private-work-marker"], requires: ["postgres"] }]
+    })
+  });
+  const output = formatDraftSummary({ repository: "owner/repo", manifestPath: "/repo/.maestro.json", result });
+  assert.match(output, /Agent proposal: 1 dependencies, 1 work items/);
+  assert.match(output, /#2 Issue 2 - waits for #1 Issue 1/);
+  assert.doesNotMatch(output, /private-evidence-marker|private-work-marker|aaaaaaaaaaaa|contextDigest/);
+});
+
 test("repeated draft CLI runs are dry by default and idempotent when written", () => {
   const repoPath = tempDir();
   const binPath = path.join(repoPath, "bin");
@@ -568,22 +659,103 @@ if (args[0] === "repo" && args[1] === "view") {
 
   const dry = spawnSync(process.execPath, [cliPath, "draft"], { cwd: repoPath, env, encoding: "utf8" });
   assert.equal(dry.status, 0, dry.stderr);
-  assert.match(dry.stdout, /\+ #5 ready/);
-  assert.match(dry.stdout, /Expected execution waves:/);
-  assert.match(dry.stdout, /Wave 1: #5, #8/);
-  assert.match(dry.stdout, /2-way dependency independence available; repository limit is 2/);
-  assert.match(dry.stdout, /Dry run/);
+  assert.match(dry.stdout, /Added 2, updated 0, unchanged 0/);
+  assert.match(dry.stdout, /\+ #5 Issue 5 - added as ready/);
+  assert.match(dry.stdout, /Draft projection \(manifest only/);
+  assert.match(dry.stdout, /Next wave: #5 Issue 5, #8 Issue 8/);
+  assert.match(dry.stdout, /Effective concurrency limit: 2/);
+  assert.match(dry.stdout, /Preview only/);
   assert.equal(fs.existsSync(path.join(repoPath, ".maestro.json")), false);
 
   const write = spawnSync(process.execPath, [cliPath, "draft", "--write"], { cwd: repoPath, env, encoding: "utf8" });
   assert.equal(write.status, 0, write.stderr);
-  assert.match(write.stdout, /Writing schema-valid manifest/);
+  assert.match(write.stdout, /Manifest written successfully/);
   const firstContents = fs.readFileSync(path.join(repoPath, ".maestro.json"), "utf8");
 
   const repeated = spawnSync(process.execPath, [cliPath, "draft", "--write"], { cwd: repoPath, env, encoding: "utf8" });
   assert.equal(repeated.status, 0, repeated.stderr);
-  assert.match(repeated.stdout, /\(no changes\)/);
+  assert.match(repeated.stdout, /Added 0, updated 0, unchanged 2/);
+  assert.match(repeated.stdout, /No-op/);
   assert.equal(fs.readFileSync(path.join(repoPath, ".maestro.json"), "utf8"), firstContents);
+});
+
+test("draft CLI JSON mode is commentary-free and reports preview, blocked, and successful writes", () => {
+  const repoPath = tempDir();
+  const binPath = path.join(repoPath, "bin");
+  fs.mkdirSync(binPath);
+  assert.equal(spawnSync("git", ["init", "-q"], { cwd: repoPath }).status, 0);
+  fs.writeFileSync(path.join(binPath, "gh"), `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "repo") process.stdout.write('{"nameWithOwner":"owner/repo"}');
+else if (args[0] === "issue") process.stdout.write(process.env.MAESTRO_TEST_ISSUES);
+else process.exit(3);
+`, { mode: 0o755 });
+  const cliPath = path.resolve(__dirname, "../bin/maestro.js");
+  const baseEnv = { ...process.env, PATH: `${binPath}${path.delimiter}${process.env.PATH}` };
+
+  const preview = spawnSync(process.execPath, [cliPath, "draft", "--json"], {
+    cwd: repoPath,
+    env: { ...baseEnv, MAESTRO_TEST_ISSUES: JSON.stringify([issue(1)]) },
+    encoding: "utf8"
+  });
+  assert.equal(preview.status, 0, preview.stderr);
+  const previewJson = JSON.parse(preview.stdout);
+  assert.equal(previewJson.outcome.status, "preview");
+  assert.equal(previewJson.result.manifest.work["1"].github.title, "Issue 1");
+  assert.equal(preview.stderr, "");
+
+  const written = spawnSync(process.execPath, [cliPath, "draft", "--json", "--write"], {
+    cwd: repoPath,
+    env: { ...baseEnv, MAESTRO_TEST_ISSUES: JSON.stringify([issue(1)]) },
+    encoding: "utf8"
+  });
+  assert.equal(written.status, 0, written.stderr);
+  assert.equal(JSON.parse(written.stdout).outcome.status, "written");
+
+  const unsafe = spawnSync(process.execPath, [cliPath, "draft", "--json", "--write"], {
+    cwd: repoPath,
+    env: { ...baseEnv, MAESTRO_TEST_ISSUES: JSON.stringify([{ ...issue(1), body: "Blocked by #99" }]) },
+    encoding: "utf8"
+  });
+  assert.equal(unsafe.status, 1);
+  const unsafeJson = JSON.parse(unsafe.stdout);
+  assert.equal(unsafeJson.outcome.status, "blocked");
+  assert.match(unsafeJson.result.diagnostics[0].reason, /#99 is not present/);
+  assert.equal(unsafe.stderr, "");
+});
+
+test("draft CLI reports persistence failure only after the write attempt and remains nonzero", () => {
+  const repoPath = tempDir();
+  const binPath = path.join(repoPath, "bin");
+  fs.mkdirSync(binPath);
+  assert.equal(spawnSync("git", ["init", "-q"], { cwd: repoPath }).status, 0);
+  fs.writeFileSync(path.join(binPath, "gh"), `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "repo") process.stdout.write('{"nameWithOwner":"owner/repo"}');
+else if (args[0] === "issue") process.stdout.write('[{"number":1,"state":"OPEN","title":"One","body":"","labels":[]}]');
+else process.exit(3);
+`, { mode: 0o755 });
+  fs.writeFileSync(path.join(repoPath, ".maestro.json.lock"), "held");
+
+  const result = spawnSync(process.execPath, [path.resolve(__dirname, "../bin/maestro.js"), "draft", "--write"], {
+    cwd: repoPath,
+    env: { ...process.env, PATH: `${binPath}${path.delimiter}${process.env.PATH}` },
+    encoding: "utf8"
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /Write failed; no update was reported/);
+  assert.doesNotMatch(result.stdout, /written successfully/);
+  assert.equal(result.stderr, "");
+  assert.equal(fs.existsSync(path.join(repoPath, ".maestro.json")), false);
+
+  const jsonResult = spawnSync(process.execPath, [path.resolve(__dirname, "../bin/maestro.js"), "draft", "--json", "--write"], {
+    cwd: repoPath,
+    env: { ...process.env, PATH: `${binPath}${path.delimiter}${process.env.PATH}` },
+    encoding: "utf8"
+  });
+  assert.equal(jsonResult.status, 1);
+  assert.equal(JSON.parse(jsonResult.stdout).outcome.status, "failed");
+  assert.equal(jsonResult.stderr, "");
 });
 
 test("selected draft CLI reads only selected issues and preserves unrelated work", () => {
@@ -668,8 +840,8 @@ fs.writeFileSync(outputPath, process.env.MAESTRO_TEST_AGENT_OUTPUT);
     encoding: "utf8"
   });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /Agent-assisted recommendations:/);
-  assert.match(result.stdout, /1 high-confidence hard dependencies accepted/);
+  assert.match(result.stdout, /Agent proposal: 1 dependencies/);
+  assert.match(result.stdout, /#2 API - waits for #1 Core/);
   const manifest = JSON.parse(fs.readFileSync(path.join(repoPath, ".maestro.json"), "utf8"));
   assert.deepEqual(manifest.work["2"].blockedBy, ["1"]);
   assert.equal(manifest.planning.agentAnalysis.recommendations.dependencies[0].reason, "API builds on core.");
@@ -708,8 +880,8 @@ fs.writeFileSync(outputPath, '{"version":1,"dependencies":[],"conflicts":[],"wor
     encoding: "utf8"
   });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /Agent-assisted recommendations:/);
-  assert.match(result.stdout, /Dry run; use --write/);
+  assert.match(result.stdout, /Agent proposal:/);
+  assert.match(result.stdout, /Preview only/);
   assert.equal(fs.readFileSync(manifestPath, "utf8"), original);
 });
 
