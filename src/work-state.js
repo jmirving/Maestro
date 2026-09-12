@@ -1,6 +1,7 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { computePlan } = require("./planner");
+const { conflictFor } = require("./planning-analysis");
 const { loadPersistedRunStates } = require("./run-store");
 const { reportRootForRepo } = require("./reporter");
 const { classifyRunIssue } = require("./run-lifecycle");
@@ -79,8 +80,8 @@ function unresolvedWork(states, config = null) {
   return byIssue;
 }
 
-function reconcilePlan(config, states = []) {
-  const plan = computePlan(config);
+function reconcilePlan(config, states = [], planOptions = {}) {
+  const plan = computePlan(config, planOptions);
   const unresolved = unresolvedWork(states, config);
   const deferred = [];
   const ready = [];
@@ -93,11 +94,25 @@ function reconcilePlan(config, states = []) {
 
   const active = [...unresolved.values()].filter((item) => ["running", "rework-running"].includes(item.state));
   const availableConcurrency = Math.max(0, plan.concurrency - active.length);
+  const activeConflicts = [];
+  const conflictSafeReady = [];
+  for (const item of ready) {
+    const conflict = active.map((running) => conflictFor(item.id, running.issue, config.planning?.advisoryConflicts || [])).find(Boolean);
+    if (conflict) activeConflicts.push({ ...item, lifecycle: { state: "active-conflict", action: "maestro status" }, conflictsWith: conflict.issues.find((id) => String(id) !== item.id), reason: conflict.reason });
+    else conflictSafeReady.push(item);
+  }
+  deferred.push(...activeConflicts);
+  const selected = [];
+  for (const item of conflictSafeReady) {
+    if (selected.length >= availableConcurrency) break;
+    if (selected.some((other) => conflictFor(item.id, other.id, config.planning?.advisoryConflicts || []))) continue;
+    selected.push(item);
+  }
   const recommendations = [...new Set(deferred.map((item) => item.lifecycle.action))];
   return {
     ...plan,
-    ready,
-    selected: ready.slice(0, availableConcurrency),
+    ready: conflictSafeReady,
+    selected,
     active,
     availableConcurrency,
     deferred,
@@ -105,8 +120,8 @@ function reconcilePlan(config, states = []) {
   };
 }
 
-async function computeEffectivePlan(config, repoPath, { stateLoader = loadExecutionStates } = {}) {
-  return reconcilePlan(config, await stateLoader(repoPath));
+async function computeEffectivePlan(config, repoPath, { stateLoader = loadExecutionStates, ...planOptions } = {}) {
+  return reconcilePlan(config, await stateLoader(repoPath), planOptions);
 }
 
 module.exports = { loadExecutionStates, classifyRunIssue, unresolvedWork, reconcilePlan, computeEffectivePlan };

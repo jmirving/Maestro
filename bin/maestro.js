@@ -25,6 +25,8 @@ const { discoverGitHubRepository, loadGitHubIssues } = require("../src/github");
 const { proposeDraft, formatDraftSummary, formatDraftVerbose, formatDraftJson, readManifestSnapshot, writeManifest, detectExecutionDrift } = require("../src/draft");
 const { createAgentPlanner } = require("../src/agent-planner");
 const { runPlanningAnalyzer } = require("../src/planning-analysis");
+const { stableWorksetName, epicWorkset, issueWorkset, resolveWorksetScope, assertExecutableScope, validateWorksetName } = require("../src/worksets");
+const { loadScopeSnapshot, saveScopeSnapshot } = require("../src/scope-store");
 const {
   resolveRepoPath,
   resolveManifestPath,
@@ -75,7 +77,8 @@ function draftIssuePositionals(rest) {
   const issues = [];
   for (let index = manifest ? 1 : 0; index < rest.length; index += 1) {
     const value = rest[index];
-    if (value === "--repo-path") {
+    if (["--repo-path", "--epic", "--workset", "--name"].includes(value)) {
+      if (!rest[index + 1] || rest[index + 1].startsWith("--")) throw new Error(`${value} requires a value.`);
       index += 1;
       continue;
     }
@@ -84,6 +87,35 @@ function draftIssuePositionals(rest) {
     issues.push(value);
   }
   return [...new Set(issues)];
+}
+
+async function resolveSavedWorkset(config, repoPath, name, { refresh = false } = {}) {
+  validateWorksetName(name);
+  const definition = config.worksets?.[name];
+  if (!definition) throw new Error(`Unknown workset '${name}'. Define it with \`maestro draft --epic <number> --name ${name} --write\` or add an explicit source to the manifest.`);
+  const saved = await loadScopeSnapshot(repoPath, name);
+  if (!refresh) {
+    assertExecutableScope(saved);
+    if (JSON.stringify(saved.definition) !== JSON.stringify(definition)) {
+      throw new Error(`Workset '${name}' definition differs from its saved scope. Run \`maestro draft --workset ${name} --write\` first.`);
+    }
+    return saved;
+  }
+  const discoveredRepository = await discoverGitHubRepository(repoPath);
+  if (discoveredRepository !== config.repository) {
+    throw new Error(`The manifest targets ${config.repository}, but the current checkout is ${discoveredRepository}.`);
+  }
+  const live = await resolveWorksetScope(name, definition, { repository: config.repository, repoPath });
+  assertExecutableScope(live);
+  if (!saved) throw new Error(`Workset '${name}' has not been drafted for execution. Run \`maestro draft --workset ${name} --write\` first.`);
+  if (saved.revision !== live.revision || JSON.stringify(saved.definition) !== JSON.stringify(definition)) {
+    throw new Error(`Workset '${name}' changed since its saved scope revision. Run \`maestro draft --workset ${name} --write\`, review the changes, and retry.`);
+  }
+  return live;
+}
+
+function scopedPlanOptions(snapshot) {
+  return snapshot ? { issueIds: snapshot.issueIds, workset: snapshot.name, scopeRevision: snapshot.revision } : {};
 }
 
 function detailsIssuePositionals(rest) {
@@ -254,23 +286,74 @@ async function main() {
       throw new Error("maestro draft accepts either selected issue numbers or --all, not both.");
     }
     const repository = await discoverGitHubRepository(repoPath);
-    const issues = await loadGitHubIssues(repository, requestedIssues, { repoPath });
     const manifestSnapshot = readManifestSnapshot(manifestPath);
     const existingConfig = manifestSnapshot.config;
+    const epicNumber = option(args, "--epic");
+    const selectedWorkset = option(args, "--workset");
+    const requestedName = option(args, "--name");
+    if (requestedName && !epicNumber && !requestedIssues.length) throw new Error("--name requires --epic or explicit issue numbers.");
+    if (selectedWorkset && requestedName) throw new Error("--name cannot be combined with --workset.");
+    let worksetProposal = null;
+    let scope = null;
+    let priorScope = null;
+    if (epicNumber) {
+      const name = validateWorksetName(requestedName || stableWorksetName(epicNumber));
+      const definition = epicWorkset(repository, epicNumber);
+      const prior = existingConfig?.worksets?.[name];
+      if (prior && JSON.stringify(prior.source) !== JSON.stringify(definition.source)) {
+        throw new Error(`Workset '${name}' already has a different source; choose a new name instead of replacing its identity.`);
+      }
+      worksetProposal = { name, definition: prior || definition };
+      scope = await resolveWorksetScope(name, worksetProposal.definition, { repository, repoPath });
+    } else if (selectedWorkset) {
+      const name = validateWorksetName(selectedWorkset);
+      const definition = existingConfig?.worksets?.[name];
+      if (!definition) throw new Error(`Unknown workset '${name}'.`);
+      worksetProposal = { name, definition };
+      scope = await resolveWorksetScope(name, definition, { repository, repoPath });
+    } else if (requestedName) {
+      const name = validateWorksetName(requestedName);
+      const definition = issueWorkset(repository, requestedIssues);
+      const prior = existingConfig?.worksets?.[name];
+      if (prior && JSON.stringify(prior.source) !== JSON.stringify(definition.source)) {
+        throw new Error(`Workset '${name}' already has a different source; choose a new name instead of replacing its identity.`);
+      }
+      worksetProposal = { name, definition: prior || definition };
+      scope = await resolveWorksetScope(name, worksetProposal.definition, { repository, repoPath });
+    }
+    if (scope) priorScope = await loadScopeSnapshot(repoPath, scope.name);
+    const worksetMemberships = {};
+    for (const name of Object.keys(existingConfig?.worksets || {})) {
+      if (name === scope?.name) continue;
+      const snapshot = await loadScopeSnapshot(repoPath, name);
+      if (snapshot?.complete) worksetMemberships[name] = snapshot.issueIds;
+    }
+    const effectiveIssueIds = scope ? scope.issueIds : requestedIssues;
+    const issues = scope ? [...scope.issues, ...scope.supportingIssues] : await loadGitHubIssues(repository, requestedIssues, { repoPath });
     const executionStates = await loadExecutionStates(repoPath);
     const deterministicResult = proposeDraft({
       repository,
       existingConfig,
       issues,
-      selectedIssueIds: requestedIssues,
-      executionStates
+      selectedIssueIds: effectiveIssueIds,
+      supportingIssueIds: scope?.supportingIssueIds || [],
+      executionStates,
+      worksetProposal,
+      analysisScope: worksetProposal?.name || null,
+      worksetMemberships
     });
+    if (scope?.diagnostics.length) {
+      deterministicResult.diagnostics.push(...scope.diagnostics.map((item) => ({ issue: item.issue?.number || null, reason: item.reason })));
+      deterministicResult.writable = false;
+    }
     let agentAnalysis = null;
-    if (args.includes("--agent")) {
+    if (args.includes("--agent") && (!scope || scope.complete)) {
       const contextManifest = JSON.parse(JSON.stringify(deterministicResult.manifest));
-      if (contextManifest.planning?.agentAnalysis) delete contextManifest.planning.agentAnalysis;
+      const analyzerOwner = worksetProposal ? `agent:${worksetProposal.name}` : "agent";
+      if (worksetProposal && contextManifest.planning?.agentAnalyses) delete contextManifest.planning.agentAnalyses[worksetProposal.name];
+      else if (contextManifest.planning?.agentAnalysis) delete contextManifest.planning.agentAnalysis;
       if (contextManifest.planning?.advisoryConflicts) {
-        contextManifest.planning.advisoryConflicts = contextManifest.planning.advisoryConflicts.filter((conflict) => conflict.analyzer !== "agent");
+        contextManifest.planning.advisoryConflicts = contextManifest.planning.advisoryConflicts.filter((conflict) => conflict.analyzer !== analyzerOwner);
         if (!contextManifest.planning.advisoryConflicts.length) delete contextManifest.planning.advisoryConflicts;
       }
       if (contextManifest.planning && !Object.keys(contextManifest.planning).length) delete contextManifest.planning;
@@ -281,20 +364,45 @@ async function main() {
         manifest: contextManifest,
         deterministicFindings: {
           dependencies: deterministicResult.dependencySources,
-          conflicts: deterministicResult.inferredConflicts.filter((conflict) => conflict.analyzer !== "agent"),
+          conflicts: deterministicResult.inferredConflicts.filter((conflict) => conflict.analyzer !== analyzerOwner),
+          activeWork: deterministicResult.activeWork,
           unresolved: deterministicResult.unresolved,
           expectedWaves: deterministicResult.planning.waves
-        }
+        },
+        scope: scope ? { name: scope.name, membership: scope.membership, parent: scope.parent, revision: scope.revision } : null
       });
     }
     const result = agentAnalysis ? proposeDraft({
       repository,
       existingConfig,
       issues,
-      selectedIssueIds: requestedIssues,
+      selectedIssueIds: effectiveIssueIds,
+      supportingIssueIds: scope?.supportingIssueIds || [],
       agentAnalysis,
-      executionStates
+      executionStates,
+      worksetProposal,
+      analysisScope: worksetProposal?.name || null,
+      worksetMemberships
     }) : deterministicResult;
+    if (scope?.diagnostics.length && result !== deterministicResult) {
+      result.diagnostics.push(...scope.diagnostics.map((item) => ({ issue: item.issue?.number || null, reason: item.reason })));
+      result.writable = false;
+    }
+    if (scope) {
+      const missingGraphMembers = scope.issueIds.filter((id) => !result.manifest.work?.[id]);
+      if (missingGraphMembers.length) {
+        result.diagnostics.push(...missingGraphMembers.map((id) => ({ issue: id, reason: "Resolved workset member is absent from the shared work graph." })));
+        result.writable = false;
+      }
+      const priorIds = new Set(priorScope?.issueIds || []);
+      const currentIds = new Set(scope.issueIds);
+      result.workset.scopeChanges = {
+        added: scope.issueIds.filter((id) => !priorIds.has(id)),
+        removed: [...priorIds].filter((id) => !currentIds.has(id)),
+        factsChanged: Boolean(priorScope && priorScope.revision !== scope.revision && scope.issueIds.every((id) => priorIds.has(id)) && priorIds.size === scope.issueIds.length)
+      };
+      result.scopeChanged = !priorScope || priorScope.revision !== scope.revision;
+    }
     const write = args.includes("--write");
     const formatter = args.includes("--json") ? formatDraftJson : args.includes("--verbose") ? formatDraftVerbose : formatDraftSummary;
     const format = (outcome) => formatter({
@@ -318,12 +426,14 @@ async function main() {
       return;
     }
     if (!result.changed) {
-      process.stdout.write(format({ requested: true, status: "no-op" }));
+      if (scope) await saveScopeSnapshot(repoPath, scope.name, scope);
+      process.stdout.write(format({ requested: true, status: scope && result.scopeChanged ? "scope-refreshed" : "no-op" }));
       return;
     }
     try {
       const written = writeManifest(manifestPath, result.manifest, { expectedContents: manifestSnapshot.contents });
-      process.stdout.write(format({ requested: true, status: written ? "written" : "no-op" }));
+      if (scope) await saveScopeSnapshot(repoPath, scope.name, scope);
+      process.stdout.write(format({ requested: true, status: written ? "written" : scope && result.scopeChanged ? "scope-refreshed" : "no-op" }));
     } catch (error) {
       process.stdout.write(format({ requested: true, status: "failed", error: error.message }));
       process.exitCode = 1;
@@ -343,7 +453,9 @@ async function main() {
   const config = loadConfig(manifestPath, args);
 
   if (command === "plan") {
-    process.stdout.write(`${JSON.stringify(computePlan(config), null, 2)}\n`);
+    const worksetName = option(args, "--workset");
+    const scope = worksetName ? await resolveSavedWorkset(config, repoPath, worksetName) : null;
+    process.stdout.write(`${JSON.stringify(computePlan(config, scopedPlanOptions(scope)), null, 2)}\n`);
     return;
   }
 
@@ -365,7 +477,10 @@ async function main() {
   }
 
   if (command === "start" || command === "next") {
-    const plan = args.includes("--rerun") ? computePlan(config) : await computeEffectivePlan(config, repoPath);
+    const worksetName = option(args, "--workset");
+    const scope = worksetName ? await resolveSavedWorkset(config, repoPath, worksetName, { refresh: true }) : null;
+    const planOptions = scopedPlanOptions(scope);
+    const plan = args.includes("--rerun") ? computePlan(config, planOptions) : await computeEffectivePlan(config, repoPath, planOptions);
     const selectedIssueIds = plan.selected.map((item) => item.id);
     if (selectedIssueIds.length) {
       const repository = await discoverGitHubRepository(repoPath);
@@ -376,7 +491,15 @@ async function main() {
         throw new Error(`GitHub/manifest drift blocks execution: ${findings.map((item) => `#${item.issue} ${item.reason}`).join(" ")} Run \`maestro draft --write\` and review any conflicts before retrying.`);
       }
     }
-    const result = await executeRun(config, { repoPath, plan });
+    const authorization = scope ? {
+      workset: scope.name,
+      revision: scope.revision,
+      membership: scope.membership,
+      authorizedIssueIds: scope.issueIds,
+      authorizedAt: new Date().toISOString(),
+      source: "explicit-workset-launch"
+    } : null;
+    const result = await executeRun(config, { repoPath, plan, scope: authorization });
     let automatic = null;
     if (args.includes("--auto-rework")) {
       const newlyExecuted = result.plan?.selected?.map((item) => String(item.id)) || [];

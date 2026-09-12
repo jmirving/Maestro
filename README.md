@@ -68,6 +68,22 @@ maestro draft --verbose       # expand all evidence, waves, and proposed manifes
 maestro draft --json          # emit the complete structured result as JSON only
 ```
 
+For a bounded epic or named selection, keep using the same draft pipeline:
+
+```bash
+maestro draft --epic 42 --agent
+maestro draft --epic 42 --name scheduling --write
+maestro draft 101 102 --name release-fix --write
+maestro draft --workset scheduling --agent --write
+maestro plan --workset scheduling
+maestro start --workset scheduling
+maestro next --workset scheduling
+```
+
+Repository configuration, worksets, and execution sessions have distinct jobs. `.maestro.json` contains one repository-wide `work` graph and execution configuration; `worksets.<name>` only records a repository-qualified epic or explicit issue source plus explicit-refresh policy. It does not copy issue lifecycle or grant permission to execute. A successful scoped `--write` stores the resolved, revisioned membership snapshot outside the editable manifest with other Maestro evidence. `start`/`next --workset` is the explicit authorization event: Maestro resolves the source again, refuses scope or requirement drift, and records the authorized membership in that run.
+
+Epic membership uses GitHub's documented parent/sub-issue relationship recursively; ordinary body mentions are never inferred as members. The epic is organizational by default and its body remains read-only planning context. Cycles, duplicate paths, missing/inaccessible children, empty scopes, incomplete relationship retrieval, and cross-repository children block persistence. Closed children remain visible and reconcile to non-runnable history. Dependencies outside membership remain hard prerequisites labeled `outsideScope`; unrelated ready issues are not selected. Shared issues retain one global lifecycle, capacity, and conflict state across worksets.
+
 The default draft is a compact operational summary: proposed change counts and a bounded change list, the manifest-only next-wave projection and concurrency limit, current prerequisites/advisory separation/human decisions/errors, and the exact preview/write/no-op/failure outcome. Current prerequisites are grouped by dependent issue with readable issue titles when available; completed dependencies remain in the manifest and verbose evidence but are not shown as active blockers. Long lists report how many entries were omitted.
 
 Use `--verbose` for full planning decisions, dependency and conflict provenance, every projected wave, agent reasoning/evidence, and the complete proposed manifest. Use `--json` for one parseable JSON document containing the full result, manifest, changes, diagnostics, planning evidence, and final write outcome. `--verbose` and `--json` are mutually exclusive; both work with issue selection, `--all`, `--agent`, and `--write`. `--all` continues to control issue scope only. Formatting modes do not change the proposal, invoke an additional agent, affect validation, or alter write eligibility.
@@ -93,7 +109,7 @@ Repositories may opt into exact label mappings without teaching Maestro reposito
 
 `--agent` opts into a planning-only Codex invocation. Maestro supplies a reproducible, size-bounded context made from selected issue data, the deterministic proposal, the tracked repository tree, and prioritized excerpts from `AGENTS.md`, `README.md`, `docs/`, schemas, package metadata, and source. The analyzer runs read-only and ephemerally in a temporary directory, ignores user configuration and rules, and has MCP, hooks, apps, web search, and shell tools disabled. Codex receives a provider-compatible wire schema; Maestro normalizes nullable no-recommendation fields and then enforces the fuller local schema, including uniqueness and nonempty evidence. It has a 120-second timeout, one retry for transient failures, a 200-issue/64 KiB issue budget, a 96 KiB aggregate prompt budget (including the schema, policy, manifest, findings, issues, tree, and excerpts), and a 256 KiB output limit. Definitive provider schema rejections are not retried. Larger inputs must be reduced or selected in smaller explicit batches.
 
-Agent output never starts work or writes directly. Existing manifest values and explicit issue dependencies take precedence. Only high-confidence semantic dependencies enter the proposed `blockedBy` graph; medium- and low-confidence dependency suggestions and all low-confidence work/conflict suggestions remain unresolved for review. References and cycles are validated after merging, and any invocation, schema, reference, or graph failure leaves the existing manifest untouched. Accepted recommendations and non-secret context/output digests are visible in the draft and persisted under `planning.agentAnalysis` only when the user supplies `--write`.
+Agent output never starts work or writes directly. Existing manifest values and explicit issue dependencies take precedence. Only high-confidence semantic dependencies enter the proposed `blockedBy` graph; medium- and low-confidence dependency suggestions and all low-confidence work/conflict suggestions remain unresolved for review. References and cycles are validated after merging, and any invocation, schema, reference, or graph failure leaves the existing manifest untouched. Accepted recommendations and non-secret context/output digests are visible in the draft and persisted under `planning.agentAnalysis` for repository-wide analysis or `planning.agentAnalyses.<workset>` for scoped analysis only when the user supplies `--write`. Re-drafting one workset preserves other scoped evidence and reports changes to issues shared by explicit worksets.
 
 ### Agent drafting troubleshooting and live smoke
 

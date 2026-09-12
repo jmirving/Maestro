@@ -155,11 +155,12 @@ function compareWorkIds(work, left, right) {
   return leftPriority - rightPriority || issueOrder(left, right);
 }
 
-function computeExpectedWaves(config) {
+function computeExpectedWaves(config, { issueIds = null } = {}) {
   const work = config.work || {};
+  const scope = issueIds == null ? null : new Set(issueIds.map(String));
   const concurrency = Math.max(1, Number(config.defaultConcurrency || 2));
   const complete = new Set(Object.entries(work).filter(([, item]) => item.status === "complete").map(([id]) => String(id)));
-  const remaining = new Set(Object.entries(work).filter(([, item]) => item.status === "ready").map(([id]) => String(id)));
+  const remaining = new Set(Object.entries(work).filter(([id, item]) => item.status === "ready" && (!scope || scope.has(String(id)))).map(([id]) => String(id)));
   const conflicts = config.planning?.advisoryConflicts || [];
   const waves = [];
   const decisions = [];
@@ -205,6 +206,7 @@ function computeExpectedWaves(config) {
     source: "manifest blockedBy"
   }));
   for (const [id, item] of Object.entries(work).sort(([left], [right]) => issueOrder(left, right))) {
+    if (scope && !scope.has(String(id))) continue;
     if (item.status === "blocked") {
       const waiting = (item.blockedBy || []).filter((dependency) => !complete.has(String(dependency))).map((entry) => `#${entry}`);
       unresolved.push({ issue: id, state: "blocked", reason: `Manifest status is blocked${waiting.length ? `; waiting on ${waiting.join(", ")}` : ""}.`, source: "manifest work status" });

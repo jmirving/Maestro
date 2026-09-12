@@ -7,26 +7,30 @@ const COMMANDS = [
     category: "Planning",
     summary: "Preview or reconcile GitHub issue truth with repository work.",
     when: "Use before planning and whenever GitHub issue state, dependencies, or mapped labels may have changed.",
-    usages: ["maestro draft [manifest.json] [issue ...] [--all] [--agent] [--write] [--verbose|--json]"],
+    usages: ["maestro draft [manifest.json] [issue ...|--all|--epic <number>|--workset <name>] [--name <name>] [--agent] [--write] [--verbose|--json]"],
     positionals: "Optional manifest path followed by issue numbers. Omit issues to reconcile the full issue set.",
     options: {
       "--repo-path": COMMON_REPO_OPTION,
       "--all": { description: "Explicitly reconsider the full open and closed issue set; cannot be combined with issue numbers." },
+      "--epic": { value: "<number>", description: "Resolve documented GitHub sub-issue relationships recursively and propose a named workset." },
+      "--workset": { value: "<name>", description: "Refresh an existing named workset using its recorded source." },
+      "--name": { value: "<name>", description: "Name a new epic or explicit-issue workset; epic defaults to epic-<number>." },
       "--agent": { description: "Add bounded, read-only semantic planning recommendations." },
       "--write": { description: "Persist the schema-valid proposal; otherwise draft is a preview." },
       "--verbose": { description: "Show complete planning evidence, provenance, all projected waves, and the proposed manifest." },
       "--json": { description: "Emit only the complete structured draft result as parseable JSON." }
     },
     prerequisites: "A Git checkout and readable GitHub repository. Writing requires a safe, schema-valid dependency graph.",
-    effects: "Reads issues and builds a proposal; only --write changes the manifest.",
-    cautions: "Saving a draft does not launch work, expand delegated scope, grant human approval, or authorize integration. Lifecycle conflicts remain fail-closed; drafting never mutates GitHub. If Codex rejects the agent output schema, retry deterministically without --agent; that provider error does not mean the repository manifest is invalid.",
+    effects: "Reads issues and builds a proposal; only --write changes the manifest. Scoped writes also save a revisioned scope snapshot beside run evidence.",
+    cautions: "Repository configuration controls execution, a workset selects canonical work, and a run records authorization/history. Saving either draft artifact does not launch work, expand delegated scope, grant human approval, or authorize integration. Lifecycle and epic-resolution conflicts remain fail-closed; drafting never mutates GitHub. If Codex rejects the agent output schema, retry deterministically without --agent; that provider error does not mean the repository manifest is invalid.",
     next: ["maestro plan", "maestro start"],
     examples: [
       ["draft", "--agent", "--verbose"],
       ["draft", "101", "102", "--write"]
     ],
     positionalKind: "manifest-issues",
-    conflicts: [["--all", "$issues"]],
+    conflicts: [["--all", "$issues"], ["--epic", "$issues"], ["--workset", "$issues"], ["--all", "--epic"], ["--all", "--workset"], ["--all", "--name"], ["--epic", "--workset"]],
+    numericOptions: ["--epic"],
     exclusive: [["--verbose", "--json"]]
   },
   {
@@ -34,9 +38,9 @@ const COMMANDS = [
     category: "Planning",
     summary: "Show the next dependency- and concurrency-aware wave without executing it.",
     when: "Use to inspect what the manifest currently makes ready.",
-    usages: ["maestro plan [manifest.json] [--repo-path <path>]"],
+    usages: ["maestro plan [manifest.json] [--repo-path <path>] [--workset <name>]"],
     positionals: "Optional manifest path; defaults to .maestro.json in the target repository.",
-    options: { "--repo-path": COMMON_REPO_OPTION },
+    options: { "--repo-path": COMMON_REPO_OPTION, "--workset": { value: "<name>", description: "Limit the preview to a saved workset scope snapshot." } },
     prerequisites: "A target Git repository and Maestro manifest.",
     effects: "Prints a deterministic plan. It creates no run and changes no files or remote state.",
     cautions: "A plan reflects manifest state, not unresolved product decisions outside the manifest.",
@@ -50,19 +54,21 @@ const COMMANDS = [
     category: "Execution",
     summary: "Execute the current ready wave in isolated workers and fresh validators.",
     when: "Use after planning when status shows ready work and required capabilities are available.",
-    usages: ["maestro start [manifest.json] [--repo-path <path>] [--rerun] [--auto-rework]"],
+    usages: ["maestro start [manifest.json] [--repo-path <path>] [--workset <name>] [--rerun] [--auto-rework]"],
     positionals: "Optional manifest path; defaults to .maestro.json in the target repository.",
     options: {
       "--repo-path": COMMON_REPO_OPTION,
+      "--workset": { value: "<name>", description: "Execute only a previously drafted scope after checking it for drift." },
       "--rerun": { description: "Intentionally bypass persisted lifecycle deferrals and retry manifest-ready work." },
       "--auto-rework": { description: "Automatically correct and revalidate REWORK results, up to three attempts within a 30-minute session." }
     },
     prerequisites: "Ready reconciled work, a clean usable repository, current GitHub issue facts, and every capability required by the selected items.",
     effects: "Persists a run, creates isolated branches/worktrees, runs workers, then validates changed branches in fresh agent contexts. --auto-rework may create bounded correction children.",
-    cautions: "GitHub drift blocks launch. Does not approve, integrate, push the default branch, or close issues. Successful automatic rework still requires human review. --rerun is an explicit retry, not normal resume behavior or a drift bypass.",
+    cautions: "GitHub or saved-workset scope drift blocks launch. Does not approve, integrate, push the default branch, or close issues. Successful automatic rework still requires human review. --rerun is an explicit retry, not normal resume behavior or a drift bypass, and cannot be combined with --workset.",
     next: ["maestro status", "maestro details <issue>", "maestro output"],
     examples: [["start"], ["start", "--auto-rework"]],
-    positionalKind: "optional-manifest"
+    positionalKind: "optional-manifest",
+    conflicts: [["--workset", "--rerun"]]
   },
   {
     name: "next",
@@ -70,19 +76,21 @@ const COMMANDS = [
     category: "Execution",
     summary: "Start the next ready wave while respecting all persisted lifecycle deferrals.",
     when: "Use after reviewed work is integrated, or whenever status recommends the next eligible wave.",
-    usages: ["maestro next [manifest.json] [--repo-path <path>] [--rerun] [--auto-rework]"],
+    usages: ["maestro next [manifest.json] [--repo-path <path>] [--workset <name>] [--rerun] [--auto-rework]"],
     positionals: "Optional manifest path; defaults to .maestro.json in the target repository.",
     options: {
       "--repo-path": COMMON_REPO_OPTION,
+      "--workset": { value: "<name>", description: "Continue only the authorized members of a previously drafted workset." },
       "--rerun": { description: "Intentionally retry manifest-ready work despite prior lifecycle evidence." },
       "--auto-rework": { description: "Automatically correct and revalidate REWORK results, up to three attempts within a 30-minute session." }
     },
     prerequisites: "The same requirements as start. Existing running, review, rework, and integration states remain deferred.",
     effects: "Runs workers and validators for newly eligible work; --auto-rework may also resume or create bounded correction children. It does not integrate work.",
-    cautions: "No ready work is not proof that all repository work is complete; inspect status for gates and deferred items. Automatic correction never satisfies human review or integration gates.",
+    cautions: "No ready work is not proof that all repository or workset work is complete; inspect status for outside prerequisites, gates, and deferred items. Automatic correction never satisfies human review or integration gates. --rerun cannot be combined with --workset.",
     next: ["maestro status", "maestro output"],
     examples: [["next"], ["next", "--auto-rework"]],
-    positionalKind: "optional-manifest"
+    positionalKind: "optional-manifest",
+    conflicts: [["--workset", "--rerun"]]
   },
   {
     name: "status",
@@ -304,6 +312,9 @@ Mixed outcomes
 
 Boundaries
   A saved draft is scope, not launch or integration authorization.
+  Named worksets select from one shared repository graph; they do not copy lifecycle.
+  Epic membership uses recursive GitHub sub-issues, not body mentions or checklists.
+  start/next --workset recheck the saved scope revision before recording authorization.
   Validator approval, human approval, and integration are separate gates.
   Automatic and manual rework create new evidence; neither grants human approval.
   HUMAN_GATE, technical failure/conflict, invalid validation, and retry exhaustion stop

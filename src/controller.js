@@ -17,8 +17,8 @@ function cloneConfig(config) {
   return JSON.parse(JSON.stringify(config));
 }
 
-async function dryRun(config, { repoPath }) {
-  const plan = computePlan(config);
+async function dryRun(config, { repoPath, planOptions = {} }) {
+  const plan = computePlan(config, planOptions);
   return {
     runId: newRunId(),
     mode: "dry-run",
@@ -41,9 +41,14 @@ async function executeRun(config, {
   worktreeFactory = prepareWorktree,
   preflightRunner,
   baselineRunner,
-  stateSaver = saveRunState
+  stateSaver = saveRunState,
+  scope = null
 } = {}) {
-  if (!plan.selected.length) return { runId, mode: "execute", plan, baseline: null, preflights: [], workers: [], validations: [] };
+  if (!plan.selected.length) {
+    const empty = { runId, mode: "execute", status: "no-ready-work", plan, baseline: null, preflights: [], workers: [], validations: [], reviews: {}, ...(scope ? { scope } : {}) };
+    if (scope) await stateSaver(repoPath, runId, empty);
+    return empty;
+  }
 
   const result = {
     runId,
@@ -57,6 +62,7 @@ async function executeRun(config, {
     validations: [],
     reviews: {}
   };
+  if (scope) result.scope = scope;
   await stateSaver(repoPath, runId, result);
 
   try {

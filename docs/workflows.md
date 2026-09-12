@@ -4,6 +4,22 @@
 
 This document holds expanded task walkthroughs so the terminal entrypoint remains scannable. It documents commands that exist today; future scope selection, delegation, and autonomous-session features must add their own walkthroughs when they ship.
 
+## Named workset
+
+Use a workset when delegation is bounded to an epic or explicit issue list rather than the whole repository:
+
+```bash
+maestro draft --epic 42 --name team-scheduling --agent
+maestro draft --epic 42 --name team-scheduling --agent --write
+maestro plan --workset team-scheduling
+maestro start --workset team-scheduling
+maestro next --workset team-scheduling
+```
+
+The first command previews the same deterministic/optional-agent proposal used by an ordinary draft. The second saves the workset definition and its separate scope snapshot; it still starts nothing and authorizes nothing. The explicit `start --workset` invocation re-resolves GitHub sub-issues and requirements, compares them with the saved revision, and records authorization in the execution run. If the epic changed, refresh with `draft --workset team-scheduling --write`, inspect additions/removals/closed or reopened members, and authorize a later launch explicitly.
+
+GitHub sub-issues are recursive and paginated. Body checklists and issue mentions are not membership. The parent supplies acceptance context but is not implementation work unless the manifest's epic source explicitly sets `includeParent`. Outside prerequisites stay visible blockers but are not added to authorized execution; unrelated repository-ready items stay out. Review and integration operate on the run's exact selected items, while duplicate-run, advisory-conflict, and capacity protection remain repository-wide.
+
 ## Supervised wave
 
 Start or refresh scope, preview the next wave, then execute it:

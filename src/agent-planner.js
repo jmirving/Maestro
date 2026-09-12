@@ -49,7 +49,7 @@ function contextFilePriority(file) {
   return 99;
 }
 
-async function assembleAgentContext({ repoPath, repository, issues, manifest, deterministicFindings, runner = runProcess, maxBytes = 96 * 1024, maxFiles = 500, maxIssues = 200, maxIssueBytes = 64 * 1024 }) {
+async function assembleAgentContext({ repoPath, repository, issues, manifest, deterministicFindings, scope = null, runner = runProcess, maxBytes = 96 * 1024, maxFiles = 500, maxIssues = 200, maxIssueBytes = 64 * 1024 }) {
   const allFiles = await trackedFiles(repoPath, runner);
   const tree = allFiles.slice(0, maxFiles);
   const candidates = allFiles.filter((file) => contextFilePriority(file) < 99)
@@ -63,6 +63,20 @@ async function assembleAgentContext({ repoPath, repository, issues, manifest, de
     throw new Error(`Agent planning context has ${orderedIssues.length} issues; select at most ${maxIssues} issues per invocation.`);
   }
   const bodyLimit = Math.max(0, Math.floor(maxIssueBytes / Math.max(1, orderedIssues.length)));
+  const selectedScope = scope ? new Set(scope.membership.map((ref) => `${ref.repository.toLowerCase()}#${ref.number}`)) : null;
+  const issueContext = (issue) => ({
+    number: issue.number,
+    state: issue.state,
+    title: String(issue.title || "").slice(0, 500),
+    body: String(issue.body || "").slice(0, Math.min(16000, bodyLimit)),
+    labels: (issue.labels || []).map((label) => typeof label === "string" ? label : label?.name).filter(Boolean).slice(0, 50)
+  });
+  const selectedIssues = selectedScope
+    ? orderedIssues.filter((issue) => selectedScope.has(`${repository.toLowerCase()}#${issue.number}`))
+    : orderedIssues;
+  const supportingIssues = selectedScope
+    ? orderedIssues.filter((issue) => !selectedScope.has(`${repository.toLowerCase()}#${issue.number}`))
+    : [];
   const context = {
     version: 1,
     repository,
@@ -72,13 +86,9 @@ async function assembleAgentContext({ repoPath, repository, issues, manifest, de
       highConfidenceRequiredForHardDependencies: true,
       lowConfidenceRemainsUnresolved: true
     },
-    issues: orderedIssues.map((issue) => ({
-      number: issue.number,
-      state: issue.state,
-      title: String(issue.title || "").slice(0, 500),
-      body: String(issue.body || "").slice(0, Math.min(16000, bodyLimit)),
-      labels: (issue.labels || []).map((label) => typeof label === "string" ? label : label?.name).filter(Boolean).slice(0, 50)
-    })),
+    ...(scope ? { scope: { ...scope, authority: { selectedIssuesMayChangePlanningMetadata: true, supportingContextReadOnly: true, mayExpandScope: false } } } : {}),
+    issues: selectedIssues.map(issueContext),
+    ...(supportingIssues.length ? { supportingIssues: supportingIssues.map(issueContext) } : {}),
     manifest,
     deterministicFindings,
     repositoryTree: tree,

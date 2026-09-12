@@ -56,4 +56,27 @@ async function loadGitHubIssues(repository, issueIds, { repoPath, runner = runCh
   return addStateReasons(issues);
 }
 
-module.exports = { discoverGitHubRepository, loadGitHubIssues };
+async function loadGitHubSubIssues(repository, issueNumber, { repoPath, runner = runChecked } = {}) {
+  const issues = [];
+  for (let page = 1; page <= 1000; page += 1) {
+    const result = await runner("gh", [
+      "api", `repos/${repository}/issues/${issueNumber}/sub_issues?per_page=100&page=${page}`
+    ], { cwd: repoPath });
+    const records = parseJson(result, `reading sub-issues page ${page} for ${repository}#${issueNumber}`);
+    if (!Array.isArray(records)) {
+      throw new Error(`GitHub returned an invalid sub-issue page for ${repository}#${issueNumber}.`);
+    }
+    issues.push(...records);
+    if (records.length < 100) break;
+    if (page === 1000) throw new Error(`GitHub sub-issue pagination for ${repository}#${issueNumber} exceeded 1000 pages.`);
+  }
+  return issues.map((issue) => ({
+    ...issue,
+    number: issue.number,
+    repository: typeof issue.repository_url === "string"
+      ? issue.repository_url.split("/repos/").at(-1)
+      : issue.repository?.nameWithOwner || repository
+  }));
+}
+
+module.exports = { discoverGitHubRepository, loadGitHubIssues, loadGitHubSubIssues };

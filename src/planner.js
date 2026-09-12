@@ -19,14 +19,17 @@ function compareReady(a, b) {
   return Number(a.id) - Number(b.id) || a.id.localeCompare(b.id);
 }
 
-function computePlan(config) {
+function computePlan(config, { issueIds = null, workset = null, scopeRevision = null } = {}) {
   const work = normalizeWork(config.work);
+  const selectedScope = issueIds == null ? null : new Set(issueIds.map(String));
+  if (workset && !selectedScope) throw new Error(`Planning workset '${workset}' requires a resolved issue scope.`);
   const complete = new Set(work.filter((item) => item.status === "complete").map((item) => item.id));
   const ready = [];
   const blocked = [];
   const humanGates = [];
 
   for (const item of work) {
+    if (selectedScope && !selectedScope.has(item.id)) continue;
     if (item.status === "complete") continue;
     if (item.status === "human_gate") {
       humanGates.push(item);
@@ -34,7 +37,11 @@ function computePlan(config) {
     }
     const unresolved = item.blockedBy.filter((id) => !complete.has(id));
     if (item.status === "blocked" || unresolved.length) {
-      blocked.push({ ...item, unresolved });
+      blocked.push({
+        ...item,
+        unresolved,
+        ...(selectedScope ? { outsideScope: unresolved.filter((id) => !selectedScope.has(id)) } : {})
+      });
       continue;
     }
     if (item.status === "ready") ready.push(item);
@@ -62,6 +69,7 @@ function computePlan(config) {
   }
   return {
     repository: config.repository,
+    ...(workset ? { workset, scopeRevision, authorizedIssueIds: [...selectedScope].sort((a, b) => Number(a) - Number(b)) } : {}),
     concurrency,
     ready,
     selected,

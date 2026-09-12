@@ -188,6 +188,9 @@ function parseInvocation(args) {
     if (values[left] !== undefined && right === "$issues" && parsed.issues.length) {
       throw cliError(`maestro ${name} accepts either issue numbers or ${left}, not both.`);
     }
+    if (right !== "$issues" && values[left] !== undefined && values[right] !== undefined) {
+      throw cliError(`maestro ${name} cannot combine ${left} with ${right}.`);
+    }
   }
   return { command: name, rawCommand: rawName, definition: command, rest: args.slice(1), options: values, positionals };
 }

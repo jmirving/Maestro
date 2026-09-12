@@ -20,15 +20,18 @@ function issueId(issue) {
   return Number.isSafeInteger(issue?.number) && issue.number > 0 ? String(issue.number) : null;
 }
 
-function explicitDependencies(issue) {
+function explicitDependencies(issue, repository = null) {
   const dependencies = [];
   const body = typeof issue?.body === "string" ? issue.body : "";
   const pattern = /^\s*(blocked\s+by|depends\s+on)\s*:?\s*(.+)$/gim;
   for (const match of body.matchAll(pattern)) {
-    for (const reference of match[2].matchAll(/#(\d+)/g)) {
-      const id = String(Number(reference[1]));
-      if (!dependencies.some((entry) => entry.id === id)) {
-        dependencies.push({ id, source: `GitHub issue #${issue.number} body: ${match[1].toLowerCase()}` });
+    for (const reference of match[2].matchAll(/(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?#(\d+)/g)) {
+      const referencedRepository = reference[1] || repository;
+      const id = String(Number(reference[2]));
+      const unsupported = Boolean(repository && referencedRepository && referencedRepository.toLowerCase() !== repository.toLowerCase());
+      const key = `${referencedRepository || ""}#${id}`.toLowerCase();
+      if (!dependencies.some((entry) => entry.key === key)) {
+        dependencies.push({ id, repository: referencedRepository, key, unsupported, source: `GitHub issue #${issue.number} body: ${match[1].toLowerCase()}` });
       }
     }
   }
@@ -122,10 +125,13 @@ function detectExecutionDrift(config, issues, issueIds) {
       findings.push({ issue: id, reason: "GitHub issue no longer resolves." });
       continue;
     }
-    const dependencies = explicitDependencies(issue);
+    const references = explicitDependencies(issue, config.repository);
+    const crossRepository = references.filter((entry) => entry.unsupported);
+    const dependencies = references.filter((entry) => !entry.unsupported);
     const mapped = mappedMetadata(config, issueLabels(issue));
     const snapshot = githubSnapshot(issue, dependencies, mapped);
     if (snapshot.state !== "OPEN") findings.push({ issue: id, reason: `GitHub issue is ${snapshot.state.toLowerCase()}.` });
+    if (crossRepository.length) findings.push({ issue: id, reason: `GitHub dependency metadata contains unsupported cross-repository references: ${crossRepository.map((entry) => `${entry.repository}#${entry.id}`).join(", ")}.` });
     if (!item?.github) {
       findings.push({ issue: id, reason: "Manifest entry has no GitHub reconciliation provenance." });
       continue;
@@ -145,7 +151,7 @@ function agentSource(agentAnalysis, recommendation) {
   return `agent:${agentAnalysis.metadata.provider} context:${agentAnalysis.metadata.contextDigest.slice(0, 12)}; evidence: ${recommendation.evidence.join(" | ")}`;
 }
 
-function proposeDraft({ repository, existingConfig = null, issues = [], selectedIssueIds = [], analyzers = null, agentAnalysis = null, executionStates = [] }) {
+function proposeDraft({ repository, existingConfig = null, issues = [], selectedIssueIds = [], supportingIssueIds = [], analyzers = null, agentAnalysis = null, executionStates = [], worksetProposal = null, analysisScope = null, worksetMemberships = {} }) {
   if (existingConfig?.repository && existingConfig.repository !== repository) {
     throw new Error(`The existing manifest targets ${existingConfig.repository}, but the current checkout is ${repository}.`);
   }
@@ -153,12 +159,17 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
   if (existingConfig) validateRepositoryConfig(existingConfig);
 
   const manifest = existingConfig ? clone(existingConfig) : { repository, work: {} };
+  if (worksetProposal) {
+    manifest.worksets = { ...(manifest.worksets || {}), [worksetProposal.name]: clone(worksetProposal.definition) };
+  }
   const existingWorkIds = new Set(Object.keys(existingConfig?.work || {}));
   const selected = new Set(selectedIssueIds.map(String));
+  const supporting = new Set(supportingIssueIds.map(String));
   const seen = new Set();
   const ambiguous = new Set();
   const normalized = [];
   const unresolved = [];
+  const referenceDiagnostics = [];
   const drift = [];
   const conflicts = [];
   const preserved = [];
@@ -170,7 +181,7 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
       unresolved.push({ issue: null, reason: "GitHub issue record has no positive integer number." });
       continue;
     }
-    if (selected.size && !selected.has(id)) continue;
+    if (selected.size && !selected.has(id) && !supporting.has(id)) continue;
     if (seen.has(id)) {
       ambiguous.add(id);
       unresolved.push({ issue: id, reason: "GitHub returned duplicate records for this issue." });
@@ -186,7 +197,13 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
   for (const { id, issue } of normalized) {
     if (ambiguous.has(id)) continue;
     const state = String(issue.state).toUpperCase();
-    const dependencies = explicitDependencies(issue);
+    const references = explicitDependencies(issue, repository);
+    const crossRepository = references.filter((entry) => entry.unsupported);
+    const dependencies = references.filter((entry) => !entry.unsupported);
+    for (const reference of crossRepository) {
+      unresolved.push({ issue: id, reason: `Cross-repository dependency ${reference.repository}#${reference.id} is unsupported and was not mapped to local issue #${reference.id}.` });
+      referenceDiagnostics.push({ issue: id, reason: `Cross-repository dependency ${reference.repository}#${reference.id} cannot be represented by this single-repository execution graph.` });
+    }
     const mapped = mappedMetadata(manifest, issueLabels(issue));
     const original = manifest.work[id] ? clone(manifest.work[id]) : null;
     const manual = manualMetadata(original, mapped);
@@ -194,7 +211,15 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
 
     if (!original) {
       if (state !== "OPEN") {
-        if (selected.has(id)) unresolved.push({ issue: id, reason: `Issue is ${state.toLowerCase()}, not open, and has no manifest history to reconcile.` });
+        if (worksetProposal && (selected.has(id) || supporting.has(id)) && state === "CLOSED") {
+          const item = { status: "inactive", github: snapshot };
+          applyMappedMetadata(item, {}, mapped, manual);
+          item.status = "inactive";
+          manifest.work[id] = item;
+          added.push(id);
+          changedIssues.add(id);
+          drift.push({ issue: id, type: "missing-closed-member", classification: "safe", before: null, after: clone(item), reason: "Closed workset member is retained as inactive history." });
+        } else if (selected.has(id)) unresolved.push({ issue: id, reason: `Issue is ${state.toLowerCase()}, not open, and has no manifest history to reconcile.` });
         continue;
       }
       if (lifecycle.has(id)) {
@@ -280,7 +305,7 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
   if (agentAnalysis) {
     validateAgentOutput(agentAnalysis.output);
     const known = new Set(Object.keys(manifest.work));
-    const analyzed = new Set(normalized.filter(({ id, issue }) => !ambiguous.has(id) && String(issue.state).toUpperCase() === "OPEN").map(({ id }) => id));
+    const analyzed = new Set(normalized.filter(({ id, issue }) => !ambiguous.has(id) && String(issue.state).toUpperCase() === "OPEN" && (!analysisScope || selected.has(id))).map(({ id }) => id));
     const checkKnown = (id, description) => {
       if (known.has(String(id))) return true;
       agentDiagnostics.push({ issue: String(id), reason: `Agent ${description} references work not present in the manifest.` });
@@ -349,6 +374,10 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
         continue;
       }
       if (!valid) continue;
+      if (analysisScope && !recommendation.issues.some((id) => analyzed.has(String(id)))) {
+        agentDiagnostics.push({ issue: recommendation.issues[0], reason: "Agent conflict does not involve a selected workset member." });
+        continue;
+      }
       if (recommendation.confidence === "low") {
         agentUnresolved.push({ issue: recommendation.issues[0], reason: `Low-confidence conflict with #${recommendation.issues[1]}: ${recommendation.reason}` });
         continue;
@@ -358,7 +387,7 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
         confidence: recommendation.confidence,
         source: agentSource(agentAnalysis, recommendation),
         reason: recommendation.reason,
-        analyzer: "agent"
+        analyzer: analysisScope ? `agent:${analysisScope}` : "agent"
       });
     }
     for (const recommendation of agentAnalysis.output.waves) {
@@ -369,20 +398,25 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
       if (item.issue != null) checkKnown(item.issue, "unresolved question");
       agentUnresolved.push({ issue: item.issue, reason: `${item.question} ${item.reason}` });
     }
-    manifest.planning = {
-      ...(manifest.planning || {}),
-      agentAnalysis: { ...agentAnalysis.metadata, recommendations: agentAnalysis.output }
-    };
+    manifest.planning = { ...(manifest.planning || {}) };
+    const evidence = { ...agentAnalysis.metadata, recommendations: agentAnalysis.output };
+    if (analysisScope) {
+      manifest.planning.agentAnalyses = { ...(manifest.planning.agentAnalyses || {}), [analysisScope]: evidence };
+    } else {
+      manifest.planning.agentAnalysis = evidence;
+    }
   }
 
   const activeAnalyzers = analyzers == null ? configuredAnalyzers(manifest) : analyzers;
-  const inferredConflicts = [...runAdvisoryAnalyzers({ analyzers: activeAnalyzers, issues: normalized, manifest }), ...acceptedAgentConflicts];
+  const analyzerIssues = worksetProposal ? normalized.filter(({ id }) => selected.has(id)) : normalized;
+  const inferredConflicts = [...runAdvisoryAnalyzers({ analyzers: activeAnalyzers, issues: analyzerIssues, manifest }), ...acceptedAgentConflicts];
   const existingConflicts = manifest.planning?.advisoryConflicts || [];
   const activeAnalyzerNames = new Set(activeAnalyzers.map((analyzer) => analyzer.name || "custom"));
-  if (agentAnalysis) activeAnalyzerNames.add("agent");
-  const analyzedIssueIds = new Set(normalized.map(({ id }) => id));
+  if (agentAnalysis) activeAnalyzerNames.add(analysisScope ? `agent:${analysisScope}` : "agent");
+  const analyzedIssueIds = new Set(analyzerIssues.map(({ id }) => id));
   const retainedConflicts = existingConflicts.filter((conflict) => {
     if (!activeAnalyzerNames.has(conflict.analyzer)) return true;
+    if (analysisScope && conflict.analyzer === `agent:${analysisScope}`) return false;
     if (!selected.size) return false;
     return !conflict.issues.every((id) => analyzedIssueIds.has(String(id)));
   });
@@ -408,9 +442,10 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
   const diagnostics = [
     ...validateDependencyGraph(manifest.work),
     ...validateAdvisoryReferences(manifest.work, advisoryConflicts),
+    ...referenceDiagnostics,
     ...agentDiagnostics
   ];
-  const planning = computeExpectedWaves(manifest);
+  const planning = computeExpectedWaves(manifest, worksetProposal ? { issueIds: selectedIssueIds } : {});
   added.sort((a, b) => Number(a) - Number(b) || a.localeCompare(b));
   unresolved.sort((a, b) => String(a.issue || "").localeCompare(String(b.issue || "")) || a.reason.localeCompare(b.reason));
   drift.sort((a, b) => issueOrder(a.issue, b.issue) || a.type.localeCompare(b.type));
@@ -424,6 +459,16 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
     .sort(issueOrder);
   const updatedSet = new Set(updated);
   const unchanged = examined.filter((id) => !addedSet.has(id) && !updatedSet.has(id));
+  const otherWorksets = worksetProposal
+    ? Object.entries(manifest.worksets || {}).filter(([name]) => name !== worksetProposal.name)
+    : [];
+  const sharedIssueEffects = worksetProposal
+    ? [...new Set([...changedIssues, ...agentChangedIssues])].filter((id) => otherWorksets.some(([name, definition]) => {
+      if ((worksetMemberships[name] || []).map(String).includes(id)) return true;
+      if (definition.source?.type !== "issues") return false;
+      return definition.source.issues.some((ref) => ref.repository === repository && String(ref.number) === id);
+    })).sort(issueOrder)
+    : [];
   return {
     manifest,
     added,
@@ -433,12 +478,14 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
     unresolved,
     diagnostics,
     dependencySources,
+    activeWork: [...lifecycle.values()].sort((a, b) => issueOrder(a.issue, b.issue)),
     inferredConflicts,
     agentRecommendations: agentAnalysis?.output || null,
     acceptedAgentDependencies,
     acceptedAgentWork,
     agentChangedIssues: [...agentChangedIssues].sort(issueOrder),
     changes: { added: [...added], updated, unchanged },
+    ...(worksetProposal ? { workset: { name: worksetProposal.name, definition: clone(worksetProposal.definition), issueIds: [...selectedIssueIds].map(String).sort(issueOrder), sharedIssueEffects } } : {}),
     planning,
     created: !existingConfig,
     changed: !existingConfig || JSON.stringify(existingConfig) !== JSON.stringify(manifest),
@@ -497,6 +544,7 @@ function appendBounded(lines, entries, { limit = 5, command = "maestro draft --v
 
 function currentPrerequisites(result, width) {
   const work = result.manifest.work || {};
+  const worksetIssues = result.workset ? new Set(result.workset.issueIds || []) : null;
   const activeStatuses = new Set(["ready", "blocked", "human_gate"]);
   return Object.entries(work)
     .filter(([, item]) => activeStatuses.has(item.status))
@@ -510,11 +558,12 @@ function currentPrerequisites(result, width) {
       const visible = dependencies.slice(0, 2);
       const omitted = dependencies.length - visible.length;
       const suffix = omitted ? `, plus ${omitted} more` : "";
-      let description = `${issueLabel(result, id, 32)} - waits for ${joinedIssueLabels(result, visible, 60)}${suffix}.`;
+      const outside = worksetIssues && visible.some((dependency) => !worksetIssues.has(dependency)) ? " [outside workset]" : "";
+      let description = `${issueLabel(result, id, 32)} - waits for ${joinedIssueLabels(result, visible, 60)}${suffix}${outside}.`;
       if (description.length + 4 > width) {
-        description = `${issueLabel(result, id, 20)} - waits for ${visible.map((dependency) => `#${dependency}`).join(" and ")}${suffix}.`;
+        description = `${issueLabel(result, id, 20)} - waits for ${visible.map((dependency) => `#${dependency}`).join(" and ")}${suffix}${outside}.`;
       }
-      if (description.length + 4 > width) description = `#${id} - waits for ${visible.map((dependency) => `#${dependency}`).join(" and ")}${suffix}.`;
+      if (description.length + 4 > width) description = `#${id} - waits for ${visible.map((dependency) => `#${dependency}`).join(" and ")}${suffix}${outside}.`;
       return fitLine("  - ", description, width);
     });
 }
@@ -539,10 +588,15 @@ function formatDraftSummary({
   };
   const lines = [
     `Maestro draft for ${repository}`,
+    ...(result.workset ? [`Workset: ${result.workset.name} (saved configuration only; execution authorization is separate)`] : []),
     "",
     "What changed?",
     `  Added ${changeCounts.added.length}, updated ${changeCounts.updated.length}, unchanged ${changeCounts.unchanged.length}.`
   ];
+  if (result.workset?.scopeChanges) {
+    const scope = result.workset.scopeChanges;
+    lines.push(`  Scope: ${scope.added.length} added, ${scope.removed.length} removed${scope.factsChanged ? ", member facts changed" : ""}.`);
+  }
 
   const changeLines = [];
   for (const id of changeCounts.added) {
@@ -562,7 +616,7 @@ function formatDraftSummary({
   if (result.agentRecommendations) {
     const addedAgentDependencies = (result.dependencySources || []).filter((entry) => entry.added && cleanText(entry.source).includes("agent:")).length;
     const agentWork = (result.acceptedAgentWork || []).length;
-    const advisory = (result.inferredConflicts || []).filter((entry) => entry.analyzer === "agent").length;
+    const advisory = (result.inferredConflicts || []).filter((entry) => entry.analyzer === "agent" || entry.analyzer?.startsWith("agent:")).length;
     lines.push(`  Agent proposal: ${addedAgentDependencies} dependencies, ${agentWork} work items, ${advisory} advisory overlaps changed.`);
   }
 
@@ -618,6 +672,8 @@ function formatDraftSummary({
     lines.push("  Next: maestro plan");
   } else if (finalOutcome.status === "no-op") {
     lines.push("  No-op; manifest is already current and nothing was written.", "  Next: maestro plan");
+  } else if (finalOutcome.status === "scope-refreshed") {
+    lines.push("  Manifest already current; workset scope snapshot refreshed.", `  Next: maestro plan --workset ${result.workset.name}`);
   } else if (finalOutcome.status === "blocked") {
     lines.push(`  Write blocked; no files written. Resolve the errors above, then run: ${writeCommand}`);
   } else if (finalOutcome.status === "failed") {
@@ -634,10 +690,15 @@ function formatDraftVerbose({ repository, manifestPath, result, write = false, o
   const finalOutcome = normalizedOutcome({ result, write, outcome });
   const lines = [
     `Maestro draft for ${repository}`,
+    ...(result.workset ? [`Workset: ${result.workset.name}`, `Shared-issue effects: ${result.workset.sharedIssueEffects.length ? result.workset.sharedIssueEffects.map((id) => `#${id}`).join(", ") : "none"}`] : []),
     `Manifest: ${manifestPath}`,
     "Changes:"
   ];
   if (result.created) lines.push("  + create manifest");
+  if (result.workset?.scopeChanges) {
+    const scope = result.workset.scopeChanges;
+    lines.push(`  scope +${scope.added.length} -${scope.removed.length}${scope.factsChanged ? "; member facts changed" : ""}`);
+  }
   if (result.added.length) {
     for (const id of result.added) lines.push(`  + #${id} ${result.manifest.work[id].status}`);
   }
@@ -689,6 +750,7 @@ function formatDraftVerbose({ repository, manifestPath, result, write = false, o
   else if (finalOutcome.status === "blocked") lines.push("Write blocked; resolve dependency diagnostics and draft again.");
   else if (finalOutcome.status === "written") lines.push("Schema-valid manifest written successfully.");
   else if (finalOutcome.status === "no-op") lines.push("Schema-valid manifest is already current; nothing written.");
+  else if (finalOutcome.status === "scope-refreshed") lines.push("Schema-valid manifest is current; workset scope snapshot refreshed.");
   else if (finalOutcome.status === "failed") lines.push(`Write failed: ${finalOutcome.error}`);
   else lines.push("Write requested; persistence has not been confirmed.");
   return `${lines.join("\n")}\n`;

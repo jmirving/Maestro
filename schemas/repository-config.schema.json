@@ -69,6 +69,11 @@
             "recommendations": { "$ref": "https://maestro.local/schemas/agent-planning-output.schema.json" }
           },
           "additionalProperties": false
+        },
+        "agentAnalyses": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" },
+          "additionalProperties": { "$ref": "#/$defs/agentAnalysis" }
         }
       },
       "additionalProperties": false
@@ -117,6 +122,11 @@
         }
       },
       "additionalProperties": false
+    },
+    "worksets": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" },
+      "additionalProperties": { "$ref": "#/$defs/workset" }
     },
     "work": {
       "type": "object",
@@ -183,5 +193,85 @@
       }
     }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "$defs": {
+    "issueRef": {
+      "type": "object",
+      "required": ["repository", "number"],
+      "properties": {
+        "repository": { "type": "string", "pattern": "^[^/]+/[^/]+$" },
+        "number": { "type": "string", "pattern": "^[1-9][0-9]*$" }
+      },
+      "additionalProperties": false
+    },
+    "workset": {
+      "type": "object",
+      "required": ["source", "refresh"],
+      "properties": {
+        "source": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["type", "issue"],
+              "properties": {
+                "type": { "const": "epic" },
+                "issue": { "$ref": "#/$defs/issueRef" },
+                "includeParent": { "type": "boolean", "default": false }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["type", "issues"],
+              "properties": {
+                "type": { "const": "issues" },
+                "issues": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/issueRef" },
+                  "minItems": 1
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "refresh": {
+          "type": "object",
+          "required": ["mode"],
+          "properties": { "mode": { "const": "explicit" } },
+          "additionalProperties": false
+        },
+        "executionPolicy": { "type": "string", "minLength": 1 },
+        "completionPolicy": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "agentAnalysis": {
+      "type": "object",
+      "required": ["analyzer", "provider", "contextDigest", "outputDigest", "attempts", "issueIds", "files", "recommendations"],
+      "properties": {
+        "analyzer": { "const": "agent" },
+        "provider": { "type": "string", "minLength": 1 },
+        "contextDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "outputDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "attempts": { "type": "integer", "minimum": 1 },
+        "issueIds": { "type": "array", "items": { "type": "string", "pattern": "^[1-9][0-9]*$" }, "uniqueItems": true },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "sha256", "truncated"],
+            "properties": {
+              "path": { "type": "string", "minLength": 1 },
+              "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+              "truncated": { "type": "boolean" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "recommendations": { "$ref": "https://maestro.local/schemas/agent-planning-output.schema.json" }
+      },
+      "additionalProperties": false
+    }
+  }
 }
