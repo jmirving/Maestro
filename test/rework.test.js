@@ -5,7 +5,12 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { buildWorkerPrompt } = require("../src/worker");
-const { executeReworkRun, resolveIssueReworkSources, autoRework, loadCorrectionLineage } = require("../src/rework");
+const {
+  executeReworkRun,
+  resolveIssueReworkSources,
+  autoRework,
+  loadCorrectionLineage
+} = require("../src/rework");
 const { saveRunState, loadRunState, loadPersistedRunStates } = require("../src/run-store");
 
 function parseLeadingJson(stdout) {
@@ -491,7 +496,7 @@ test("automatic rework treats missing validation as validator failure", async (t
   assert.equal(state.autoRework["7"].status, "validator-failure");
 });
 
-test("automatic rework persists an actual rebase content conflict and aborts before launching a worker", async (t) => {
+test("displayed technical-conflict continuation resolves its source and resumes correction without authority", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-rework-conflict-"));
   const repoPath = path.join(root, "target");
   const originPath = path.join(root, "origin.git");
@@ -564,13 +569,69 @@ test("automatic rework persists an actual rebase content conflict and aborts bef
   assert.equal(attempt.conflict.operation, "rebase");
   assert.equal(attempt.conflict.operationState, "aborted");
   assert.equal(attempt.conflict.interruptedStage, "rework-refresh");
-  assert.equal(attempt.conflict.continuationAction, "maestro rework 7");
+  assert.equal(attempt.conflict.continuationAction, `maestro rework 7 --run ${sourceRunId}`);
   assert.match(attempt.conflict.stderr, /could not apply.*worker change/s);
   assert.equal(state.autoRework["7"].status, "technical-conflict");
   assert.equal(state.autoRework["7"].attemptsUsed, 1);
   assert.equal(state.autoRework["7"].action, "maestro details 7");
   assert.equal(git(repoPath, "status", "--porcelain"), "");
   assert.equal(git(repoPath, "rev-parse", "HEAD"), workerHeadSha);
+
+  const manualRebase = spawnSync("git", ["rebase", "origin/main"], { cwd: repoPath, encoding: "utf8" });
+  assert.notEqual(manualRebase.status, 0, "the recorded conflict should remain reproducible for manual resolution");
+  await fs.writeFile(path.join(repoPath, "shared.txt"), "resolved worker and main changes\n");
+  git(repoPath, "add", "shared.txt");
+  git(repoPath, "-c", "core.editor=true", "rebase", "--continue");
+
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  await fs.appendFile(path.join(repoPath, ".git", "info", "exclude"), "\n.maestro.json\n");
+  await fs.writeFile(manifestPath, `${JSON.stringify({
+    repository: "example/repo",
+    defaultBranch: "main",
+    work: { "7": { status: "ready" } }
+  })}\n`);
+  const binPath = path.join(root, "bin");
+  await fs.mkdir(binPath);
+  await fs.writeFile(path.join(binPath, "codex"), `#!/usr/bin/env node
+const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
+const reportIndex = process.argv.indexOf("--output-last-message");
+if (process.argv.includes("read-only")) {
+  fs.writeFileSync(process.argv[reportIndex + 1], "VERDICT: APPROVE\\nFresh validation passed.\\n");
+} else {
+  fs.writeFileSync("correction.txt", "validator correction\\n");
+  spawnSync("git", ["add", "correction.txt"], { stdio: "inherit" });
+  spawnSync("git", ["commit", "-q", "-m", "validator correction"], { stdio: "inherit" });
+  fs.writeFileSync(process.argv[reportIndex + 1], "Result: complete\\nCorrection committed.\\n");
+}
+`);
+  await fs.chmod(path.join(binPath, "codex"), 0o755);
+
+  const [displayedExecutable, ...displayedArgs] = attempt.conflict.continuationAction.split(" ");
+  assert.equal(displayedExecutable, "maestro");
+  const recovery = spawnSync(process.execPath, [
+    path.resolve(__dirname, "../bin/maestro.js"), ...displayedArgs
+  ], {
+    cwd: repoPath,
+    encoding: "utf8",
+    env: { ...process.env, PATH: `${binPath}${path.delimiter}${process.env.PATH}` }
+  });
+
+  assert.equal(recovery.status, 0, recovery.stderr);
+  const recovered = parseLeadingJson(recovery.stdout);
+  assert.equal(recovered.parentRunId, result.issues[0].finalRunId);
+  assert.equal(recovered.status, "awaiting-review");
+  assert.equal(recovered.workers.length, 1);
+  assert.equal(recovered.validations[0].verdict, "approve");
+  assert.deepEqual(recovered.reviews, {});
+  assert.deepEqual(recovered.integration || [], []);
+  assert.equal(recovered.correction.attempts["7"].number, 2);
+  assert.equal(recovered.correction.attempts["7"].sourceRunId, sourceRunId);
+  assert.match(recovery.stdout, /Recommended: `maestro approve 7`/);
+
+  const preservedConflict = await loadRunState(repoPath, result.issues[0].finalRunId);
+  assert.equal(preservedConflict.correction.attempts["7"].outcome, "technical-conflict");
+  assert.equal(preservedConflict.autoRework["7"].attemptsUsed, 1);
 });
 
 test("issue-local automatic rework lets an independent sibling approve after another gates", async (t) => {

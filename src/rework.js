@@ -92,7 +92,22 @@ async function resolveIssueReworkSources(repoPath, issueIds) {
   return [...grouped.entries()].map(([sourceRunId, issues]) => ({ sourceRunId, issueIds: issues }));
 }
 
-async function refreshWorker(worker, { defaultBranch = "main", runner = runChecked } = {}) {
+async function resolveReworkParentRunId(repoPath, sourceRunId, issueIds) {
+  const issues = [...new Set((issueIds || []).map(String))];
+  if (issues.length !== 1) return sourceRunId;
+  const [current] = await resolveCurrentIssueStates(repoPath, issues);
+  const correction = current?.evidence?.correction;
+  if (
+    current?.state?.status === "failed" &&
+    correction?.outcome === "technical-conflict" &&
+    String(correction.sourceRunId) === String(sourceRunId)
+  ) {
+    return current.runId;
+  }
+  return sourceRunId;
+}
+
+async function refreshWorker(worker, { defaultBranch = "main", sourceRunId = null, runner = runChecked } = {}) {
   const status = (await runner("git", ["status", "--porcelain"], { cwd: worker.worktreePath })).stdout.trim();
   if (status) throw new Error(`Rework branch for issue #${worker.issue} is not clean:\n${status}`);
   await runner("git", ["fetch", "origin", defaultBranch], { cwd: worker.worktreePath });
@@ -110,7 +125,9 @@ async function refreshWorker(worker, { defaultBranch = "main", runner = runCheck
     } catch (abortFailure) {
       abortError = abortFailure.message;
     }
-    const continuationAction = `maestro rework ${worker.issue}`;
+    const continuationAction = sourceRunId
+      ? `maestro rework ${worker.issue} --run ${sourceRunId}`
+      : `maestro rework ${worker.issue}`;
     const wrapped = new Error(
       `Rework refresh for issue #${worker.issue} failed before its correction worker started. ` +
       `Maestro ${operationState === "aborted" ? "aborted" : "could not abort"} its rebase so the implementation remains at ${worker.worktreePath}. ` +
@@ -148,6 +165,7 @@ async function refreshWorker(worker, { defaultBranch = "main", runner = runCheck
 async function executeReworkRun(config, {
   repoPath,
   sourceRunId,
+  parentRunId = sourceRunId,
   issueIds = null,
   runId = newRunId(),
   runner = runChecked,
@@ -208,7 +226,7 @@ async function executeReworkRun(config, {
   const attempts = {};
   for (const worker of candidates) {
     const issue = String(worker.issue);
-    const lineage = await loadCorrectionLineage(repoPath, sourceRunId, issue, stateLoader);
+    const lineage = await loadCorrectionLineage(repoPath, parentRunId, issue, stateLoader);
     attempts[issue] = {
       number: lineage.attempts.length + 1,
       automatic,
@@ -230,7 +248,7 @@ async function executeReworkRun(config, {
 
   const result = {
     runId,
-    parentRunId: sourceRunId,
+    parentRunId,
     mode: "rework",
     status: "running",
     repoPath,
@@ -253,7 +271,11 @@ async function executeReworkRun(config, {
     const refreshed = [];
     for (const worker of candidates) {
       console.error(`[Maestro] rework #${worker.issue}: rebasing existing implementation onto current ${config.defaultBranch || "main"}`);
-      refreshed.push(await refreshWorker(worker, { defaultBranch: config.defaultBranch || "main", runner }));
+      refreshed.push(await refreshWorker(worker, {
+        defaultBranch: config.defaultBranch || "main",
+        sourceRunId,
+        runner
+      }));
       result.correction.attempts[String(worker.issue)].phase = "worker-pending";
       await stateSaver(repoPath, runId, result);
     }
@@ -499,6 +521,7 @@ async function autoRework(config, {
 module.exports = {
   DEFAULT_AUTO_REWORK_LIMIT,
   resolveIssueReworkSources,
+  resolveReworkParentRunId,
   refreshWorker,
   loadCorrectionLineage,
   resultOutcome,

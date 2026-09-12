@@ -10,7 +10,12 @@ const { recordReview } = require("../src/reviews");
 const { approveIssues, formatApprovalSummary } = require("../src/approval");
 const { discardIssues, formatDiscardSummary } = require("../src/discard");
 const { integrateExistingRun } = require("../src/existing-run");
-const { resolveIssueReworkSources, executeReworkRun, autoRework } = require("../src/rework");
+const {
+  resolveIssueReworkSources,
+  resolveReworkParentRunId,
+  executeReworkRun,
+  autoRework
+} = require("../src/rework");
 const { executeReconcileRun } = require("../src/reconcile");
 const { latestRunId } = require("../src/run-store");
 const { statusSnapshot, formatStatus, watchStatus } = require("../src/display");
@@ -381,9 +386,14 @@ async function main() {
   if (command === "rework") {
     const sourceRunId = option(args, "--run");
     const requestedIssues = reworkArgs.issues;
-    const sources = sourceRunId
-      ? [{ sourceRunId, issueIds: requestedIssues.length ? requestedIssues : null }]
-      : await resolveIssueReworkSources(repoPath, requestedIssues);
+    let sources;
+    if (sourceRunId) {
+      const issueIds = requestedIssues.length ? requestedIssues : null;
+      const parentRunId = await resolveReworkParentRunId(repoPath, sourceRunId, issueIds);
+      sources = [{ sourceRunId, parentRunId, issueIds }];
+    } else {
+      sources = await resolveIssueReworkSources(repoPath, requestedIssues);
+    }
     const results = [];
     for (const source of sources) {
       results.push(await executeReworkRun(config, { repoPath, ...source }));

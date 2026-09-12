@@ -132,7 +132,7 @@ test("details renders technical conflict evidence and exact continuation", async
       interruptedStage: "rework-refresh",
       conflictedFiles: ["src/shared.js"],
       targetRef: "origin/main",
-      continuationAction: "maestro rework 7",
+      continuationAction: "maestro rework 7 --run 20260910010101-aaaaaa",
       stderr: "CONFLICT (content): Merge conflict in src/shared.js"
     }
   } } };
@@ -142,7 +142,7 @@ test("details renders technical conflict evidence and exact continuation", async
   assert.match(text, /Outcome: technical-conflict/);
   assert.match(text, /Operation state: aborted/);
   assert.match(text, /Conflicted files: src\/shared\.js/);
-  assert.match(text, /Continuation action: maestro rework 7/);
+  assert.match(text, /Continuation action: maestro rework 7 --run 20260910010101-aaaaaa/);
 });
 
 test("multiple issues resolve independently and explicit runs inspect history", async (t) => {
