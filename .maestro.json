@@ -1,7 +1,7 @@
 {
   "repository": "jmirving/Maestro",
   "defaultBranch": "main",
-  "defaultConcurrency": 2,
+  "defaultConcurrency": 3,
   "baseline": {
     "commands": [
       "npm test"
@@ -29,7 +29,21 @@
       "priority": 100,
       "requires": [
         "node"
-      ]
+      ],
+      "github": {
+        "state": "CLOSED",
+        "stateReason": null,
+        "closedAt": "2026-09-10T23:11:13Z",
+        "updatedAt": "2026-09-10T23:11:13Z",
+        "title": "Add latest-relevant run resolution for issue-oriented CLI commands",
+        "labels": [],
+        "blockedBy": [],
+        "manual": {
+          "requires": [
+            "node"
+          ]
+        }
+      }
     },
     "3": {
       "status": "complete",
@@ -40,7 +54,26 @@
       ],
       "requires": [
         "node"
-      ]
+      ],
+      "github": {
+        "state": "CLOSED",
+        "stateReason": null,
+        "closedAt": "2026-09-11T20:34:05Z",
+        "updatedAt": "2026-09-11T20:34:05Z",
+        "title": "Make `maestro status` the primary decision surface",
+        "labels": [],
+        "blockedBy": [
+          "2"
+        ],
+        "manual": {
+          "blockedBy": [
+            "2"
+          ],
+          "requires": [
+            "node"
+          ]
+        }
+      }
     },
     "4": {
       "status": "complete",
@@ -51,7 +84,26 @@
       ],
       "requires": [
         "node"
-      ]
+      ],
+      "github": {
+        "state": "CLOSED",
+        "stateReason": null,
+        "closedAt": "2026-09-11T19:37:05Z",
+        "updatedAt": "2026-09-11T19:37:05Z",
+        "title": "Add `maestro details` for issue-level worker and validator evidence",
+        "labels": [],
+        "blockedBy": [
+          "2"
+        ],
+        "manual": {
+          "blockedBy": [
+            "2"
+          ],
+          "requires": [
+            "node"
+          ]
+        }
+      }
     },
     "5": {
       "status": "complete",
@@ -62,7 +114,26 @@
       ],
       "requires": [
         "node"
-      ]
+      ],
+      "github": {
+        "state": "CLOSED",
+        "stateReason": null,
+        "closedAt": "2026-09-11T20:44:36Z",
+        "updatedAt": "2026-09-11T20:44:36Z",
+        "title": "Make `maestro rework` issue-oriented and run-ID optional",
+        "labels": [],
+        "blockedBy": [
+          "2"
+        ],
+        "manual": {
+          "blockedBy": [
+            "2"
+          ],
+          "requires": [
+            "node"
+          ]
+        }
+      }
     },
     "6": {
       "status": "complete",
@@ -75,7 +146,30 @@
       ],
       "requires": [
         "node"
-      ]
+      ],
+      "github": {
+        "state": "CLOSED",
+        "stateReason": null,
+        "closedAt": "2026-09-11T21:17:51Z",
+        "updatedAt": "2026-09-11T21:17:51Z",
+        "title": "Add actionable recommendation footer to Maestro command output",
+        "labels": [],
+        "blockedBy": [
+          "3",
+          "4",
+          "5"
+        ],
+        "manual": {
+          "blockedBy": [
+            "3",
+            "4",
+            "5"
+          ],
+          "requires": [
+            "node"
+          ]
+        }
+      }
     },
     "7": {
       "status": "complete",
@@ -87,7 +181,27 @@
       ],
       "requires": [
         "node"
-      ]
+      ],
+      "github": {
+        "state": "CLOSED",
+        "stateReason": null,
+        "closedAt": "2026-09-11T23:31:26Z",
+        "updatedAt": "2026-09-11T23:31:26Z",
+        "title": "Add ergonomic human override and discard dispositions for validator rework",
+        "labels": [],
+        "blockedBy": [
+          "3"
+        ],
+        "manual": {
+          "blockedBy": [
+            "3",
+            "5"
+          ],
+          "requires": [
+            "node"
+          ]
+        }
+      }
     },
     "8": {
       "status": "complete",
@@ -95,7 +209,21 @@
       "priority": 70,
       "requires": [
         "node"
-      ]
+      ],
+      "github": {
+        "state": "CLOSED",
+        "stateReason": null,
+        "closedAt": "2026-09-10T13:32:41Z",
+        "updatedAt": "2026-09-10T13:32:41Z",
+        "title": "Add `maestro draft` to build and refresh `.maestro.json` from GitHub issues",
+        "labels": [],
+        "blockedBy": [],
+        "manual": {
+          "requires": [
+            "node"
+          ]
+        }
+      }
     },
     "9": {
       "status": "complete",
@@ -106,7 +234,26 @@
       ],
       "requires": [
         "node"
-      ]
+      ],
+      "github": {
+        "state": "CLOSED",
+        "stateReason": null,
+        "closedAt": "2026-09-10T13:17:34Z",
+        "updatedAt": "2026-09-10T13:17:34Z",
+        "title": "Add explainable dependency and parallelism analysis to `maestro draft`",
+        "labels": [],
+        "blockedBy": [
+          "8"
+        ],
+        "manual": {
+          "blockedBy": [
+            "8"
+          ],
+          "requires": [
+            "node"
+          ]
+        }
+      }
     },
     "10": {
       "status": "complete",
@@ -118,7 +265,28 @@
       ],
       "requires": [
         "node"
-      ]
+      ],
+      "github": {
+        "state": "CLOSED",
+        "stateReason": null,
+        "closedAt": "2026-09-11T19:26:01Z",
+        "updatedAt": "2026-09-11T19:26:01Z",
+        "title": "Add optional agent-assisted planning for semantic dependency and conflict inference",
+        "labels": [],
+        "blockedBy": [
+          "8",
+          "9"
+        ],
+        "manual": {
+          "blockedBy": [
+            "8",
+            "9"
+          ],
+          "requires": [
+            "node"
+          ]
+        }
+      }
     },
     "11": {
       "status": "complete",
@@ -133,7 +301,28 @@
       ],
       "requires": [
         "node"
-      ]
+      ],
+      "github": {
+        "state": "CLOSED",
+        "stateReason": null,
+        "closedAt": "2026-09-11T23:59:15Z",
+        "updatedAt": "2026-09-11T23:59:15Z",
+        "title": "Make `maestro help` a practical workflow guide with command-specific guidance",
+        "labels": [],
+        "blockedBy": [],
+        "manual": {
+          "blockedBy": [
+            "3",
+            "4",
+            "5",
+            "7",
+            "8"
+          ],
+          "requires": [
+            "node"
+          ]
+        }
+      }
     },
     "12": {
       "status": "complete",
@@ -144,7 +333,26 @@
       ],
       "requires": [
         "node"
-      ]
+      ],
+      "github": {
+        "state": "CLOSED",
+        "stateReason": null,
+        "closedAt": "2026-09-11T19:57:15Z",
+        "updatedAt": "2026-09-11T19:57:15Z",
+        "title": "Make `maestro approve` issue-oriented and run-ID optional across diverged rework runs",
+        "labels": [],
+        "blockedBy": [
+          "2"
+        ],
+        "manual": {
+          "blockedBy": [
+            "2"
+          ],
+          "requires": [
+            "node"
+          ]
+        }
+      }
     },
     "13": {
       "status": "complete",
@@ -152,7 +360,21 @@
       "priority": 95,
       "requires": [
         "node"
-      ]
+      ],
+      "github": {
+        "state": "CLOSED",
+        "stateReason": null,
+        "closedAt": "2026-09-11T19:29:33Z",
+        "updatedAt": "2026-09-11T19:29:33Z",
+        "title": "Allow `maestro commit` to handle the target `.maestro.json` manifest without self-blocking on cleanliness",
+        "labels": [],
+        "blockedBy": [],
+        "manual": {
+          "requires": [
+            "node"
+          ]
+        }
+      }
     },
     "14": {
       "status": "complete",
@@ -160,47 +382,158 @@
       "priority": 95,
       "requires": [
         "node"
-      ]
+      ],
+      "github": {
+        "state": "CLOSED",
+        "stateReason": null,
+        "closedAt": "2026-09-10T13:18:06Z",
+        "updatedAt": "2026-09-10T13:18:06Z",
+        "title": "Prevent `maestro next` from rerunning already-worked items before integration/completion",
+        "labels": [],
+        "blockedBy": [],
+        "manual": {
+          "requires": [
+            "node"
+          ]
+        }
+      }
     },
     "15": {
-      "status": "complete"
+      "status": "complete",
+      "github": {
+        "state": "CLOSED",
+        "stateReason": null,
+        "closedAt": "2026-09-11T23:59:21Z",
+        "updatedAt": "2026-09-11T23:59:21Z",
+        "title": "Add regression coverage for resuming partially integrated runs",
+        "labels": [],
+        "blockedBy": []
+      }
     },
     "16": {
-      "status": "complete"
+      "status": "complete",
+      "github": {
+        "state": "CLOSED",
+        "stateReason": null,
+        "closedAt": "2026-09-12T15:12:15Z",
+        "updatedAt": "2026-09-12T15:12:15Z",
+        "title": "Automatically rework validator failures until human intervention is required",
+        "labels": [],
+        "blockedBy": []
+      }
     },
     "17": {
-      "status": "complete"
+      "status": "complete",
+      "github": {
+        "state": "CLOSED",
+        "stateReason": null,
+        "closedAt": "2026-09-12T16:39:51Z",
+        "updatedAt": "2026-09-12T16:39:51Z",
+        "title": "Reconcile GitHub and `.maestro.json` state drift before execution",
+        "labels": [],
+        "blockedBy": []
+      }
     },
     "18": {
       "status": "ready",
-      "priority": 110
+      "priority": 110,
+      "github": {
+        "state": "OPEN",
+        "stateReason": null,
+        "closedAt": null,
+        "updatedAt": "2026-09-11T21:18:42Z",
+        "title": "Keep worker capacity filled across rework/review/integration lifecycle states",
+        "labels": [],
+        "blockedBy": []
+      }
     },
     "19": {
       "status": "ready",
-      "priority": 30
+      "priority": 30,
+      "github": {
+        "state": "OPEN",
+        "stateReason": null,
+        "closedAt": null,
+        "updatedAt": "2026-09-11T21:15:48Z",
+        "title": "Handle Git conflicts as recoverable lifecycle state across rework and integration",
+        "labels": [],
+        "blockedBy": []
+      }
     },
     "20": {
-      "status": "ready",
-      "priority": 130
+      "status": "complete",
+      "priority": 130,
+      "github": {
+        "state": "OPEN",
+        "stateReason": null,
+        "closedAt": null,
+        "updatedAt": "2026-09-11T20:29:41Z",
+        "title": "Make draft output compact by default with readable dependency summaries",
+        "labels": [],
+        "blockedBy": []
+      }
     },
     "21": {
       "status": "ready",
-      "priority": 120
+      "priority": 120,
+      "github": {
+        "state": "OPEN",
+        "stateReason": null,
+        "closedAt": null,
+        "updatedAt": "2026-09-11T21:19:21Z",
+        "title": "Add per-run concurrency overrides and a CLI command to save the manifest default",
+        "labels": [],
+        "blockedBy": []
+      }
     },
     "22": {
       "status": "ready",
-      "priority": 10
+      "priority": 10,
+      "github": {
+        "state": "OPEN",
+        "stateReason": null,
+        "closedAt": null,
+        "updatedAt": "2026-09-11T20:47:57Z",
+        "title": "Fix status and commit eligibility resurrecting completed or superseded run items",
+        "labels": [],
+        "blockedBy": []
+      }
     },
     "23": {
       "status": "ready",
-      "priority": 140
+      "priority": 140,
+      "github": {
+        "state": "OPEN",
+        "stateReason": null,
+        "closedAt": null,
+        "updatedAt": "2026-09-11T20:48:31Z",
+        "title": "Group status by actionable state and collapse completed history by default",
+        "labels": [],
+        "blockedBy": []
+      }
     },
     "24": {
       "status": "ready",
       "priority": 20,
       "blockedBy": [
         "17"
-      ]
+      ],
+      "github": {
+        "state": "OPEN",
+        "stateReason": null,
+        "closedAt": null,
+        "updatedAt": "2026-09-11T21:12:34Z",
+        "title": "Add named worksets, epic scope resolution, and workset-aware agent drafting",
+        "labels": [],
+        "blockedBy": [
+          "17"
+        ],
+        "manual": {
+          "blockedBy": [
+            "17"
+          ]
+        }
+      }
     },
     "25": {
       "status": "ready",
@@ -208,7 +541,25 @@
       "blockedBy": [
         "24",
         "22"
-      ]
+      ],
+      "github": {
+        "state": "OPEN",
+        "stateReason": null,
+        "closedAt": null,
+        "updatedAt": "2026-09-11T21:13:04Z",
+        "title": "Add scoped delegated review and integration authorization",
+        "labels": [],
+        "blockedBy": [
+          "24",
+          "22"
+        ],
+        "manual": {
+          "blockedBy": [
+            "24",
+            "22"
+          ]
+        }
+      }
     },
     "26": {
       "status": "ready",
@@ -217,7 +568,27 @@
         "19",
         "16",
         "22"
-      ]
+      ],
+      "github": {
+        "state": "OPEN",
+        "stateReason": null,
+        "closedAt": null,
+        "updatedAt": "2026-09-11T21:13:45Z",
+        "title": "Unify agent-assisted Git conflict resolution and integration-failure recovery",
+        "labels": [],
+        "blockedBy": [
+          "19",
+          "16",
+          "22"
+        ],
+        "manual": {
+          "blockedBy": [
+            "19",
+            "16",
+            "22"
+          ]
+        }
+      }
     },
     "27": {
       "status": "ready",
@@ -229,7 +600,33 @@
         "15",
         "22",
         "11"
-      ]
+      ],
+      "github": {
+        "state": "OPEN",
+        "stateReason": null,
+        "closedAt": null,
+        "updatedAt": "2026-09-11T21:14:28Z",
+        "title": "Add a durable autonomous workflow controller with intuitive direct and workset lifecycles",
+        "labels": [],
+        "blockedBy": [
+          "24",
+          "25",
+          "26",
+          "15",
+          "22",
+          "11"
+        ],
+        "manual": {
+          "blockedBy": [
+            "24",
+            "25",
+            "26",
+            "15",
+            "22",
+            "11"
+          ]
+        }
+      }
     },
     "28": {
       "status": "ready",
@@ -239,11 +636,42 @@
         "26",
         "24",
         "22"
-      ]
+      ],
+      "github": {
+        "state": "OPEN",
+        "stateReason": null,
+        "closedAt": null,
+        "updatedAt": "2026-09-11T21:15:06Z",
+        "title": "Verify workset completion against explicit acceptance criteria and end-to-end evidence",
+        "labels": [],
+        "blockedBy": [
+          "27",
+          "26",
+          "24",
+          "22"
+        ],
+        "manual": {
+          "blockedBy": [
+            "27",
+            "26",
+            "24",
+            "22"
+          ]
+        }
+      }
     },
     "29": {
       "status": "ready",
-      "priority": 15
+      "priority": 15,
+      "github": {
+        "state": "OPEN",
+        "stateReason": null,
+        "closedAt": null,
+        "updatedAt": "2026-09-12T16:53:21Z",
+        "title": "Fix `draft --agent` failing with Codex `invalid_json_schema` / unsupported `uniqueItems`",
+        "labels": [],
+        "blockedBy": []
+      }
     }
   }
 }
