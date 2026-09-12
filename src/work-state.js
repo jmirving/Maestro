@@ -4,6 +4,7 @@ const { computePlan } = require("./planner");
 const { loadPersistedRunStates } = require("./run-store");
 const { reportRootForRepo } = require("./reporter");
 const { classifyRunIssue } = require("./run-lifecycle");
+const { currentIssueEvidenceFromStates } = require("./run-resolver");
 
 async function loadExecutionStates(repoPath) {
   const states = await loadPersistedRunStates(repoPath);
@@ -38,31 +39,26 @@ async function loadExecutionStates(repoPath) {
 
 function unresolvedWork(states) {
   const byIssue = new Map();
-  for (const state of [...states].sort((a, b) => String(a.runId).localeCompare(String(b.runId)))) {
-    for (const worker of state.workers || []) {
-      const issue = String(worker.issue);
+  for (const { issue, runId, state, evidence } of currentIssueEvidenceFromStates(states)) {
+    if (evidence.worker) {
+      const worker = evidence.worker;
       const lifecycle = classifyRunIssue(state, worker);
-      if (lifecycle.state === "discarded") {
-        byIssue.delete(issue);
-        continue;
+      if (lifecycle.state !== "discarded") {
+        byIssue.set(issue, { issue, runId, mode: state.mode, ...lifecycle });
       }
-      byIssue.set(issue, { issue, runId: state.runId, mode: state.mode, ...lifecycle });
+      continue;
     }
-    if (["running", "failed"].includes(state.status)) {
-      for (const item of state.plan?.selected || []) {
-        const issue = String(item.id);
-        if (!(state.workers || []).some((worker) => String(worker.issue) === issue)) {
-          byIssue.set(issue, {
-            issue,
-            runId: state.runId,
-            mode: state.mode,
-            state: state.status === "failed"
-              ? "failed-awaiting-retry"
-              : state.mode === "rework" ? "rework-running" : "running",
-            action: state.status === "failed" ? "maestro start --rerun" : "maestro status"
-          });
-        }
-      }
+
+    if (evidence.selected && ["running", "failed"].includes(state.status)) {
+      byIssue.set(issue, {
+        issue,
+        runId,
+        mode: state.mode,
+        state: state.status === "failed"
+          ? "failed-awaiting-retry"
+          : state.mode === "rework" ? "rework-running" : "running",
+        action: state.status === "failed" ? "maestro start --rerun" : "maestro status"
+      });
     }
   }
   return byIssue;

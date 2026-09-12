@@ -5,7 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { computePlan } = require("../src/planner");
-const { saveRunState } = require("../src/run-store");
+const { saveRunState, loadPersistedRunStates } = require("../src/run-store");
 
 function parseLeadingJson(stdout) {
   return JSON.parse(stdout.split("\n\nIssue #", 1)[0]);
@@ -81,6 +81,61 @@ test("an active rework child supersedes the source rework recommendation", () =>
   assert.equal(plan.selected.length, 0);
   assert.equal(plan.deferred[0].lifecycle.state, "rework-running");
   assert.deepEqual(plan.recommendations, ["maestro status"]);
+});
+
+test("next --auto-rework preserves a lexically lower same-second running child and its capacity", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-running-lineage-"));
+  const repoPath = path.join(root, "target");
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  const parentRunId = "20260910010101-ffffff";
+  const childRunId = "20260910010101-000001";
+  await fs.mkdir(repoPath);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(manifestPath, `${JSON.stringify(config({
+    "7": { status: "ready" },
+    "8": { status: "ready" }
+  }, 1))}\n`);
+  await saveRunState(repoPath, parentRunId, {
+    runId: parentRunId,
+    mode: "execute",
+    status: "awaiting-review",
+    plan: { selected: [{ id: "7" }] },
+    workers: [worker(7)],
+    validations: [{ issue: "7", verdict: "rework" }],
+    reviews: {}
+  });
+  await saveRunState(repoPath, childRunId, {
+    runId: childRunId,
+    parentRunId,
+    mode: "rework",
+    status: "running",
+    plan: { selected: [{ id: "7" }] },
+    workers: [],
+    validations: [],
+    reviews: {}
+  });
+  const before = await loadPersistedRunStates(repoPath);
+
+  const result = spawnSync(process.execPath, [
+    path.resolve(__dirname, "../bin/maestro.js"),
+    "next",
+    manifestPath,
+    "--auto-rework",
+    "--repo-path",
+    repoPath
+  ], { encoding: "utf8" });
+
+  assert.equal(result.status, 0, result.stderr);
+  const output = parseLeadingJson(result.stdout);
+  assert.deepEqual(output.plan.selected, []);
+  assert.equal(output.plan.availableConcurrency, 0);
+  assert.deepEqual(output.plan.active.map(({ issue, runId, state }) => ({ issue, runId, state })), [{
+    issue: "7",
+    runId: childRunId,
+    state: "rework-running"
+  }]);
+  assert.deepEqual(output.autoRework.issues, []);
+  assert.deepEqual(await loadPersistedRunStates(repoPath), before);
 });
 
 test("persisted lifecycle blocks repeated next plans and completion unlocks dependents", async (t) => {
