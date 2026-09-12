@@ -114,6 +114,37 @@ test("rework details relate the correction to source worker and validator eviden
   assert.match(text, /Missing regression coverage/);
 });
 
+test("details renders technical conflict evidence and exact continuation", async (t) => {
+  const { repoPath } = await fixture(t);
+  const state = persistedRun("20260910020202-bbbbbb", "7", { mode: "rework" });
+  state.status = "failed";
+  state.workers = [];
+  state.validations = [];
+  state.correction = { attempts: { "7": {
+    number: 1,
+    automatic: true,
+    phase: "stopped",
+    outcome: "technical-conflict",
+    conflict: {
+      type: "content",
+      operation: "rebase",
+      operationState: "aborted",
+      interruptedStage: "rework-refresh",
+      conflictedFiles: ["src/shared.js"],
+      targetRef: "origin/main",
+      continuationAction: "maestro rework 7",
+      stderr: "CONFLICT (content): Merge conflict in src/shared.js"
+    }
+  } } };
+  await saveRunState(repoPath, state.runId, state);
+
+  const text = formatDetails(await loadIssueDetails(repoPath, ["7"]));
+  assert.match(text, /Outcome: technical-conflict/);
+  assert.match(text, /Operation state: aborted/);
+  assert.match(text, /Conflicted files: src\/shared\.js/);
+  assert.match(text, /Continuation action: maestro rework 7/);
+});
+
 test("multiple issues resolve independently and explicit runs inspect history", async (t) => {
   const { repoPath } = await fixture(t);
   const historical = persistedRun("20260910010101-aaaaaa", "7", { verdict: "rework" });

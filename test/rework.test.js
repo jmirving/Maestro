@@ -12,6 +12,12 @@ function parseLeadingJson(stdout) {
   return JSON.parse(stdout.split("\n\nIssue #", 1)[0]);
 }
 
+function git(cwd, ...args) {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  assert.equal(result.status, 0, `git ${args.join(" ")} failed:\n${result.stderr}`);
+  return result.stdout.trim();
+}
+
 async function autoFixture(t, issues = ["7"]) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-auto-rework-"));
   const repoPath = path.join(root, "target");
@@ -448,11 +454,123 @@ test("automatic rework fails safely on worker, validator, and pre-worker refresh
     issueIds: ["7"],
     reworkOptions: { runner: async () => { throw new Error("refresh failed"); } }
   });
-  assert.equal(refreshFailure.issues[0].outcome, "worker-or-infrastructure-failure");
+  assert.equal(refreshFailure.issues[0].outcome, "infrastructure-failure");
   const refreshState = await loadRunState(refreshFixture.repoPath, refreshFailure.issues[0].finalRunId);
   assert.equal(refreshState.correction.attempts["7"].number, 1);
   assert.equal(refreshState.correction.attempts["7"].phase, "stopped");
   assert.equal(refreshState.correction.attempts["7"].outcome, "infrastructure-failure");
+});
+
+test("automatic rework treats missing validation as validator failure", async (t) => {
+  const fixture = await autoFixture(t);
+  let validatorCalls = 0;
+  const result = await autoRework(fixture.config, {
+    repoPath: fixture.repoPath,
+    issueIds: ["7"],
+    reworkOptions: {
+      runner: fixture.runner,
+      workerExecutor: async ({ worktree }) => ({
+        issue: "7",
+        exitCode: 0,
+        ...worktree,
+        headSha: worktree.baseSha,
+        report: "no new commit"
+      }),
+      validatorExecutor: async () => {
+        validatorCalls += 1;
+        return { issue: "7", exitCode: 0, verdict: "approve" };
+      }
+    }
+  });
+
+  assert.equal(validatorCalls, 0);
+  assert.equal(result.issues[0].outcome, "validator-failure");
+  const state = await loadRunState(fixture.repoPath, result.issues[0].finalRunId);
+  assert.deepEqual(state.validations, []);
+  assert.equal(state.correction.attempts["7"].outcome, "validator-failure");
+  assert.equal(state.autoRework["7"].status, "validator-failure");
+});
+
+test("automatic rework persists an actual rebase content conflict and aborts before launching a worker", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-rework-conflict-"));
+  const repoPath = path.join(root, "target");
+  const originPath = path.join(root, "origin.git");
+  const sourceRunId = "20260910010101-aaaaaa";
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  await fs.mkdir(repoPath);
+  git(root, "init", "--bare", "-q", originPath);
+  git(repoPath, "init", "-q", "-b", "main");
+  git(repoPath, "config", "user.email", "maestro@example.test");
+  git(repoPath, "config", "user.name", "Maestro Test");
+  await fs.writeFile(path.join(repoPath, "shared.txt"), "base\n");
+  git(repoPath, "add", "shared.txt");
+  git(repoPath, "commit", "-q", "-m", "base");
+  const baseSha = git(repoPath, "rev-parse", "HEAD");
+  git(repoPath, "remote", "add", "origin", originPath);
+  git(repoPath, "push", "-q", "-u", "origin", "main");
+  git(repoPath, "checkout", "-q", "-b", "maestro/7");
+  await fs.writeFile(path.join(repoPath, "shared.txt"), "worker change\n");
+  git(repoPath, "commit", "-qam", "worker change");
+  const workerHeadSha = git(repoPath, "rev-parse", "HEAD");
+  git(repoPath, "checkout", "-q", "main");
+  await fs.writeFile(path.join(repoPath, "shared.txt"), "main change\n");
+  git(repoPath, "commit", "-qam", "main change");
+  git(repoPath, "push", "-q", "origin", "main");
+  git(repoPath, "checkout", "-q", "maestro/7");
+
+  await saveRunState(repoPath, sourceRunId, {
+    runId: sourceRunId,
+    mode: "execute",
+    status: "awaiting-review",
+    plan: { selected: [{ id: "7" }] },
+    workers: [{
+      issue: "7",
+      exitCode: 0,
+      baseSha,
+      headSha: workerHeadSha,
+      branch: "maestro/7",
+      worktreePath: repoPath,
+      report: "original implementation"
+    }],
+    validations: [{ issue: "7", exitCode: 0, verdict: "rework", report: "fix it" }],
+    reviews: {}
+  });
+
+  let workerCalls = 0;
+  const result = await autoRework({
+    repository: "example/repo",
+    defaultBranch: "main",
+    work: { "7": { status: "ready" } }
+  }, {
+    repoPath,
+    issueIds: ["7"],
+    reworkOptions: {
+      workerExecutor: async () => {
+        workerCalls += 1;
+        throw new Error("worker must not start");
+      }
+    }
+  });
+
+  assert.equal(result.issues[0].outcome, "technical-conflict");
+  assert.equal(workerCalls, 0);
+  const state = await loadRunState(repoPath, result.issues[0].finalRunId);
+  const attempt = state.correction.attempts["7"];
+  assert.equal(attempt.number, 1);
+  assert.equal(attempt.phase, "stopped");
+  assert.equal(attempt.outcome, "technical-conflict");
+  assert.deepEqual(attempt.conflict.conflictedFiles, ["shared.txt"]);
+  assert.equal(attempt.conflict.operation, "rebase");
+  assert.equal(attempt.conflict.operationState, "aborted");
+  assert.equal(attempt.conflict.interruptedStage, "rework-refresh");
+  assert.equal(attempt.conflict.continuationAction, "maestro rework 7");
+  assert.match(attempt.conflict.stderr, /could not apply.*worker change/s);
+  assert.equal(state.autoRework["7"].status, "technical-conflict");
+  assert.equal(state.autoRework["7"].attemptsUsed, 1);
+  assert.equal(state.autoRework["7"].action, "maestro details 7");
+  assert.equal(git(repoPath, "status", "--porcelain"), "");
+  assert.equal(git(repoPath, "rev-parse", "HEAD"), workerHeadSha);
 });
 
 test("issue-local automatic rework lets an independent sibling approve after another gates", async (t) => {

@@ -86,12 +86,19 @@ function describeIssue(config, issue, evidence, plan) {
   } else if (validation?.verdict === "human_gate") {
     state = "validator requested a human decision, awaiting human disposition";
     integrationState = "not eligible until human disposition";
-  } else if (["worker-failure", "validator-failure", "infrastructure-failure"].includes(evidence?.autoRework?.status || evidence?.correction?.outcome)) {
+  } else if (["worker-failure", "validator-failure", "infrastructure-failure", "technical-conflict"].includes(evidence?.autoRework?.status || evidence?.correction?.outcome)) {
     const outcome = evidence.autoRework?.status || evidence.correction.outcome;
     const attempt = evidence.autoRework?.attemptsUsed ?? evidence.correction?.number ?? 0;
-    state = `automatic correction stopped${attempt ? ` after attempt ${attempt}` : " before a correction attempt"}: ${outcome}; human attention required`;
-    integrationState = "not eligible; failure evidence is preserved";
-    action = `maestro details ${issue}`;
+    const conflict = evidence.correction?.conflict;
+    state = outcome === "technical-conflict"
+      ? `automatic correction stopped after charged attempt ${attempt}: rebase content conflict (${conflict?.operationState || "state unknown"}); resolve safely, then run ${conflict?.continuationAction || `maestro rework ${issue}`}`
+      : `automatic correction stopped${attempt ? ` after attempt ${attempt}` : " before a correction attempt"}: ${outcome}; human attention required`;
+    integrationState = outcome === "technical-conflict"
+      ? "not eligible; conflicted implementation and recovery evidence are preserved"
+      : "not eligible; failure evidence is preserved";
+    action = outcome === "technical-conflict"
+      ? (evidence.autoRework?.action || `maestro details ${issue}`)
+      : `maestro details ${issue}`;
   } else if (evidence?.state === "running" || evidence?.state === "rework-running") {
     state = evidence.state === "rework-running" ? "rework in progress" : "worker in progress";
     action = "maestro status --watch";

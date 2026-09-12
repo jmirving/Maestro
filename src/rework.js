@@ -97,14 +97,48 @@ async function refreshWorker(worker, { defaultBranch = "main", runner = runCheck
   if (status) throw new Error(`Rework branch for issue #${worker.issue} is not clean:\n${status}`);
   await runner("git", ["fetch", "origin", defaultBranch], { cwd: worker.worktreePath });
   await runner("git", ["rebase", `origin/${defaultBranch}`], { cwd: worker.worktreePath }).catch(async (error) => {
-    try { await runner("git", ["rebase", "--abort"], { cwd: worker.worktreePath }); } catch {}
+    let conflictedFiles = [];
+    try {
+      const unmerged = await runner("git", ["diff", "--name-only", "--diff-filter=U"], { cwd: worker.worktreePath });
+      conflictedFiles = unmerged.stdout.split("\n").map((entry) => entry.trim()).filter(Boolean);
+    } catch {}
+    let operationState = "active";
+    let abortError = null;
+    try {
+      await runner("git", ["rebase", "--abort"], { cwd: worker.worktreePath });
+      operationState = "aborted";
+    } catch (abortFailure) {
+      abortError = abortFailure.message;
+    }
+    const continuationAction = `maestro rework ${worker.issue}`;
     const wrapped = new Error(
       `Rework refresh for issue #${worker.issue} failed before its correction worker started. ` +
-      `Maestro attempted to abort its rebase so the implementation remains at ${worker.worktreePath}. ` +
-      `Inspect \`maestro details ${worker.issue}\`; after resolving the refresh safely, rerun \`maestro rework ${worker.issue}\`. ` +
+      `Maestro ${operationState === "aborted" ? "aborted" : "could not abort"} its rebase so the implementation remains at ${worker.worktreePath}. ` +
+      `Inspect \`maestro details ${worker.issue}\`; after resolving the refresh safely, run \`${continuationAction}\`. ` +
       `Cause: ${error.message}`
     );
     wrapped.cause = error;
+    wrapped.issue = String(worker.issue);
+    if (conflictedFiles.length) {
+      wrapped.code = "REWORK_REFRESH_CONFLICT";
+      wrapped.outcome = "technical-conflict";
+      wrapped.conflict = {
+        type: "content",
+        operation: "rebase",
+        operationState,
+        interruptedStage: "rework-refresh",
+        conflictedFiles,
+        worktreePath: worker.worktreePath,
+        branch: worker.branch || null,
+        originalBaseSha: worker.baseSha || null,
+        targetBranch: defaultBranch,
+        targetRef: `origin/${defaultBranch}`,
+        continuationAction,
+        failure: error.message,
+        stderr: error.result?.stderr?.trim() || null,
+        ...(abortError ? { abortError } : {})
+      };
+    }
     throw wrapped;
   });
   const baseSha = (await runner("git", ["rev-parse", `origin/${defaultBranch}`], { cwd: worker.worktreePath })).stdout.trim();
@@ -275,10 +309,15 @@ async function executeReworkRun(config, {
   } catch (error) {
     result.status = "failed";
     result.failure = error.message;
-    for (const attempt of Object.values(result.correction.attempts)) {
+    for (const [issue, attempt] of Object.entries(result.correction.attempts)) {
       if (attempt.phase !== "completed") {
         attempt.phase = "stopped";
-        attempt.outcome = "infrastructure-failure";
+        if (error.code === "REWORK_REFRESH_CONFLICT" && String(error.issue) === issue) {
+          attempt.outcome = "technical-conflict";
+          attempt.conflict = error.conflict;
+        } else {
+          attempt.outcome = "infrastructure-failure";
+        }
       }
     }
     await stateSaver(repoPath, runId, result);
@@ -306,10 +345,13 @@ async function autoReworkIssue(config, {
 
     if (resolved.state.status === "failed") {
       const persistedOutcome = evidence.correction?.outcome;
-      const outcome = persistedOutcome === "validator-failure" || persistedOutcome === "worker-failure"
+      const outcome = ["validator-failure", "worker-failure", "technical-conflict"].includes(persistedOutcome)
         ? persistedOutcome
         : "infrastructure-failure";
-      await recordOutcome(resolved.runId, issue, { status: outcome, finalVerdict: validation?.verdict || null });
+      await recordOutcome(resolved.runId, issue, {
+        status: outcome,
+        finalVerdict: validation?.verdict || null
+      });
       return { issue: String(issue), outcome, finalRunId: resolved.runId, finalVerdict: validation?.verdict || null, runs };
     }
     if (!worker || worker.exitCode !== 0) {
@@ -373,10 +415,14 @@ async function autoReworkIssue(config, {
         };
       }
     } catch (error) {
-      await recordOutcome(runId, issue, { status: "infrastructure-failure", finalVerdict: null });
+      const outcome = error.code === "REWORK_REFRESH_CONFLICT" ? "technical-conflict" : "infrastructure-failure";
+      await recordOutcome(runId, issue, {
+        status: outcome,
+        finalVerdict: null
+      });
       return {
         issue: String(issue),
-        outcome: "worker-or-infrastructure-failure",
+        outcome,
         finalRunId: runId,
         error: error.message,
         runs
@@ -418,11 +464,11 @@ async function autoRework(config, {
         retryLimit,
         attemptsUsed: outcome.attemptsUsed ?? attempt?.number ?? 0,
         finalVerdict: outcome.finalVerdict ?? null,
-        action: ["approved"].includes(outcome.status)
+        action: outcome.action || (["approved"].includes(outcome.status)
           ? `maestro approve ${issue}`
           : outcome.status === "human-gate"
             ? `maestro review --run ${runId} --issue ${issue} --disposition rework-original`
-            : `maestro details ${issue}`
+            : `maestro details ${issue}`)
       };
       await stateSaver(repoPath, runId, state);
     });

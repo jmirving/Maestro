@@ -207,3 +207,31 @@ test("retry exhaustion is a human-review stop with lineage details instead of an
   assert.doesNotMatch(text, /Recommended: `maestro rework 7`/);
   assert.match(text, /Also available: `maestro rework 7`/);
 });
+
+test("status distinguishes a rework refresh conflict and shows its continuation", async () => {
+  const run = mixedRun();
+  run.status = "failed";
+  run.workers = [];
+  run.validations = [];
+  run.plan.selected = [{ id: "7", title: "Needs correction" }];
+  run.correction = { attempts: { "7": {
+    number: 1,
+    phase: "stopped",
+    outcome: "technical-conflict",
+    conflict: { operationState: "aborted", continuationAction: "maestro rework 7" }
+  } } };
+  run.autoRework = { "7": {
+    status: "technical-conflict",
+    retryLimit: 3,
+    attemptsUsed: 1,
+    action: "maestro details 7"
+  } };
+
+  const text = formatStatus(await statusSnapshot(config, "/unused", ["7"], {
+    stateLoader: async () => [run]
+  }));
+  assert.match(text, /charged attempt 1: rebase content conflict \(aborted\); resolve safely, then run maestro rework 7/);
+  assert.match(text, /Recommended: `maestro details 7`/);
+  assert.doesNotMatch(text, /validator requested rework/);
+  assert.doesNotMatch(text, /human decision/);
+});

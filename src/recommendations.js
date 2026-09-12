@@ -15,6 +15,7 @@ function buildRecommendations(items, readiness, selected, { states = [] } = {}) 
   const primary = [];
   const alternatives = [];
   const exhaustedRework = items.filter((item) => item.autoReworkStatus === "retry-exhausted");
+  const technicalConflicts = items.filter((item) => item.autoReworkStatus === "technical-conflict");
   const currentRework = items.filter((item) => item.validator === "rework" && !item.humanReview && item.autoReworkStatus !== "retry-exhausted");
   const reviewedRework = items.filter((item) => item.humanReview === "rework-original");
   const approvals = items.filter((item) => item.validator === "approve" && !item.humanReview);
@@ -37,6 +38,12 @@ function buildRecommendations(items, readiness, selected, { states = [] } = {}) 
       alternatives.push({ command: `maestro approve ${item.issue} --override` });
       alternatives.push({ command: `maestro discard ${item.issue}` });
     }
+  }
+
+  for (const item of technicalConflicts) {
+    const action = { command: item.action || `maestro details ${item.issue}` };
+    (primary.length ? alternatives : primary).push(action);
+    alternatives.push({ command: `maestro details ${item.issue}` });
   }
 
   if (approvals.length) {

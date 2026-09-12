@@ -96,6 +96,19 @@ function appendEvidence(lines, state, evidence, { heading = null } = {}) {
       lines.push(`  Trigger verdict: ${valueOrNone(evidence.correction.trigger.verdict)}`);
       appendReport(lines, "Trigger report", evidence.correction.trigger.report);
     }
+    if (evidence.correction.conflict) {
+      const conflict = evidence.correction.conflict;
+      lines.push("  Technical conflict:");
+      lines.push(`    Type: ${valueOrNone(conflict.type)}`);
+      lines.push(`    Operation: ${valueOrNone(conflict.operation)}`);
+      lines.push(`    Operation state: ${valueOrNone(conflict.operationState)}`);
+      lines.push(`    Interrupted stage: ${valueOrNone(conflict.interruptedStage)}`);
+      lines.push(`    Conflicted files: ${conflict.conflictedFiles?.length ? conflict.conflictedFiles.join(", ") : "none recorded"}`);
+      lines.push(`    Target ref: ${valueOrNone(conflict.targetRef)}`);
+      lines.push(`    Continuation action: ${valueOrNone(conflict.continuationAction)}`);
+      if (conflict.stderr) appendReport(lines, "Git evidence", conflict.stderr);
+      if (conflict.abortError) lines.push(`    Abort error: ${conflict.abortError}`);
+    }
   }
   if (evidence.autoRework) {
     lines.push("Automatic rework:");
