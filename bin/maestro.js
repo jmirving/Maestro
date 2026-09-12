@@ -4,7 +4,7 @@ const path = require("node:path");
 const { parseInvocation, resolveHelp } = require("../src/help");
 const { computePlan } = require("../src/planner");
 const { computeEffectivePlan, loadExecutionStates } = require("../src/work-state");
-const { dryRun, executeRun, executeAndIntegrate, continuousRun } = require("../src/controller");
+const { newRunId, dryRun, executeRun, executeAndIntegrate, continuousRun } = require("../src/controller");
 const { latestRunBundle, copyToClipboard } = require("../src/reporter");
 const { recordReview } = require("../src/reviews");
 const { approveIssues, formatApprovalSummary } = require("../src/approval");
@@ -17,7 +17,8 @@ const {
   autoRework
 } = require("../src/rework");
 const { executeReconcileRun } = require("../src/reconcile");
-const { latestRunId } = require("../src/run-store");
+const { latestRunId, loadRunState } = require("../src/run-store");
+const { resolveCurrentIssueStates } = require("../src/run-resolver");
 const { statusSnapshot, formatStatus, watchStatus } = require("../src/display");
 const { formatRecommendationFooter, appendRecommendationFooter } = require("../src/recommendations");
 const { loadIssueDetails, formatDetails } = require("../src/details");
@@ -28,6 +29,7 @@ const { runPlanningAnalyzer } = require("../src/planning-analysis");
 const { stableWorksetName, epicWorkset, issueWorkset, resolveWorksetScope, assertExecutableScope, validateWorksetName } = require("../src/worksets");
 const { loadScopeSnapshot, readScopeSnapshot } = require("../src/scope-store");
 const { persistScopedDraft } = require("../src/scoped-persistence");
+const { reserveReadyWork, reserveExplicitWork, capacityBatches, runCapacityPool } = require("../src/scheduler");
 const {
   resolveRepoPath,
   resolveManifestPath,
@@ -209,6 +211,17 @@ function setAutoReworkExitCode(result) {
 async function workflowFooter(config, repoPath, { includeIssues = true } = {}) {
   const snapshot = await statusSnapshot(config || { work: {} }, repoPath);
   return formatRecommendationFooter(snapshot, { includeIssues });
+}
+
+async function verifyExecutionSelection(config, repoPath, issueIds) {
+  if (!issueIds.length) return;
+  const repository = await discoverGitHubRepository(repoPath);
+  if (repository !== config.repository) throw new Error(`The manifest targets ${config.repository}, but the current checkout is ${repository}.`);
+  const issues = await loadGitHubIssues(repository, issueIds, { repoPath });
+  const findings = detectExecutionDrift(config, issues, issueIds);
+  if (findings.length) {
+    throw new Error(`GitHub/manifest drift blocks execution: ${findings.map((item) => `#${item.issue} ${item.reason}`).join(" ")} Run \`maestro draft --write\` and review any conflicts before retrying.`);
+  }
 }
 
 async function outputLatest(repoPath, { copy = true, print = true, config = null, recommendations = false } = {}) {
@@ -498,17 +511,9 @@ async function main() {
     const worksetName = option(args, "--workset");
     const scope = worksetName ? await resolveSavedWorkset(config, repoPath, worksetName, { refresh: true }) : null;
     const planOptions = scopedPlanOptions(scope);
-    const plan = args.includes("--rerun") ? computePlan(config, planOptions) : await computeEffectivePlan(config, repoPath, planOptions);
-    const selectedIssueIds = plan.selected.map((item) => item.id);
-    if (selectedIssueIds.length) {
-      const repository = await discoverGitHubRepository(repoPath);
-      if (repository !== config.repository) throw new Error(`The manifest targets ${config.repository}, but the current checkout is ${repository}.`);
-      const issues = await loadGitHubIssues(repository, selectedIssueIds, { repoPath });
-      const findings = detectExecutionDrift(config, issues, selectedIssueIds);
-      if (findings.length) {
-        throw new Error(`GitHub/manifest drift blocks execution: ${findings.map((item) => `#${item.issue} ${item.reason}`).join(" ")} Run \`maestro draft --write\` and review any conflicts before retrying.`);
-      }
-    }
+    const candidatePlan = args.includes("--rerun") ? computePlan(config, planOptions) : await computeEffectivePlan(config, repoPath, planOptions);
+    const selectedIssueIds = candidatePlan.selected.map((item) => item.id);
+    await verifyExecutionSelection(config, repoPath, selectedIssueIds);
     const authorization = scope ? {
       workset: scope.name,
       revision: scope.revision,
@@ -517,21 +522,84 @@ async function main() {
       authorizedAt: new Date().toISOString(),
       source: "explicit-workset-launch"
     } : null;
-    const result = await executeRun(config, { repoPath, plan, scope: authorization });
+    const requestedRunId = newRunId();
+    const reservation = args.includes("--rerun")
+      ? await reserveExplicitWork(config, {
+          repoPath,
+          runId: requestedRunId,
+          mode: "rerun",
+          items: candidatePlan.selected,
+          extraState: authorization ? { scope: authorization } : {}
+        })
+      : await reserveReadyWork(config, {
+          repoPath,
+          runId: requestedRunId,
+          mode: "execute",
+          authorizedIssueIds: selectedIssueIds,
+          planOptions,
+          extraState: authorization ? { scope: authorization } : {}
+        });
+    if (args.includes("--rerun") && !reservation.reserved && selectedIssueIds.length) {
+      throw new Error(`Cannot reserve worker capacity for rerun: ${reservation.reason}.`);
+    }
+    const plan = reservation.plan || { ...candidatePlan, selected: [] };
+    const result = await executeRun(config, {
+      repoPath,
+      plan,
+      runId: requestedRunId,
+      scope: authorization,
+      ...(reservation.reserved ? { reservedState: reservation.state } : {})
+    });
     let automatic = null;
+    let backfill = [];
     if (args.includes("--auto-rework")) {
       const newlyExecuted = result.plan?.selected?.map((item) => String(item.id)) || [];
       const resumable = plan.deferred
         ?.filter((item) => item.lifecycle?.state === "awaiting-rework")
         .map((item) => String(item.id)) || [];
-      const issueIds = newlyExecuted.length ? newlyExecuted : resumable;
-      automatic = await autoRework(config, {
-        repoPath,
-        issueIds,
-        capacity: plan.availableConcurrency ?? plan.concurrency ?? config.defaultConcurrency ?? 2
+      const currentStates = await resolveCurrentIssueStates(repoPath, [...new Set([...newlyExecuted, ...resumable])]);
+      const correctionIssues = currentStates
+        .filter((entry) => entry.evidence?.verdict === "rework" && !entry.evidence?.review)
+        .map((entry) => entry.issue);
+      const backfillPlan = await computeEffectivePlan(config, repoPath, planOptions);
+      const readyItems = backfillPlan.selected;
+      await verifyExecutionSelection(config, repoPath, readyItems.map((item) => item.id));
+      const tasks = [
+        ...correctionIssues.map((issue) => ({ kind: "rework", issue })),
+        ...readyItems.map((item) => ({ kind: "execute", item }))
+      ];
+      const outcomes = await runCapacityPool(tasks, backfillPlan.availableConcurrency, async (task) => {
+        if (task.kind === "rework") {
+          return autoRework(config, {
+            repoPath,
+            issueIds: [task.issue],
+            capacity: 1,
+            reworkOptions: { reserveCapacity: true }
+          });
+        }
+        const runId = newRunId();
+        const reservation = await reserveReadyWork(config, {
+          repoPath,
+          runId,
+          mode: "backfill",
+          authorizedIssueIds: [task.item.id],
+          planOptions,
+          extraState: authorization ? { scope: authorization } : {}
+        });
+        if (!reservation.reserved) return { mode: "backfill", issue: task.item.id, outcome: "not-reserved", capacity: reservation.capacity };
+        return executeRun(config, { repoPath, runId, plan: reservation.plan, scope: authorization, reservedState: reservation.state });
       });
+      const corrections = outcomes.filter((entry) => entry?.mode === "auto-rework");
+      backfill = outcomes.filter((entry) => entry?.mode !== "auto-rework");
+      automatic = {
+        mode: "auto-rework",
+        retryLimit: corrections[0]?.retryLimit || 3,
+        capacity: backfillPlan.limit || config.defaultConcurrency || 2,
+        timeoutMs: corrections[0]?.timeoutMs || 30 * 60 * 1000,
+        issues: corrections.flatMap((entry) => entry.issues || [])
+      };
     }
-    process.stdout.write(`${JSON.stringify(automatic ? { ...result, autoRework: automatic } : result, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify(automatic ? { ...result, autoRework: automatic, backfill } : result, null, 2)}\n`);
     process.stdout.write(await workflowFooter(config, repoPath));
     if (automatic) setAutoReworkExitCode(automatic);
     else setResultExitCode(result);
@@ -584,9 +652,50 @@ async function main() {
     } else {
       sources = await resolveIssueReworkSources(repoPath, requestedIssues);
     }
-    const results = [];
+    const correctionTasks = [];
     for (const source of sources) {
-      results.push(await executeReworkRun(config, { repoPath, ...source }));
+      let issueIds = source.issueIds;
+      if (!issueIds) {
+        const state = await loadRunState(repoPath, source.sourceRunId);
+        const validationByIssue = new Map((state.validations || []).map((entry) => [String(entry.issue), entry]));
+        issueIds = (state.workers || [])
+          .map((worker) => String(worker.issue))
+          .filter((issue) => validationByIssue.get(issue)?.verdict === "rework" || state.reviews?.[issue]?.disposition === "rework-original");
+      }
+      correctionTasks.push({ ...source, issueIds: issueIds.map(String) });
+    }
+    const backfillPlan = await computeEffectivePlan(config, repoPath);
+    if (correctionTasks.length && backfillPlan.availableConcurrency === 0) {
+      throw new Error("Cannot start rework because the repository worker capacity is exhausted.");
+    }
+    await verifyExecutionSelection(config, repoPath, backfillPlan.selected.map((item) => item.id));
+    const correctionBatches = correctionTasks.flatMap((source) => capacityBatches(
+      source.issueIds.map((id) => ({ id })),
+      Math.max(1, backfillPlan.availableConcurrency),
+      config.planning?.advisoryConflicts || []
+    ).map((batch) => ({ ...source, issueIds: batch.map((item) => item.id) })));
+    const tasks = [
+      ...correctionBatches.map((source) => ({ kind: "rework", source, weight: source.issueIds.length })),
+      ...backfillPlan.selected.map((item) => ({ kind: "execute", item }))
+    ];
+    const outcomes = await runCapacityPool(tasks, backfillPlan.availableConcurrency, async (task) => {
+      if (task.kind === "rework") {
+        return executeReworkRun(config, { repoPath, ...task.source, reserveCapacity: true });
+      }
+      const runId = newRunId();
+      const reservation = await reserveReadyWork(config, {
+        repoPath,
+        runId,
+        mode: "backfill",
+        authorizedIssueIds: [task.item.id]
+      });
+      if (!reservation.reserved) return { mode: "backfill", issue: task.item.id, outcome: "not-reserved", capacity: reservation.capacity };
+      return executeRun(config, { repoPath, runId, plan: reservation.plan, reservedState: reservation.state });
+    });
+    const results = outcomes.filter((entry) => entry?.mode === "rework");
+    const backfill = outcomes.filter((entry) => entry?.mode !== "rework");
+    if (backfill.length) {
+      for (const result of results) result.backfillRunIds = backfill.filter((entry) => entry.runId).map((entry) => entry.runId);
     }
     process.stdout.write(`${JSON.stringify(results.length === 1 ? results[0] : results, null, 2)}\n`);
     process.stdout.write(await workflowFooter(config, repoPath));
@@ -597,7 +706,7 @@ async function main() {
   if (command === "reconcile") {
     const sourceRunId = option(args, "--run");
     const issue = option(args, "--issue");
-    const result = await executeReconcileRun(config, { repoPath, sourceRunId, issueIds: issue ? [issue] : null });
+    const result = await executeReconcileRun(config, { repoPath, sourceRunId, issueIds: issue ? [issue] : null, reserveCapacity: true });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     setResultExitCode(result);
     return;

@@ -42,7 +42,8 @@ async function executeRun(config, {
   preflightRunner,
   baselineRunner,
   stateSaver = saveRunState,
-  scope = null
+  scope = null,
+  reservedState = null
 } = {}) {
   if (!plan.selected.length) {
     const empty = { runId, mode: "execute", status: "no-ready-work", plan, baseline: null, preflights: [], workers: [], validations: [], reviews: {}, ...(scope ? { scope } : {}) };
@@ -50,7 +51,7 @@ async function executeRun(config, {
     return empty;
   }
 
-  const result = {
+  const result = reservedState || {
     runId,
     mode: "execute",
     status: "running",
@@ -63,7 +64,7 @@ async function executeRun(config, {
     reviews: {}
   };
   if (scope) result.scope = scope;
-  await stateSaver(repoPath, runId, result);
+  if (!reservedState || scope) await stateSaver(repoPath, runId, result);
 
   try {
     // Fail fast on missing runtime capabilities before spending minutes on the

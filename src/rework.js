@@ -7,6 +7,7 @@ const { runChecked } = require("./process");
 const { newRunId } = require("./controller");
 const { resolveCurrentIssueStates } = require("./run-resolver");
 const { isRecoverableValidatorRework } = require("./run-lifecycle");
+const { reserveExplicitWork } = require("./scheduler");
 
 const DEFAULT_AUTO_REWORK_LIMIT = 3;
 const DEFAULT_AUTO_REWORK_TIMEOUT_MS = 30 * 60 * 1000;
@@ -187,7 +188,10 @@ async function executeReworkRun(config, {
   stateLoader = loadRunState,
   automatic = false,
   retryLimit = null,
-  deadlineAt = null
+  deadlineAt = null,
+  reserveCapacity = false,
+  capacityReserver = reserveExplicitWork,
+  reservedState = null
 } = {}) {
   const source = await loadRunState(repoPath, sourceRunId);
   const workersByIssue = new Map();
@@ -257,7 +261,7 @@ async function executeReworkRun(config, {
     };
   }
 
-  const result = {
+  const initialState = {
     runId,
     parentRunId,
     mode: "rework",
@@ -271,7 +275,25 @@ async function executeReworkRun(config, {
     reviews: {},
     correction: { attempts }
   };
-  await stateSaver(repoPath, runId, result);
+  if (reserveCapacity && !reservedState) {
+    const reservation = await capacityReserver(config, {
+      repoPath,
+      runId,
+      mode: "rework",
+      items,
+      stateLoader: async () => require("./work-state").loadExecutionStates(repoPath),
+      stateSaver,
+      extraState: { parentRunId, correction: { attempts } }
+    });
+    if (!reservation.reserved) {
+      const error = new Error(`Cannot reserve worker capacity for rework: ${reservation.reason}.`);
+      error.code = "CAPACITY_UNAVAILABLE";
+      throw error;
+    }
+    reservedState = reservation.state;
+  }
+  const result = reservedState ? { ...reservedState, correction: { attempts } } : initialState;
+  if (!reservedState) await stateSaver(repoPath, runId, result);
 
   let currentStage = "preflight";
   try {
@@ -505,6 +527,16 @@ async function autoReworkIssue(config, {
         };
       }
     } catch (error) {
+      if (error.code === "CAPACITY_UNAVAILABLE") {
+        return {
+          issue: String(issue),
+          outcome: "capacity-unavailable",
+          finalRunId: resolved.runId,
+          finalVerdict: "rework",
+          error: error.message,
+          runs
+        };
+      }
       const outcome = error.code === "AUTOMATION_TIMEOUT"
         ? "timeout"
         : error.code === "REWORK_REFRESH_CONFLICT" ? "technical-conflict" : "infrastructure-failure";

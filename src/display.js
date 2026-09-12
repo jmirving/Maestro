@@ -3,6 +3,7 @@ const { currentIssueEvidenceFromStates, effectiveIssueStates } = require("./run-
 const { assessRunItems } = require("./existing-run");
 const { buildRecommendations, formatRecommendations } = require("./recommendations");
 const { isValidValidatorOverride } = require("./reviews");
+const { capacitySnapshot } = require("./scheduler");
 
 function numericSort(left, right) {
   return String(left).localeCompare(String(right), undefined, { numeric: true });
@@ -186,6 +187,7 @@ async function statusSnapshot(config, repoPath, requestedIssues = [], {
 } = {}) {
   const states = await stateLoader(repoPath);
   const plan = reconcilePlan(config, states);
+  const capacity = capacitySnapshot(config, states);
   const requested = [...new Set(requestedIssues.map(String))];
   const current = states.length ? currentIssueEvidenceFromStates(states) : [];
   const currentByIssue = new Map(current.map((entry) => [entry.issue, entry]));
@@ -207,7 +209,14 @@ async function statusSnapshot(config, repoPath, requestedIssues = [], {
     items,
     readiness,
     recommendations: buildRecommendations(items, readiness, plan.selected || [], { states }),
-    selected: plan.selected?.map((item) => String(item.id)) || []
+    selected: plan.selected?.map((item) => String(item.id)) || [],
+    capacity: {
+      limit: capacity.limit,
+      used: capacity.used,
+      available: capacity.available,
+      requestedLimit: capacity.requestedLimit,
+      idle: capacity.idle
+    }
   };
 }
 
@@ -242,6 +251,16 @@ function formatStatus(snapshot) {
   } else {
     lines.push("");
     for (const item of snapshot.items) lines.push(`${issueHeading(item)} — ${item.state}`);
+  }
+
+  if (snapshot.capacity) {
+    const inherited = snapshot.capacity.requestedLimit !== snapshot.capacity.limit
+      ? `; invocation requested ${snapshot.capacity.requestedLimit}, active session keeps ${snapshot.capacity.limit}`
+      : "";
+    lines.push(`Capacity: ${snapshot.capacity.used}/${snapshot.capacity.limit} worker slots active${inherited}`);
+    if (snapshot.capacity.idle && snapshot.capacity.available > 0) {
+      lines.push(`Idle capacity: ${snapshot.capacity.available} slot(s) intentional — ${snapshot.capacity.idle.reason} (${snapshot.capacity.idle.kind})`);
+    }
   }
 
   for (const run of snapshot.readiness) formatCommit(lines, run);

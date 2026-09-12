@@ -1,7 +1,6 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
-const { computePlan } = require("./planner");
-const { conflictFor } = require("./planning-analysis");
+const { computePlan, selectReady } = require("./planner");
 const { loadPersistedRunStates } = require("./run-store");
 const { reportRootForRepo } = require("./reporter");
 const { classifyRunIssue } = require("./run-lifecycle");
@@ -94,25 +93,23 @@ function reconcilePlan(config, states = [], planOptions = {}) {
 
   const active = [...unresolved.values()].filter((item) => ["running", "rework-running"].includes(item.state));
   const availableConcurrency = Math.max(0, plan.concurrency - active.length);
-  const activeConflicts = [];
-  const conflictSafeReady = [];
-  for (const item of ready) {
-    const conflict = active.map((running) => conflictFor(item.id, running.issue, config.planning?.advisoryConflicts || [])).find(Boolean);
-    if (conflict) activeConflicts.push({ ...item, lifecycle: { state: "active-conflict", action: "maestro status" }, conflictsWith: conflict.issues.find((id) => String(id) !== item.id), reason: conflict.reason });
-    else conflictSafeReady.push(item);
-  }
+  const selection = selectReady(
+    ready,
+    availableConcurrency,
+    config.planning?.advisoryConflicts || [],
+    active.map((item) => item.issue)
+  );
+  const activeIds = new Set(active.map((item) => String(item.issue)));
+  const activeConflicts = selection.advisoryDeferred
+    .filter((item) => activeIds.has(String(item.conflictsWith)))
+    .map((item) => ({ ...item, lifecycle: { state: "active-conflict", action: "maestro status" } }));
   deferred.push(...activeConflicts);
-  const selected = [];
-  for (const item of conflictSafeReady) {
-    if (selected.length >= availableConcurrency) break;
-    if (selected.some((other) => conflictFor(item.id, other.id, config.planning?.advisoryConflicts || []))) continue;
-    selected.push(item);
-  }
   const recommendations = [...new Set(deferred.map((item) => item.lifecycle.action))];
   return {
     ...plan,
-    ready: conflictSafeReady,
-    selected,
+    ready,
+    selected: selection.selected,
+    advisoryDeferred: selection.advisoryDeferred,
     active,
     availableConcurrency,
     deferred,

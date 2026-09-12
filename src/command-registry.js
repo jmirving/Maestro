@@ -63,7 +63,7 @@ const COMMANDS = [
       "--auto-rework": { description: "Automatically correct and revalidate REWORK results, up to three attempts within a 30-minute session." }
     },
     prerequisites: "Ready reconciled work, a clean usable repository, current GitHub issue facts, and every capability required by the selected items.",
-    effects: "Persists a run, creates isolated branches/worktrees, runs workers, then validates changed branches in fresh agent contexts. --auto-rework may create bounded correction children.",
+    effects: "Atomically reserves repository worker slots, persists a run, creates isolated branches/worktrees, and validates changed branches. --auto-rework shares freed slots between bounded corrections and authorized ready backfill.",
     cautions: "GitHub or saved-workset scope drift blocks launch. Does not approve, integrate, push the default branch, or close issues. Successful automatic rework still requires human review. --rerun is an explicit retry, not normal resume behavior or a drift bypass, and cannot be combined with --workset.",
     next: ["maestro status", "maestro details <issue>", "maestro output"],
     examples: [["start"], ["start", "--auto-rework"]],
@@ -85,7 +85,7 @@ const COMMANDS = [
       "--auto-rework": { description: "Automatically correct and revalidate REWORK results, up to three attempts within a 30-minute session." }
     },
     prerequisites: "The same requirements as start. Existing running, review, rework, and integration states remain deferred.",
-    effects: "Runs workers and validators for newly eligible work; --auto-rework may also resume or create bounded correction children. It does not integrate work.",
+    effects: "Runs workers and validators for newly eligible work; --auto-rework may resume corrections and backfill freed slots from the authorized manifest scope. It does not integrate work.",
     cautions: "No ready work is not proof that all repository or workset work is complete; inspect status for outside prerequisites, gates, and deferred items. Automatic correction never satisfies human review or integration gates. --rerun cannot be combined with --workset.",
     next: ["maestro status", "maestro output"],
     examples: [["next"], ["next", "--auto-rework"]],
@@ -168,8 +168,8 @@ const COMMANDS = [
     positionals: "Optional issue numbers and at most one manifest path. With neither issues nor --run, selects the newest actionable rejected set.",
     options: { "--repo-path": COMMON_REPO_OPTION, "--run": { ...RUN_OPTION, description: "Deliberately select a historical source run." }, "--allow-failing-baseline": { description: "Explicitly continue despite a failing configured baseline." } },
     prerequisites: "Current rejected evidence, or an explicitly selected historical source run containing eligible work.",
-    effects: "Creates child run(s), reuses the existing implementation worktree, runs bounded correction workers, and validates again.",
-    cautions: "Manual rework performs one correction generation. start/next --auto-rework repeat validator-directed corrections up to three attempts. Neither form approves or integrates the corrected result.",
+    effects: "Creates child run(s), reuses existing implementation worktrees, and shares repository capacity with safe ready backfill from the resolved manifest.",
+    cautions: "Manual rework performs one correction generation. start/next --auto-rework repeat validator-directed corrections up to three attempts. Backfill never expands manifest scope or grants review/integration authority.",
     next: ["maestro status", "maestro details <issue>", "maestro approve <issue>"],
     examples: [["rework", "57"], ["rework"]],
     positionalKind: "loose-manifest-issues"
@@ -317,6 +317,8 @@ Boundaries
   start/next --workset recheck the saved scope revision before recording authorization.
   Validator approval, human approval, and integration are separate gates.
   Automatic and manual rework create new evidence; neither grants human approval.
+  Worker capacity is repository-wide across runs, manifests, and linked worktrees.
+  Rework shares spare slots with safe in-scope backfill; capacity never expands scope.
   HUMAN_GATE, technical failure/conflict, invalid validation, and retry exhaustion stop
   automatic correction for that issue while independent passing siblings stay usable.
   Rework and Git-conflict reconciliation create new evidence; neither completes work.

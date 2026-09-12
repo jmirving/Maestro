@@ -7,6 +7,7 @@ const { validateWorker } = require("./validator");
 const { runChecked, runProcess } = require("./process");
 const { newRunId } = require("./controller");
 const { currentHead } = require("./worktrees");
+const { reserveExplicitWork } = require("./scheduler");
 
 async function ensureCleanWorktree(worker, runner = runChecked) {
   const status = (await runner("git", ["status", "--porcelain"], { cwd: worker.worktreePath })).stdout.trim();
@@ -58,7 +59,9 @@ async function executeReconcileRun(config, {
   preflightRunner,
   baselineRunner,
   validatorExecutor = validateWorker,
-  stateSaver = saveRunState
+  stateSaver = saveRunState,
+  reserveCapacity = false,
+  capacityReserver = reserveExplicitWork
 } = {}) {
   const source = await loadRunState(repoPath, sourceRunId);
   const validationByIssue = new Map((source.validations || []).map((entry) => [String(entry.issue), entry]));
@@ -71,6 +74,20 @@ async function executeReconcileRun(config, {
   if (!candidates.length) throw new Error(`Run ${sourceRunId} has no selected approved, unintegrated issues to reconcile.`);
 
   const items = candidates.map((worker) => ({ id: String(worker.issue), ...(config.work?.[String(worker.issue)] || {}), mode: "reconcile" }));
+  let reservation = null;
+  if (reserveCapacity) {
+    reservation = await capacityReserver(config, {
+      repoPath,
+      runId,
+      mode: "reconcile",
+      items,
+      extraState: { parentRunId: sourceRunId }
+    });
+    if (!reservation.reserved) {
+      throw new Error(`Cannot reserve worker capacity for conflict resolution: ${reservation.reason}.`);
+    }
+  }
+  try {
   console.error(`[Maestro] reconcile ${runId} from ${sourceRunId}: capability preflight`);
   const preflights = await runPreflights(config, items, { cwd: repoPath, runner: preflightRunner });
   console.error(`[Maestro] reconcile ${runId}: baseline validation`);
@@ -137,6 +154,7 @@ async function executeReconcileRun(config, {
     .map((worker) => validatorExecutor({ repository: config.repository, worker, baseline, runId })));
 
   const result = {
+    ...(reservation?.state || {}),
     runId,
     parentRunId: sourceRunId,
     mode: "reconcile",
@@ -146,10 +164,19 @@ async function executeReconcileRun(config, {
     preflights,
     workers,
     validations,
-    reviews: {}
+    reviews: {},
+    status: "awaiting-review"
   };
   await stateSaver(repoPath, runId, result);
   return result;
+  } catch (error) {
+    if (reservation?.state) {
+      reservation.state.status = "failed";
+      reservation.state.failure = error.message;
+      await stateSaver(repoPath, runId, reservation.state);
+    }
+    throw error;
+  }
 }
 
 module.exports = { buildReconcilePrompt, rebaseInProgress, executeReconcileRun };

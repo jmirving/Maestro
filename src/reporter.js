@@ -4,8 +4,20 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
+function coordinatedRepoPath(repoPath) {
+  const resolved = path.resolve(repoPath);
+  const result = spawnSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
+    cwd: resolved,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"]
+  });
+  if (result.status !== 0) return resolved;
+  const commonDir = result.stdout.trim();
+  return path.basename(commonDir) === ".git" ? path.dirname(commonDir) : resolved;
+}
+
 function reportRootForRepo(repoPath) {
-  const repoRoot = path.resolve(repoPath);
+  const repoRoot = coordinatedRepoPath(repoPath);
   return path.join(path.dirname(repoRoot), ".maestro-worktrees", path.basename(repoRoot), ".maestro-reports");
 }
 
@@ -107,4 +119,4 @@ function copyToClipboard(text) {
   throw new Error("Could not find a supported Unicode-safe clipboard command.");
 }
 
-module.exports = { reportRootForRepo, parseReportName, formatRunLifecycle, latestRunBundle, copyToClipboard };
+module.exports = { coordinatedRepoPath, reportRootForRepo, parseReportName, formatRunLifecycle, latestRunBundle, copyToClipboard };

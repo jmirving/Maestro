@@ -19,6 +19,29 @@ function compareReady(a, b) {
   return Number(a.id) - Number(b.id) || a.id.localeCompare(b.id);
 }
 
+function selectReady(ready, capacity, conflicts = [], activeIssues = []) {
+  const selected = [];
+  const advisoryDeferred = [];
+  const active = activeIssues.map(String);
+  for (const item of ready) {
+    if (selected.length >= capacity) break;
+    const against = [...active, ...selected.map((other) => other.id)];
+    const conflict = against.map((other) => conflictFor(item.id, other, conflicts)).find(Boolean);
+    if (conflict) {
+      advisoryDeferred.push({
+        ...item,
+        conflictsWith: conflict.issues.find((id) => String(id) !== item.id),
+        reason: conflict.reason,
+        source: conflict.source,
+        confidence: conflict.confidence
+      });
+      continue;
+    }
+    selected.push(item);
+  }
+  return { selected, advisoryDeferred };
+}
+
 function computePlan(config, { issueIds = null, workset = null, scopeRevision = null } = {}) {
   const work = normalizeWork(config.work);
   const selectedScope = issueIds == null ? null : new Set(issueIds.map(String));
@@ -56,24 +79,8 @@ function computePlan(config, { issueIds = null, workset = null, scopeRevision = 
 
   ready.sort(compareReady);
   const concurrency = Math.max(1, Number(config.defaultConcurrency || 2));
-  const selected = [];
-  const advisoryDeferred = [];
   const conflicts = config.planning?.advisoryConflicts || [];
-  for (const item of ready) {
-    if (selected.length >= concurrency) break;
-    const conflict = selected.map((other) => conflictFor(item.id, other.id, conflicts)).find(Boolean);
-    if (conflict) {
-      advisoryDeferred.push({
-        ...item,
-        conflictsWith: conflict.issues.find((id) => String(id) !== item.id),
-        reason: conflict.reason,
-        source: conflict.source,
-        confidence: conflict.confidence
-      });
-      continue;
-    }
-    selected.push(item);
-  }
+  const { selected, advisoryDeferred } = selectReady(ready, concurrency, conflicts);
   return {
     repository: config.repository,
     ...(workset ? { workset, scopeRevision, authorizedIssueIds: [...selectedScope].sort((a, b) => Number(a) - Number(b)) } : {}),
@@ -86,4 +93,4 @@ function computePlan(config, { issueIds = null, workset = null, scopeRevision = 
   };
 }
 
-module.exports = { computePlan, normalizeWork, compareReady };
+module.exports = { computePlan, normalizeWork, compareReady, selectReady };
