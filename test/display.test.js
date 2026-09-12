@@ -238,3 +238,26 @@ test("status distinguishes a rework refresh conflict and shows its continuation"
   assert.doesNotMatch(text, /validator requested rework/);
   assert.doesNotMatch(text, /human decision/);
 });
+
+test("status displays timeout and no-progress as distinct automatic correction stops", async () => {
+  const timeout = mixedRun();
+  timeout.status = "failed";
+  timeout.workers = [{ issue: "7", exitCode: 1, timedOut: true }];
+  timeout.validations = [];
+  timeout.correction = { attempts: { "7": { number: 2, phase: "completed", outcome: "timeout", timeoutStage: "worker" } } };
+  timeout.autoRework = { "7": { status: "timeout", retryLimit: 3, attemptsUsed: 2, timeoutStage: "worker", action: "maestro details 7" } };
+
+  const timeoutText = formatStatus(await statusSnapshot(config, "/unused", ["7"], { stateLoader: async () => [timeout] }));
+  assert.match(timeoutText, /session timeout during worker/);
+  assert.match(timeoutText, /Recommended: `maestro details 7`/);
+
+  const noProgress = structuredClone(timeout);
+  noProgress.workers = [{ issue: "7", exitCode: 0, baseSha: "same", headSha: "same" }];
+  noProgress.correction.attempts["7"].outcome = "no-progress";
+  delete noProgress.correction.attempts["7"].timeoutStage;
+  noProgress.autoRework["7"].status = "no-progress";
+  delete noProgress.autoRework["7"].timeoutStage;
+  const noProgressText = formatStatus(await statusSnapshot(config, "/unused", ["7"], { stateLoader: async () => [noProgress] }));
+  assert.match(noProgressText, /worker completed without a new commit/);
+  assert.match(noProgressText, /Recommended: `maestro details 7`/);
+});

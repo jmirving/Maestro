@@ -9,6 +9,12 @@ const { resolveCurrentIssueStates } = require("./run-resolver");
 const { isRecoverableValidatorRework } = require("./run-lifecycle");
 
 const DEFAULT_AUTO_REWORK_LIMIT = 3;
+const DEFAULT_AUTO_REWORK_TIMEOUT_MS = 30 * 60 * 1000;
+
+function remainingTime(deadlineAt) {
+  if (!deadlineAt) return null;
+  return Math.max(1, deadlineAt - Date.now());
+}
 
 function correctionAttempt(state, issue) {
   return state.correction?.attempts?.[String(issue)] || null;
@@ -45,7 +51,10 @@ function validationSnapshot(validation) {
 function resultOutcome(result, issue) {
   const worker = (result.workers || []).find((entry) => String(entry.issue) === String(issue));
   const validation = (result.validations || []).find((entry) => String(entry.issue) === String(issue));
+  if (worker?.timedOut) return { status: "timeout", verdict: null, timeoutStage: "worker" };
   if (!worker || worker.exitCode !== 0) return { status: "worker-failure", verdict: null };
+  if (worker.headSha === worker.baseSha) return { status: "no-progress", verdict: null };
+  if (validation?.timedOut) return { status: "timeout", verdict: null, timeoutStage: "validator" };
   if (!validation) return { status: "validator-failure", verdict: null };
   if (validation.exitCode !== 0 || !["approve", "rework", "human_gate"].includes(validation.verdict)) {
     return { status: "validator-failure", verdict: validation.verdict || null };
@@ -108,20 +117,20 @@ async function resolveReworkParentRunId(repoPath, sourceRunId, issueIds) {
   return sourceRunId;
 }
 
-async function refreshWorker(worker, { defaultBranch = "main", sourceRunId = null, runner = runChecked } = {}) {
-  const status = (await runner("git", ["status", "--porcelain"], { cwd: worker.worktreePath })).stdout.trim();
+async function refreshWorker(worker, { defaultBranch = "main", sourceRunId = null, runner = runChecked, deadlineAt = null } = {}) {
+  const status = (await runner("git", ["status", "--porcelain"], { cwd: worker.worktreePath, timeoutMs: remainingTime(deadlineAt) })).stdout.trim();
   if (status) throw new Error(`Rework branch for issue #${worker.issue} is not clean:\n${status}`);
-  await runner("git", ["fetch", "origin", defaultBranch], { cwd: worker.worktreePath });
-  await runner("git", ["rebase", `origin/${defaultBranch}`], { cwd: worker.worktreePath }).catch(async (error) => {
+  await runner("git", ["fetch", "origin", defaultBranch], { cwd: worker.worktreePath, timeoutMs: remainingTime(deadlineAt) });
+  await runner("git", ["rebase", `origin/${defaultBranch}`], { cwd: worker.worktreePath, timeoutMs: remainingTime(deadlineAt) }).catch(async (error) => {
     let conflictedFiles = [];
     try {
-      const unmerged = await runner("git", ["diff", "--name-only", "--diff-filter=U"], { cwd: worker.worktreePath });
+      const unmerged = await runner("git", ["diff", "--name-only", "--diff-filter=U"], { cwd: worker.worktreePath, timeoutMs: remainingTime(deadlineAt) });
       conflictedFiles = unmerged.stdout.split("\n").map((entry) => entry.trim()).filter(Boolean);
     } catch {}
     let operationState = "active";
     let abortError = null;
     try {
-      await runner("git", ["rebase", "--abort"], { cwd: worker.worktreePath });
+      await runner("git", ["rebase", "--abort"], { cwd: worker.worktreePath, timeoutMs: remainingTime(deadlineAt) });
       operationState = "aborted";
     } catch (abortFailure) {
       abortError = abortFailure.message;
@@ -159,7 +168,7 @@ async function refreshWorker(worker, { defaultBranch = "main", sourceRunId = nul
     }
     throw wrapped;
   });
-  const baseSha = (await runner("git", ["rev-parse", `origin/${defaultBranch}`], { cwd: worker.worktreePath })).stdout.trim();
+  const baseSha = (await runner("git", ["rev-parse", `origin/${defaultBranch}`], { cwd: worker.worktreePath, timeoutMs: remainingTime(deadlineAt) })).stdout.trim();
   return { ...worker, baseSha };
 }
 
@@ -177,7 +186,8 @@ async function executeReworkRun(config, {
   stateSaver = saveRunState,
   stateLoader = loadRunState,
   automatic = false,
-  retryLimit = null
+  retryLimit = null,
+  deadlineAt = null
 } = {}) {
   const source = await loadRunState(repoPath, sourceRunId);
   const workersByIssue = new Map();
@@ -263,24 +273,29 @@ async function executeReworkRun(config, {
   };
   await stateSaver(repoPath, runId, result);
 
+  let currentStage = "preflight";
   try {
     console.error(`[Maestro] rework ${runId} from ${sourceRunId}: capability preflight`);
-    result.preflights = await runPreflights(config, items, { cwd: repoPath, runner: preflightRunner });
+    result.preflights = await runPreflights(config, items, { cwd: repoPath, runner: preflightRunner, timeoutMs: remainingTime(deadlineAt) });
+    currentStage = "baseline";
     console.error(`[Maestro] rework ${runId}: baseline validation`);
-    result.baseline = await captureBaseline(config, { cwd: repoPath, runner: baselineRunner });
+    result.baseline = await captureBaseline(config, { cwd: repoPath, runner: baselineRunner, timeoutMs: remainingTime(deadlineAt) });
 
     const refreshed = [];
     for (const worker of candidates) {
+      currentStage = "refresh";
       console.error(`[Maestro] rework #${worker.issue}: rebasing existing implementation onto current ${config.defaultBranch || "main"}`);
       refreshed.push(await refreshWorker(worker, {
         defaultBranch: config.defaultBranch || "main",
         sourceRunId,
-        runner
+        runner,
+        deadlineAt
       }));
       result.correction.attempts[String(worker.issue)].phase = "worker-pending";
       await stateSaver(repoPath, runId, result);
     }
 
+    currentStage = "worker";
     result.workers = await Promise.all(refreshed.map((worker) => {
       const issue = String(worker.issue);
       const item = items.find((entry) => String(entry.id) === issue);
@@ -299,7 +314,8 @@ async function executeReworkRun(config, {
           sourceRunId,
           priorWorkerReport: worker.report || "",
           validatorReport: priorValidation?.report || ""
-        }
+        },
+        timeoutMs: remainingTime(deadlineAt)
       });
     }));
 
@@ -308,9 +324,16 @@ async function executeReworkRun(config, {
     }
     await stateSaver(repoPath, runId, result);
 
+    currentStage = "validator";
     result.validations = await Promise.all(result.workers
       .filter((worker) => worker.exitCode === 0 && worker.headSha !== worker.baseSha)
-      .map((worker) => validatorExecutor({ repository: config.repository, worker, baseline: result.baseline, runId })));
+      .map((worker) => validatorExecutor({
+        repository: config.repository,
+        worker,
+        baseline: result.baseline,
+        runId,
+        timeoutMs: remainingTime(deadlineAt)
+      })));
 
     const outcomes = candidates.map((worker) => ({
       issue: String(worker.issue),
@@ -321,8 +344,9 @@ async function executeReworkRun(config, {
       attempt.phase = "completed";
       attempt.outcome = outcome.status;
       attempt.finalVerdict = outcome.verdict;
+      if (outcome.timeoutStage) attempt.timeoutStage = outcome.timeoutStage;
     }
-    const failed = outcomes.filter((entry) => ["worker-failure", "validator-failure"].includes(entry.status));
+    const failed = outcomes.filter((entry) => ["worker-failure", "validator-failure", "timeout", "no-progress"].includes(entry.status));
     result.status = failed.length ? "failed" : "awaiting-review";
     if (failed.length) {
       result.failure = failed.map((entry) => `#${entry.issue} ${entry.status}`).join("; ");
@@ -330,12 +354,20 @@ async function executeReworkRun(config, {
     await stateSaver(repoPath, runId, result);
     return result;
   } catch (error) {
+    const timedOut = error.code === "AUTOMATION_TIMEOUT" || error.result?.timedOut || error.cause?.result?.timedOut;
+    if (timedOut) {
+      error.code = "AUTOMATION_TIMEOUT";
+      error.timeoutStage = currentStage;
+    }
     result.status = "failed";
     result.failure = error.message;
     for (const [issue, attempt] of Object.entries(result.correction.attempts)) {
       if (attempt.phase !== "completed") {
         attempt.phase = "stopped";
-        if (error.code === "REWORK_REFRESH_CONFLICT" && String(error.issue) === issue) {
+        if (timedOut) {
+          attempt.outcome = "timeout";
+          attempt.timeoutStage = currentStage;
+        } else if (error.code === "REWORK_REFRESH_CONFLICT" && String(error.issue) === issue) {
           attempt.outcome = "technical-conflict";
           attempt.conflict = error.conflict;
         } else {
@@ -357,7 +389,8 @@ async function autoReworkIssue(config, {
   stateSaver,
   recordOutcome,
   reworkExecutor,
-  reworkOptions
+  reworkOptions,
+  now
 }) {
   const runs = [];
   for (;;) {
@@ -365,10 +398,22 @@ async function autoReworkIssue(config, {
     const evidence = resolved.evidence;
     const worker = evidence.worker;
     const validation = evidence.validation;
+    const persistedAutomaticOutcome = evidence.autoRework?.status;
+
+    if (["timeout", "no-progress"].includes(persistedAutomaticOutcome)) {
+      return {
+        issue: String(issue),
+        outcome: persistedAutomaticOutcome,
+        finalRunId: resolved.runId,
+        finalVerdict: evidence.autoRework.finalVerdict ?? validation?.verdict ?? null,
+        ...(evidence.autoRework.timeoutStage ? { timeoutStage: evidence.autoRework.timeoutStage } : {}),
+        runs
+      };
+    }
 
     if (resolved.state.status === "failed") {
       const persistedOutcome = evidence.correction?.outcome;
-      const outcome = ["validator-failure", "worker-failure", "technical-conflict"].includes(persistedOutcome)
+      const outcome = ["validator-failure", "worker-failure", "technical-conflict", "timeout", "no-progress"].includes(persistedOutcome)
         ? persistedOutcome
         : "infrastructure-failure";
       await recordOutcome(resolved.runId, issue, {
@@ -412,6 +457,23 @@ async function autoReworkIssue(config, {
       };
     }
 
+    if (reworkOptions.deadlineAt && now() >= reworkOptions.deadlineAt) {
+      await recordOutcome(resolved.runId, issue, {
+        status: "timeout",
+        attemptsUsed: lineage.attempts.length,
+        finalVerdict: "rework",
+        timeoutStage: "session"
+      });
+      return {
+        issue: String(issue),
+        outcome: "timeout",
+        finalRunId: resolved.runId,
+        finalVerdict: "rework",
+        timeoutStage: "session",
+        runs
+      };
+    }
+
     const runId = newRunId();
     try {
       const result = await reworkExecutor(config, {
@@ -427,27 +489,36 @@ async function autoReworkIssue(config, {
       });
       runs.push(result);
       const outcome = resultOutcome(result, issue);
-      if (outcome.status === "worker-failure" || outcome.status === "validator-failure") {
-        await recordOutcome(result.runId, issue, { status: outcome.status, finalVerdict: outcome.verdict });
+      if (["worker-failure", "validator-failure", "timeout", "no-progress"].includes(outcome.status)) {
+        await recordOutcome(result.runId, issue, {
+          status: outcome.status,
+          finalVerdict: outcome.verdict,
+          timeoutStage: outcome.timeoutStage
+        });
         return {
           issue: String(issue),
           outcome: outcome.status,
           finalRunId: result.runId,
           finalVerdict: outcome.verdict,
+          ...(outcome.timeoutStage ? { timeoutStage: outcome.timeoutStage } : {}),
           runs
         };
       }
     } catch (error) {
-      const outcome = error.code === "REWORK_REFRESH_CONFLICT" ? "technical-conflict" : "infrastructure-failure";
+      const outcome = error.code === "AUTOMATION_TIMEOUT"
+        ? "timeout"
+        : error.code === "REWORK_REFRESH_CONFLICT" ? "technical-conflict" : "infrastructure-failure";
       await recordOutcome(runId, issue, {
         status: outcome,
-        finalVerdict: null
+        finalVerdict: null,
+        timeoutStage: error.timeoutStage
       });
       return {
         issue: String(issue),
         outcome,
         finalRunId: runId,
         error: error.message,
+        ...(error.timeoutStage ? { timeoutStage: error.timeoutStage } : {}),
         runs
       };
     }
@@ -463,16 +534,21 @@ async function autoRework(config, {
   stateLoader = loadRunState,
   stateSaver = saveRunState,
   reworkExecutor = executeReworkRun,
-  reworkOptions = {}
+  reworkOptions = {},
+  timeoutMs = DEFAULT_AUTO_REWORK_TIMEOUT_MS,
+  now = Date.now
 } = {}) {
   const issues = [...new Set((issueIds || []).map(String))];
   if (!Number.isInteger(retryLimit) || retryLimit < 1) {
     throw new Error("Automatic rework retry limit must be a positive integer.");
   }
   if (!Number.isInteger(capacity) || capacity < 0) throw new Error("Automatic rework capacity must be a non-negative integer.");
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("Automatic rework timeout must be a positive number of milliseconds.");
   if (!issues.length || capacity === 0) {
-    return { mode: "auto-rework", retryLimit, capacity, issues: [] };
+    return { mode: "auto-rework", retryLimit, capacity, timeoutMs, issues: [] };
   }
+
+  const deadlineAt = now() + timeoutMs;
 
   const results = new Array(issues.length);
   let cursor = 0;
@@ -487,6 +563,7 @@ async function autoRework(config, {
         retryLimit,
         attemptsUsed: outcome.attemptsUsed ?? attempt?.number ?? 0,
         finalVerdict: outcome.finalVerdict ?? null,
+        ...(outcome.timeoutStage ? { timeoutStage: outcome.timeoutStage } : {}),
         action: outcome.action || (["approved"].includes(outcome.status)
           ? `maestro approve ${issue}`
           : outcome.status === "human-gate"
@@ -511,16 +588,18 @@ async function autoRework(config, {
         stateSaver,
         recordOutcome,
         reworkExecutor,
-        reworkOptions
+        reworkOptions: { ...reworkOptions, deadlineAt },
+        now
       });
     }
   }
   await Promise.all(Array.from({ length: Math.min(capacity, issues.length) }, () => runNext()));
-  return { mode: "auto-rework", retryLimit, capacity, issues: results };
+  return { mode: "auto-rework", retryLimit, capacity, timeoutMs, issues: results };
 }
 
 module.exports = {
   DEFAULT_AUTO_REWORK_LIMIT,
+  DEFAULT_AUTO_REWORK_TIMEOUT_MS,
   resolveIssueReworkSources,
   resolveReworkParentRunId,
   refreshWorker,

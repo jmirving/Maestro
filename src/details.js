@@ -86,6 +86,7 @@ function appendEvidence(lines, state, evidence, { heading = null } = {}) {
     lines.push(`  Source run: ${valueOrNone(evidence.correction.sourceRunId)}`);
     lines.push(`  Phase: ${valueOrNone(evidence.correction.phase)}`);
     lines.push(`  Outcome: ${valueOrNone(evidence.correction.outcome)}`);
+    if (evidence.correction.timeoutStage) lines.push(`  Timeout stage: ${evidence.correction.timeoutStage}`);
     if (evidence.correction.implementation) {
       lines.push(`  Implementation branch: ${valueOrNone(evidence.correction.implementation.branch)}`);
       lines.push(`  Implementation worktree: ${valueOrNone(evidence.correction.implementation.worktreePath)}`);
@@ -115,6 +116,7 @@ function appendEvidence(lines, state, evidence, { heading = null } = {}) {
     lines.push(`  Status: ${valueOrNone(evidence.autoRework.status)}`);
     lines.push(`  Attempts used: ${valueOrNone(evidence.autoRework.attemptsUsed)}`);
     lines.push(`  Retry limit: ${valueOrNone(evidence.autoRework.retryLimit)}`);
+    if (evidence.autoRework.timeoutStage) lines.push(`  Timeout stage: ${evidence.autoRework.timeoutStage}`);
     lines.push(`  Next action: ${valueOrNone(evidence.autoRework.action)}`);
   }
   lines.push("Worker:");

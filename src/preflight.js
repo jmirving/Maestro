@@ -12,7 +12,7 @@ function describePreflights(config, items) {
   }));
 }
 
-async function runPreflights(config, items, { cwd, runner = runShellChecked } = {}) {
+async function runPreflights(config, items, { cwd, runner = runShellChecked, timeoutMs = null } = {}) {
   const results = [];
   for (const entry of describePreflights(config, items)) {
     if (!entry.command) {
@@ -21,13 +21,14 @@ async function runPreflights(config, items, { cwd, runner = runShellChecked } = 
     }
     console.error(`[Maestro] preflight ${entry.name}: ${entry.command}`);
     try {
-      const result = await runner(entry.command, { cwd, stream: true, streamPrefix: `[preflight:${entry.name}] ` });
+      const result = await runner(entry.command, { cwd, stream: true, streamPrefix: `[preflight:${entry.name}] `, timeoutMs });
       results.push({ capability: entry.name, status: "passed", stdout: result.stdout.trim() });
       console.error(`[Maestro] preflight ${entry.name} passed`);
     } catch (error) {
       results.push({ capability: entry.name, status: "failed", stderr: error.result?.stderr?.trim() || error.message });
       if (entry.definition.required !== false) {
         const failure = new Error(`Required capability '${entry.name}' failed preflight.`);
+        if (error.result?.timedOut) failure.code = "AUTOMATION_TIMEOUT";
         failure.capability = entry.name;
         failure.results = results;
         throw failure;

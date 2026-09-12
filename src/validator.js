@@ -25,7 +25,7 @@ function parseVerdict(report) {
   return match ? match[1].toLowerCase() : "invalid";
 }
 
-async function validateWorker({ repository, worker, runId, baseline, codexCommand = "codex", runner = runProcess }) {
+async function validateWorker({ repository, worker, runId, baseline, codexCommand = "codex", runner = runProcess, timeoutMs = null }) {
   const reportDir = path.join(path.dirname(worker.worktreePath), ".maestro-reports");
   await fs.mkdir(reportDir, { recursive: true });
   const reportPath = path.join(reportDir, `validator-${worker.issue}-${runId}.md`);
@@ -34,7 +34,8 @@ async function validateWorker({ repository, worker, runId, baseline, codexComman
     cwd: worker.worktreePath,
     input: `${buildValidatorPrompt({ repository, worker, baseline })}\n`,
     stream: true,
-    streamPrefix: `[#${worker.issue} validator] `
+    streamPrefix: `[#${worker.issue} validator] `,
+    timeoutMs
   });
   console.error(`[Maestro] validator #${worker.issue} finished with exit ${result.code}`);
   let report = "";
@@ -42,6 +43,7 @@ async function validateWorker({ repository, worker, runId, baseline, codexComman
   return {
     issue: worker.issue,
     exitCode: result.code,
+    timedOut: result.timedOut === true,
     verdict: result.code === 0 ? parseVerdict(report) : "failed",
     report,
     stderr: result.stderr.trim()

@@ -25,7 +25,7 @@ maestro start --auto-rework
 maestro next --auto-rework
 ```
 
-Each validator `REWORK` is corrected and validated again, up to three persisted attempts per issue. Approval returns to the normal human-review step. A genuine human gate, worker/tool or refresh failure, invalid/missing validator output, or exhaustion stops that issue and preserves actionable evidence in `maestro details`; independent siblings may still finish. A content conflict during refresh is a distinct `technical-conflict`: Maestro records the files and operation state, attempts `rebase --abort`, charges the attempt, and shows an executable source-qualified `maestro rework <issue> --run <source-run-id>` continuation without launching a correction worker. Automatic rework never approves or integrates code.
+Each validator `REWORK` is corrected and validated again, up to three persisted attempts per issue and within one 30-minute caller-wide correction session. Workers and validators receive the remaining session time and are terminated when it expires. Approval returns to the normal human-review step. A genuine human gate, worker/tool or refresh failure, invalid/missing validator output, a successful worker with no new commit (`no-progress`), timeout, or exhaustion stops that issue and preserves actionable evidence in `maestro details`; independent siblings may still finish. A content conflict during refresh is a distinct `technical-conflict`: Maestro records the files and operation state, attempts `rebase --abort`, charges the attempt, and shows an executable source-qualified `maestro rework <issue> --run <source-run-id>` continuation without launching a correction worker. Automatic rework never approves or integrates code.
 
 Inspect persisted state before deciding what to do:
 

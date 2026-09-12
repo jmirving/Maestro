@@ -86,12 +86,16 @@ function describeIssue(config, issue, evidence, plan) {
   } else if (validation?.verdict === "human_gate") {
     state = "validator requested a human decision, awaiting human disposition";
     integrationState = "not eligible until human disposition";
-  } else if (["worker-failure", "validator-failure", "infrastructure-failure", "technical-conflict"].includes(evidence?.autoRework?.status || evidence?.correction?.outcome)) {
+  } else if (["worker-failure", "validator-failure", "infrastructure-failure", "technical-conflict", "timeout", "no-progress"].includes(evidence?.autoRework?.status || evidence?.correction?.outcome)) {
     const outcome = evidence.autoRework?.status || evidence.correction.outcome;
     const attempt = evidence.autoRework?.attemptsUsed ?? evidence.correction?.number ?? 0;
     const conflict = evidence.correction?.conflict;
     state = outcome === "technical-conflict"
       ? `automatic correction stopped after charged attempt ${attempt}: rebase content conflict (${conflict?.operationState || "state unknown"}); resolve safely, then run ${conflict?.continuationAction || `maestro rework ${issue}`}`
+      : outcome === "timeout"
+        ? `automatic correction stopped${attempt ? ` after charged attempt ${attempt}` : " before a correction attempt"}: session timeout during ${evidence.autoRework?.timeoutStage || evidence.correction?.timeoutStage || "activity"}; human attention required`
+        : outcome === "no-progress"
+          ? `automatic correction stopped after charged attempt ${attempt}: worker completed without a new commit; human attention required`
       : `automatic correction stopped${attempt ? ` after attempt ${attempt}` : " before a correction attempt"}: ${outcome}; human attention required`;
     integrationState = outcome === "technical-conflict"
       ? "not eligible; conflicted implementation and recovery evidence are preserved"

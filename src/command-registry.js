@@ -52,7 +52,7 @@ const COMMANDS = [
     options: {
       "--repo-path": COMMON_REPO_OPTION,
       "--rerun": { description: "Intentionally bypass persisted lifecycle deferrals and retry manifest-ready work." },
-      "--auto-rework": { description: "Automatically correct and revalidate validator-REWORK results, up to three attempts per issue." }
+      "--auto-rework": { description: "Automatically correct and revalidate REWORK results, up to three attempts within a 30-minute session." }
     },
     prerequisites: "Ready manifest work, a clean usable repository, and every capability required by the selected items.",
     effects: "Persists a run, creates isolated branches/worktrees, runs workers, then validates changed branches in fresh agent contexts. --auto-rework may create bounded correction children.",
@@ -72,7 +72,7 @@ const COMMANDS = [
     options: {
       "--repo-path": COMMON_REPO_OPTION,
       "--rerun": { description: "Intentionally retry manifest-ready work despite prior lifecycle evidence." },
-      "--auto-rework": { description: "Automatically correct and revalidate validator-REWORK results, up to three attempts per issue." }
+      "--auto-rework": { description: "Automatically correct and revalidate REWORK results, up to three attempts within a 30-minute session." }
     },
     prerequisites: "The same requirements as start. Existing running, review, rework, and integration states remain deferred.",
     effects: "Runs workers and validators for newly eligible work; --auto-rework may also resume or create bounded correction children. It does not integrate work.",

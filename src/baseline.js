@@ -1,6 +1,6 @@
 const { runShell } = require("./process");
 
-async function captureBaseline(config, { cwd, runner = runShell } = {}) {
+async function captureBaseline(config, { cwd, runner = runShell, timeoutMs = null } = {}) {
   const baseline = config.baseline || {};
   const commands = baseline.commands || config.integration?.commands || [];
   if (!commands.length) return { enabled: false, allowFailing: false, commands: [], results: [], passing: true };
@@ -12,8 +12,15 @@ async function captureBaseline(config, { cwd, runner = runShell } = {}) {
     const result = await runner(command, {
       cwd,
       stream: true,
-      streamPrefix: `[baseline:${index + 1}/${commands.length}] `
+      streamPrefix: `[baseline:${index + 1}/${commands.length}] `,
+      timeoutMs
     });
+    if (result.timedOut) {
+      const error = new Error(`Baseline command timed out: ${command}`);
+      error.code = "AUTOMATION_TIMEOUT";
+      error.result = result;
+      throw error;
+    }
     results.push({ command, code: result.code, stdout: result.stdout, stderr: result.stderr });
     console.error(`[Maestro] baseline ${index + 1}/${commands.length} ${result.code === 0 ? "passed" : "failed"}`);
   }

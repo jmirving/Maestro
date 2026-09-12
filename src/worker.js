@@ -24,7 +24,7 @@ function buildWorkerPrompt({ repository, item, correctionContext = null }) {
     `End with a section titled exactly \"### Human review\". Keep it concise and practical. State where a human should expect to see any visual/behavior change, which user/persona/state to use if relevant, and the highest-value place to check for catastrophic regression or unintended side effects. If no meaningful manual review exists, say so explicitly.`;
 }
 
-async function executeWorker({ repository, item, worktree, runId, correctionContext = null, codexCommand = "codex", runner = runProcess }) {
+async function executeWorker({ repository, item, worktree, runId, correctionContext = null, codexCommand = "codex", runner = runProcess, timeoutMs = null }) {
   const reportDir = path.join(path.dirname(worktree.worktreePath), ".maestro-reports");
   await fs.mkdir(reportDir, { recursive: true });
   const reportPath = path.join(reportDir, `worker-${item.id}-${runId}.md`);
@@ -34,7 +34,8 @@ async function executeWorker({ repository, item, worktree, runId, correctionCont
     cwd: worktree.worktreePath,
     input: `${prompt}\n`,
     stream: true,
-    streamPrefix: `[#${item.id} worker] `
+    streamPrefix: `[#${item.id} worker] `,
+    timeoutMs
   });
   console.error(`[Maestro] worker #${item.id} finished with exit ${result.code}`);
   let report = "";
@@ -45,6 +46,7 @@ async function executeWorker({ repository, item, worktree, runId, correctionCont
     mode: item.mode,
     status: result.code === 0 ? "worker-finished" : "worker-failed",
     exitCode: result.code,
+    timedOut: result.timedOut === true,
     baseSha: worktree.baseSha,
     headSha,
     branch: worktree.branch,

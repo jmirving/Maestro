@@ -534,34 +534,135 @@ test("automatic rework fails safely on worker, validator, and pre-worker refresh
   assert.equal(refreshState.correction.attempts["7"].outcome, "infrastructure-failure");
 });
 
-test("automatic rework treats missing validation as validator failure", async (t) => {
-  const fixture = await autoFixture(t);
+test("automatic rework records no-progress when a successful worker creates no commit", async (t) => {
+  const fixture = await autoFixture(t, ["7", "8"]);
   let validatorCalls = 0;
   const result = await autoRework(fixture.config, {
     repoPath: fixture.repoPath,
-    issueIds: ["7"],
+    issueIds: ["7", "8"],
+    capacity: 2,
     reworkOptions: {
       runner: fixture.runner,
-      workerExecutor: async ({ worktree }) => ({
-        issue: "7",
+      workerExecutor: async ({ item, worktree }) => ({
+        issue: item.id,
         exitCode: 0,
         ...worktree,
-        headSha: worktree.baseSha,
-        report: "no new commit"
+        headSha: item.id === "7" ? worktree.baseSha : "corrected-8",
+        report: item.id === "7" ? "no new commit" : "corrected"
       }),
-      validatorExecutor: async () => {
+      validatorExecutor: async ({ worker }) => {
         validatorCalls += 1;
-        return { issue: "7", exitCode: 0, verdict: "approve" };
+        return { issue: worker.issue, exitCode: 0, verdict: "approve" };
       }
     }
   });
 
-  assert.equal(validatorCalls, 0);
-  assert.equal(result.issues[0].outcome, "validator-failure");
+  assert.equal(validatorCalls, 1);
+  assert.deepEqual(result.issues.map((entry) => [entry.issue, entry.outcome]), [["7", "no-progress"], ["8", "approved"]]);
   const state = await loadRunState(fixture.repoPath, result.issues[0].finalRunId);
   assert.deepEqual(state.validations, []);
-  assert.equal(state.correction.attempts["7"].outcome, "validator-failure");
-  assert.equal(state.autoRework["7"].status, "validator-failure");
+  assert.equal(state.correction.attempts["7"].outcome, "no-progress");
+  assert.equal(state.autoRework["7"].status, "no-progress");
+
+  let resumedCalls = 0;
+  const resumed = await autoRework(fixture.config, {
+    repoPath: fixture.repoPath,
+    issueIds: ["7"],
+    reworkExecutor: async () => { resumedCalls += 1; }
+  });
+  assert.equal(resumed.issues[0].outcome, "no-progress");
+  assert.equal(resumedCalls, 0);
+});
+
+test("automatic rework applies one session deadline, persists timeout, and lets an independent sibling finish", async (t) => {
+  const fixture = await autoFixture(t, ["7", "8"]);
+  const receivedTimeouts = [];
+  const result = await autoRework(fixture.config, {
+    repoPath: fixture.repoPath,
+    issueIds: ["7", "8"],
+    capacity: 2,
+    timeoutMs: 250,
+    reworkOptions: {
+      runner: fixture.runner,
+      workerExecutor: async ({ item, worktree, timeoutMs }) => {
+        receivedTimeouts.push(timeoutMs);
+        return item.id === "7"
+          ? { issue: item.id, exitCode: 1, timedOut: true, ...worktree, headSha: worktree.baseSha, report: "timed out" }
+          : { issue: item.id, exitCode: 0, timedOut: false, ...worktree, headSha: "corrected-8", report: "corrected" };
+      },
+      validatorExecutor: async ({ worker, timeoutMs }) => {
+        receivedTimeouts.push(timeoutMs);
+        return { issue: worker.issue, exitCode: 0, timedOut: false, verdict: "approve", report: "fresh" };
+      }
+    }
+  });
+
+  assert.deepEqual(result.issues.map((entry) => [entry.issue, entry.outcome]), [["7", "timeout"], ["8", "approved"]]);
+  assert.ok(receivedTimeouts.every((value) => value > 0 && value <= 250));
+  const timedOut = await loadRunState(fixture.repoPath, result.issues[0].finalRunId);
+  assert.equal(timedOut.status, "failed");
+  assert.equal(timedOut.correction.attempts["7"].outcome, "timeout");
+  assert.equal(timedOut.correction.attempts["7"].timeoutStage, "worker");
+  assert.equal(timedOut.autoRework["7"].status, "timeout");
+  assert.equal(timedOut.autoRework["7"].timeoutStage, "worker");
+
+  let resumedCalls = 0;
+  const resumed = await autoRework(fixture.config, {
+    repoPath: fixture.repoPath,
+    issueIds: ["7"],
+    timeoutMs: 250,
+    reworkExecutor: async () => { resumedCalls += 1; }
+  });
+  assert.equal(resumed.issues[0].outcome, "timeout");
+  assert.equal(resumedCalls, 0);
+});
+
+test("automatic rework distinguishes validator timeout from validator failure", async (t) => {
+  const fixture = await autoFixture(t);
+  const result = await autoRework(fixture.config, {
+    repoPath: fixture.repoPath,
+    issueIds: ["7"],
+    timeoutMs: 250,
+    reworkOptions: {
+      runner: fixture.runner,
+      workerExecutor: async ({ worktree }) => ({ issue: "7", exitCode: 0, ...worktree, headSha: "changed", report: "done" }),
+      validatorExecutor: async ({ timeoutMs }) => ({ issue: "7", exitCode: 1, timedOut: timeoutMs > 0, verdict: "failed", report: "" })
+    }
+  });
+
+  assert.equal(result.issues[0].outcome, "timeout");
+  const state = await loadRunState(fixture.repoPath, result.issues[0].finalRunId);
+  assert.equal(state.correction.attempts["7"].timeoutStage, "validator");
+  assert.equal(state.autoRework["7"].timeoutStage, "validator");
+});
+
+test("an exhausted session persists timeout before another attempt and resume preserves it", async (t) => {
+  const fixture = await autoFixture(t);
+  let clockReads = 0;
+  let executorCalls = 0;
+  const result = await autoRework(fixture.config, {
+    repoPath: fixture.repoPath,
+    issueIds: ["7"],
+    timeoutMs: 25,
+    now: () => clockReads++ === 0 ? 100 : 126,
+    reworkExecutor: async () => { executorCalls += 1; }
+  });
+
+  assert.equal(result.issues[0].outcome, "timeout");
+  assert.equal(result.issues[0].timeoutStage, "session");
+  assert.equal(executorCalls, 0);
+  const state = await loadRunState(fixture.repoPath, fixture.sourceRunId);
+  assert.equal(state.autoRework["7"].status, "timeout");
+  assert.equal(state.autoRework["7"].attemptsUsed, 0);
+  assert.equal(state.autoRework["7"].timeoutStage, "session");
+
+  const resumed = await autoRework(fixture.config, {
+    repoPath: fixture.repoPath,
+    issueIds: ["7"],
+    reworkExecutor: async () => { executorCalls += 1; }
+  });
+  assert.equal(resumed.issues[0].outcome, "timeout");
+  assert.equal(executorCalls, 0);
 });
 
 test("displayed technical-conflict continuation resolves its source and resumes correction without authority", async (t) => {
