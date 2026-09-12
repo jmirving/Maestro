@@ -224,7 +224,7 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
     if (state === "CLOSED" && ["ready", "blocked", "human_gate"].includes(proposed.status)) {
       recordTransition(proposed, proposed.status, "inactive", `GitHub issue closed${snapshot.stateReason ? ` (${snapshot.stateReason})` : ""}.`);
       proposed.status = "inactive";
-    } else if (state === "OPEN" && ["inactive", "complete"].includes(proposed.status) && original.github?.state === "CLOSED") {
+    } else if (state === "OPEN" && proposed.status === "inactive" && original.github?.state === "CLOSED") {
       recordTransition(proposed, proposed.status, "ready", "GitHub issue reopened.");
       proposed.status = mapped.humanGate ? "human_gate" : "ready";
     } else if (state === "OPEN" && proposed.status === "complete") {

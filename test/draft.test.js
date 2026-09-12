@@ -262,7 +262,11 @@ test("closed to reopened reconciliation restores inactive work but preserves int
   const completedWhileClosed = JSON.parse(JSON.stringify(closed));
   completedWhileClosed.work["7"].status = "complete";
   const reopenedComplete = proposeDraft({ repository: "owner/repo", existingConfig: completedWhileClosed, issues: [issue(7)] });
-  assert.equal(reopenedComplete.manifest.work["7"].status, "ready");
+  assert.equal(reopenedComplete.manifest.work["7"].status, "complete");
+  assert.equal(reopenedComplete.manifest.work["7"].github.state, "OPEN");
+  assert.deepEqual(reopenedComplete.manifest.work["7"].reconciliationHistory, closed.work["7"].reconciliationHistory);
+  assert.equal(reopenedComplete.planning.waves.length, 0);
+  assert.match(reopenedComplete.preserved[0].reason, /completion is preserved/);
 
   const integrated = proposeDraft({
     repository: "owner/repo",
@@ -271,6 +275,31 @@ test("closed to reopened reconciliation restores inactive work but preserves int
   });
   assert.equal(integrated.manifest.work["8"].status, "complete");
   assert.match(integrated.preserved[0].reason, /completion is preserved/);
+});
+
+test("start and next do not schedule a completed issue after GitHub reopens it", () => {
+  const repoPath = tempDir();
+  assert.equal(spawnSync("git", ["init", "-q"], { cwd: repoPath }).status, 0);
+  const closed = proposeDraft({
+    repository: "owner/repo",
+    existingConfig: { repository: "owner/repo", work: { "7": { status: "ready" } } },
+    issues: [{ ...issue(7, "CLOSED"), stateReason: "COMPLETED" }]
+  }).manifest;
+  closed.work["7"].status = "complete";
+  const reopened = proposeDraft({ repository: "owner/repo", existingConfig: closed, issues: [issue(7)] }).manifest;
+  fs.writeFileSync(path.join(repoPath, ".maestro.json"), `${JSON.stringify(reopened, null, 2)}\n`);
+
+  const reportRoot = path.join(path.dirname(repoPath), ".maestro-worktrees", path.basename(repoPath), ".maestro-reports");
+  for (const command of ["start", "next"]) {
+    const result = spawnSync(process.execPath, [path.resolve(__dirname, "../bin/maestro.js"), command], {
+      cwd: repoPath,
+      encoding: "utf8"
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /"selected": \[\]/);
+    assert.match(result.stdout, /"workers": \[\]/);
+    assert.equal(fs.existsSync(reportRoot), false, `${command} must not persist or execute a run`);
+  }
 });
 
 test("GitHub dependencies and configured label mappings reconcile reversibly without deleting manual metadata", () => {
