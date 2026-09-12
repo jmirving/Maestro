@@ -56,6 +56,24 @@ test("mixed validator, review, and integration outcomes are deferred with action
   assert.ok(plan.recommendations.includes("maestro commit --run 20260910010101-aaaaaa"));
 });
 
+test("persisted integration evidence is resolved once the manifest records completion", () => {
+  const state = {
+    runId: "20260910010101-aaaaaa",
+    mode: "execute",
+    workers: [worker(12)],
+    validations: [{ issue: "12", verdict: "approve" }],
+    reviews: { "12": { disposition: "approve" } },
+    integration: [{ issue: "12", integratedSha: "integrated" }]
+  };
+
+  const pending = reconcilePlan(config({ "12": { status: "ready" } }), [state]);
+  assert.equal(pending.deferred[0].lifecycle.state, "integrated-pending-manifest");
+
+  const completed = reconcilePlan(config({ "12": { status: "complete" } }), [state]);
+  assert.deepEqual(completed.deferred, []);
+  assert.deepEqual(completed.recommendations, []);
+});
+
 test("an active rework child supersedes the source rework recommendation", () => {
   const manifest = config({ "7": { status: "ready" } });
   const plan = reconcilePlan(manifest, [

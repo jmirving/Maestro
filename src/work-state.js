@@ -37,12 +37,16 @@ async function loadExecutionStates(repoPath) {
   return [...states, ...activeByRun.values()];
 }
 
-function unresolvedWork(states) {
+function unresolvedWork(states, config = null) {
   const byIssue = new Map();
   for (const { issue, runId, state, evidence } of currentIssueEvidenceFromStates(states)) {
     if (evidence.worker) {
       const worker = evidence.worker;
       const lifecycle = classifyRunIssue(state, worker);
+      if (lifecycle.state === "integrated-pending-manifest" && config?.work?.[issue]?.status === "complete") {
+        byIssue.delete(issue);
+        continue;
+      }
       if (lifecycle.state !== "discarded") {
         byIssue.set(issue, { issue, runId, mode: state.mode, ...lifecycle });
       }
@@ -66,7 +70,7 @@ function unresolvedWork(states) {
 
 function reconcilePlan(config, states = []) {
   const plan = computePlan(config);
-  const unresolved = unresolvedWork(states);
+  const unresolved = unresolvedWork(states, config);
   const deferred = [];
   const ready = [];
 

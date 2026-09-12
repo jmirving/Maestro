@@ -162,7 +162,7 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
   const drift = [];
   const conflicts = [];
   const preserved = [];
-  const lifecycle = unresolvedWork(executionStates);
+  const lifecycle = unresolvedWork(executionStates, manifest);
 
   for (const issue of issues) {
     const id = issueId(issue);

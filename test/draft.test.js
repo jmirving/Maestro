@@ -277,8 +277,10 @@ test("closed to reopened reconciliation restores inactive work but preserves int
   assert.match(integrated.preserved[0].reason, /completion is preserved/);
 });
 
-test("start and next do not schedule a completed issue after GitHub reopens it", () => {
+test("reopening integrated completed work updates provenance without conflicts or rescheduling", () => {
   const repoPath = tempDir();
+  const binPath = path.join(repoPath, "bin");
+  fs.mkdirSync(binPath);
   assert.equal(spawnSync("git", ["init", "-q"], { cwd: repoPath }).status, 0);
   const closed = proposeDraft({
     repository: "owner/repo",
@@ -286,19 +288,68 @@ test("start and next do not schedule a completed issue after GitHub reopens it",
     issues: [{ ...issue(7, "CLOSED"), stateReason: "COMPLETED" }]
   }).manifest;
   closed.work["7"].status = "complete";
-  const reopened = proposeDraft({ repository: "owner/repo", existingConfig: closed, issues: [issue(7)] }).manifest;
-  fs.writeFileSync(path.join(repoPath, ".maestro.json"), `${JSON.stringify(reopened, null, 2)}\n`);
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  fs.writeFileSync(manifestPath, `${JSON.stringify(closed, null, 2)}\n`);
+
+  fs.writeFileSync(path.join(binPath, "gh"), `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "repo") process.stdout.write('{"nameWithOwner":"owner/repo"}');
+else if (args[0] === "issue" && args[1] === "list") process.stdout.write('[{"number":7,"state":"OPEN","stateReason":null,"closedAt":null,"updatedAt":"2026-09-12T01:00:00Z","title":"Issue 7","body":"","labels":[]}]');
+else process.exit(3);
+`, { mode: 0o755 });
 
   const reportRoot = path.join(path.dirname(repoPath), ".maestro-worktrees", path.basename(repoPath), ".maestro-reports");
+  fs.mkdirSync(reportRoot, { recursive: true });
+  const runId = "20260912010000-abcdef";
+  fs.writeFileSync(path.join(reportRoot, `run-${runId}.json`), `${JSON.stringify({
+    runId,
+    mode: "execute",
+    status: "awaiting-review",
+    plan: { selected: [{ id: "7" }] },
+    workers: [{ issue: "7", exitCode: 0, headSha: "integrated-sha", branch: "maestro/7" }],
+    validations: [{ issue: "7", verdict: "approve", exitCode: 0 }],
+    reviews: { "7": { disposition: "approve" } },
+    integration: [{ issue: "7", branch: "maestro/7", integratedSha: "integrated-sha", validationResults: [] }],
+    integratedAt: "2026-09-12T00:30:00Z"
+  }, null, 2)}\n`);
+
+  const cliPath = path.resolve(__dirname, "../bin/maestro.js");
+  const env = { ...process.env, PATH: `${binPath}${path.delimiter}${process.env.PATH}` };
+  const firstDraft = spawnSync(process.execPath, [cliPath, "draft", "--write"], {
+    cwd: repoPath,
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(firstDraft.status, 0, firstDraft.stderr);
+  assert.doesNotMatch(firstDraft.stdout, /Reconciliation conflicts/);
+  assert.match(firstDraft.stdout, /Manifest completion is preserved/);
+  const reconciled = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  assert.equal(reconciled.work["7"].status, "complete");
+  assert.equal(reconciled.work["7"].github.state, "OPEN");
+  assert.deepEqual(reconciled.work["7"].reconciliationHistory, closed.work["7"].reconciliationHistory);
+
+  const firstContents = fs.readFileSync(manifestPath, "utf8");
+  const repeatedDraft = spawnSync(process.execPath, [cliPath, "draft", "--write"], {
+    cwd: repoPath,
+    env,
+    encoding: "utf8"
+  });
+  assert.equal(repeatedDraft.status, 0, repeatedDraft.stderr);
+  assert.doesNotMatch(repeatedDraft.stdout, /Reconciliation conflicts/);
+  assert.match(repeatedDraft.stdout, /\(no changes\)/);
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), firstContents);
+
+  const persistedEntries = fs.readdirSync(reportRoot).sort();
   for (const command of ["start", "next"]) {
-    const result = spawnSync(process.execPath, [path.resolve(__dirname, "../bin/maestro.js"), command], {
+    const result = spawnSync(process.execPath, [cliPath, command], {
       cwd: repoPath,
+      env,
       encoding: "utf8"
     });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /"selected": \[\]/);
     assert.match(result.stdout, /"workers": \[\]/);
-    assert.equal(fs.existsSync(reportRoot), false, `${command} must not persist or execute a run`);
+    assert.deepEqual(fs.readdirSync(reportRoot).sort(), persistedEntries, `${command} must not persist or execute another run`);
   }
 });
 
