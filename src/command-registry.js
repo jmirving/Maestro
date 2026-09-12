@@ -5,19 +5,19 @@ const COMMANDS = [
   {
     name: "draft",
     category: "Planning",
-    summary: "Propose or refresh repository work from open GitHub issues.",
-    when: "Use before planning when .maestro.json is missing or its issue scope needs refreshing.",
+    summary: "Preview or reconcile GitHub issue truth with repository work.",
+    when: "Use before planning and whenever GitHub issue state, dependencies, or mapped labels may have changed.",
     usages: ["maestro draft [manifest.json] [issue ...] [--all] [--agent] [--write]"],
-    positionals: "Optional manifest path followed by issue numbers. Omit issues for newly eligible open issues.",
+    positionals: "Optional manifest path followed by issue numbers. Omit issues to reconcile the full issue set.",
     options: {
       "--repo-path": COMMON_REPO_OPTION,
-      "--all": { description: "Reconsider every eligible open issue; cannot be combined with issue numbers." },
+      "--all": { description: "Explicitly reconsider the full open and closed issue set; cannot be combined with issue numbers." },
       "--agent": { description: "Add bounded, read-only semantic planning recommendations." },
       "--write": { description: "Persist the schema-valid proposal; otherwise draft is a preview." }
     },
     prerequisites: "A Git checkout and readable GitHub repository. Writing requires a safe, schema-valid dependency graph.",
     effects: "Reads issues and builds a proposal; only --write changes the manifest.",
-    cautions: "Saving a draft does not launch work, grant human approval, or authorize integration. Drafting never mutates GitHub.",
+    cautions: "Saving a draft does not launch work, expand delegated scope, grant human approval, or authorize integration. Lifecycle conflicts remain fail-closed; drafting never mutates GitHub.",
     next: ["maestro plan", "maestro start"],
     examples: [
       ["draft", "--agent"],
@@ -54,9 +54,9 @@ const COMMANDS = [
       "--rerun": { description: "Intentionally bypass persisted lifecycle deferrals and retry manifest-ready work." },
       "--auto-rework": { description: "Automatically correct and revalidate REWORK results, up to three attempts within a 30-minute session." }
     },
-    prerequisites: "Ready manifest work, a clean usable repository, and every capability required by the selected items.",
+    prerequisites: "Ready reconciled work, a clean usable repository, current GitHub issue facts, and every capability required by the selected items.",
     effects: "Persists a run, creates isolated branches/worktrees, runs workers, then validates changed branches in fresh agent contexts. --auto-rework may create bounded correction children.",
-    cautions: "Does not approve, integrate, push the default branch, or close issues. Successful automatic rework still requires human review. --rerun is an explicit retry, not normal resume behavior.",
+    cautions: "GitHub drift blocks launch. Does not approve, integrate, push the default branch, or close issues. Successful automatic rework still requires human review. --rerun is an explicit retry, not normal resume behavior or a drift bypass.",
     next: ["maestro status", "maestro details <issue>", "maestro output"],
     examples: [["start"], ["start", "--auto-rework"]],
     positionalKind: "optional-manifest"

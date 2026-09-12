@@ -59,14 +59,31 @@ maestro next
 Create or refresh that manifest from GitHub issues before planning:
 
 ```bash
-maestro draft                 # review all newly eligible open issues
+maestro draft                 # preview GitHub/manifest drift for all issues
 maestro draft --write         # persist the schema-valid proposal
 maestro draft 101 102 --write # update only these issues; preserve all other work
-maestro draft --all           # explicitly reconsider every eligible open issue
+maestro draft --all           # explicitly reconsider the full issue set
 maestro draft --agent         # add bounded semantic recommendations to the dry run
 ```
 
-Drafting is deterministic and never starts workers or mutates GitHub. Existing work entries and manually authored `blockedBy` relationships are preserved. Previously unknown open issues are added as `ready`, while explicit `Blocked by #123` or `Depends on #123` lines become hard dependencies. The output explains the expected concurrency-bounded execution waves and the source of dependency and advisory decisions. Cycles and references to work absent from the manifest block `--write`.
+Drafting is deterministic and never starts workers, changes a delegated scope, or mutates GitHub. It fetches open and closed issues, records GitHub provenance, adds unknown open issues as `ready`, makes closed actionable entries `inactive`, and restores previously reconciled inactive entries when GitHub reopens them. `inactive` preserves closure reason and history without claiming that implementation was accepted. Integrated `complete` history and metadata that GitHub cannot reconstruct remain authoritative. Explicit `Blocked by #123` or `Depends on #123` lines and configured label mappings are GitHub-owned and reversible; unrelated manually authored metadata is preserved.
+
+The preview separates safe drift, preserved Maestro state, and lifecycle conflicts. If GitHub changes an issue while its persisted execution, review, rework, or integration state is unresolved, Maestro reports a conflict and leaves that item untouched. `--write` validates the resulting schema and dependency graph, takes a lock, and refuses to overwrite an intervening manifest edit. Selected issue drafting only reconciles those entries. Discovery or reconciliation is planning evidence, not authorization for a worker or a narrower delegated session.
+
+Repositories may opt into exact label mappings without teaching Maestro repository-specific conventions:
+
+```json
+{
+  "github": {
+    "labelMappings": {
+      "priority": { "priority:urgent": 1 },
+      "mode": { "planning:research": "research" },
+      "requires": { "needs:database": ["postgres"] },
+      "humanGate": { "review:legal": "Legal approval" }
+    }
+  }
+}
+```
 
 `--agent` opts into a planning-only Codex invocation. Maestro supplies a reproducible, size-bounded context made from selected issue data, the deterministic proposal, the tracked repository tree, and prioritized excerpts from `AGENTS.md`, `README.md`, `docs/`, schemas, package metadata, and source. The analyzer runs read-only and ephemerally in a temporary directory, ignores user configuration and rules, and has MCP, hooks, apps, web search, and shell tools disabled. Codex and Maestro both enforce the structured JSON schema and its evidence/confidence requirements. It has a 120-second timeout, one retry, a 200-issue/64 KiB issue budget, a 96 KiB aggregate prompt budget (including the schema, policy, manifest, findings, issues, tree, and excerpts), and a 256 KiB output limit. Larger inputs must be reduced or selected in smaller explicit batches.
 
@@ -100,7 +117,7 @@ Use `maestro approve --run <run-id>` only when intentionally reviewing one histo
 
 `maestro commit` integrates the latest reviewed run, updates the matching work items to `complete` in `.maestro.json`, commits that manifest progress, and pushes it so the next invocation advances to newly unblocked work. If a prior attempt integrated only part of a run, invoking `commit` again skips the recorded integrations and resumes the remaining approved items. Its summary distinguishes newly integrated work, already integrated work, and a run with nothing remaining; `--run <run-id>` provides the same idempotent behavior for an explicitly selected run.
 
-`maestro start` and `maestro next` reconcile manifest readiness with every persisted run and active isolated worktree. Work already executing, awaiting review, awaiting rework, or awaiting integration is shown as deferred instead of being started again. Use `--rerun` only when intentionally retrying or discarding that lifecycle protection; reruns are never implicit.
+`maestro start` and `maestro next` reconcile manifest readiness with every persisted run and active isolated worktree. For GitHub-provenanced items selected to execute, they also perform a cheap issue preflight and stop if state, explicit dependencies, or configured label mappings changed since the last draft. Run `maestro draft --write`, inspect conflicts, then retry. Work already executing, awaiting review, awaiting rework, or awaiting integration is shown as deferred instead of being started again. Use `--rerun` only when intentionally retrying lifecycle evidence; it never bypasses GitHub drift safety.
 
 Add `--auto-rework` to `maestro start` or `maestro next` to send actionable validator `REWORK` results directly through correction and fresh validation. Maestro follows only the caller's selected wave (or resumes already-deferred rework when there is no new wave), keeps passing siblings independent, and stops each issue on `APPROVE`, `HUMAN_GATE`, worker/tool failure, invalid or missing validation, refresh failure, no progress, timeout, or exhaustion. The default budget is three correction attempts per issue within one 30-minute correction session and is persisted across child runs and later invocations. Workers and validators receive only the time remaining in that caller-wide session and are terminated when it expires. A successful worker that creates no new commit is recorded distinctly as `no-progress` without starting a validator. A correction attempt is charged when its child run is created, before preflight and branch refresh, so an interrupted refresh is visible and cannot create free retries. Manual `maestro rework` remains available and uses the same persisted attempt/lineage contract.
 

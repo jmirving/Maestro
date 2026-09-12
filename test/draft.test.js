@@ -4,7 +4,8 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
-const { proposeDraft, writeManifest } = require("../src/draft");
+const { proposeDraft, writeManifest, detectExecutionDrift } = require("../src/draft");
+const { loadGitHubIssues } = require("../src/github");
 
 function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "maestro-draft-test-"));
@@ -23,19 +24,28 @@ function agentAnalysis(output) {
   };
 }
 
+test("GitHub adapter fetches the full issue set and enriches closure reasons", async () => {
+  const calls = [];
+  const runner = async (command, args) => {
+    calls.push([command, ...args]);
+    if (args[0] === "issue") return { stdout: JSON.stringify([issue(1), { ...issue(2, "CLOSED"), closedAt: "2026-09-11T12:00:00Z" }]) };
+    return { stdout: JSON.stringify([[{ number: 1, state_reason: null }, { number: 2, state_reason: "not_planned" }]]) };
+  };
+  const issues = await loadGitHubIssues("owner/repo", [], { repoPath: "/repo", runner });
+  assert.equal(issues[1].stateReason, "not_planned");
+  assert.ok(calls[0].includes("all"));
+  assert.ok(calls[1].includes("--paginate"));
+});
+
 test("creates a valid minimal manifest from open GitHub issues", () => {
   const result = proposeDraft({
     repository: "owner/repo",
     issues: [issue(12), issue(3)]
   });
 
-  assert.deepEqual(result.manifest, {
-    repository: "owner/repo",
-    work: {
-      "3": { status: "ready" },
-      "12": { status: "ready" }
-    }
-  });
+  assert.equal(result.manifest.repository, "owner/repo");
+  assert.deepEqual(Object.fromEntries(Object.entries(result.manifest.work).map(([id, item]) => [id, item.status])), { "3": "ready", "12": "ready" });
+  assert.equal(result.manifest.work["3"].github.state, "OPEN");
   assert.deepEqual(result.added, ["3", "12"]);
   assert.deepEqual(result.unresolved, []);
   assert.equal(result.created, true);
@@ -56,9 +66,9 @@ test("refresh preserves completed work and all curated metadata", () => {
   const result = proposeDraft({ repository: "owner/repo", existingConfig: existing, issues: [issue(1), issue(2), issue(3)] });
 
   assert.deepEqual(existing, original, "drafting must not mutate the loaded manifest");
-  assert.deepEqual(result.manifest.work["1"], original.work["1"]);
-  assert.deepEqual(result.manifest.work["2"], original.work["2"]);
-  assert.deepEqual(result.manifest.work["3"], { status: "ready" });
+  assert.deepEqual({ ...result.manifest.work["1"], github: undefined }, { ...original.work["1"], github: undefined });
+  assert.deepEqual({ ...result.manifest.work["2"], github: undefined }, { ...original.work["2"], github: undefined });
+  assert.equal(result.manifest.work["3"].status, "ready");
   assert.equal(result.manifest.defaultConcurrency, 4);
 });
 
@@ -70,10 +80,8 @@ test("selected drafting leaves unrelated entries and returned issues untouched",
     selectedIssueIds: ["2"]
   });
 
-  assert.deepEqual(result.manifest.work, {
-    "2": { status: "ready" },
-    "9": { status: "complete" }
-  });
+  assert.equal(result.manifest.work["2"].status, "ready");
+  assert.deepEqual(result.manifest.work["9"], { status: "complete" });
   assert.deepEqual(result.added, ["2"]);
 });
 
@@ -92,7 +100,7 @@ test("explicit issue dependencies become hard relationships while manual depende
     existingConfig: existing,
     issues: [{ ...issue(3), body: "## Dependencies\n\nBlocked by #2." }]
   });
-  assert.deepEqual(result.manifest.work["3"], { status: "ready", blockedBy: ["4", "1", "2"], note: "curated" });
+  assert.deepEqual({ ...result.manifest.work["3"], github: undefined }, { status: "ready", blockedBy: ["4", "1", "2"], note: "curated", github: undefined });
   assert.equal(result.dependencySources.find((entry) => entry.dependency === "1").source, "existing manifest blockedBy");
   assert.match(result.dependencySources.find((entry) => entry.dependency === "2").source, /GitHub issue #3 body/);
   assert.equal(result.writable, true);
@@ -150,8 +158,8 @@ test("agent recommendations merge semantically while explicit manifest truth win
       waves: [{ issues: ["1"], confidence: "high", reason: "Foundation first.", evidence: ["dependency inference"] }]
     })
   });
-  assert.deepEqual(result.manifest.work["1"], { status: "ready", mode: "execute", priority: 7, requires: ["node", "postgres"] });
-  assert.deepEqual(result.manifest.work["2"], { status: "ready", blockedBy: ["1"], mode: "execute", priority: 20 });
+  assert.deepEqual({ ...result.manifest.work["1"], github: undefined }, { status: "ready", mode: "execute", priority: 7, requires: ["node", "postgres"], github: undefined });
+  assert.deepEqual({ ...result.manifest.work["2"], github: undefined }, { status: "ready", blockedBy: ["1"], mode: "execute", priority: 20, github: undefined });
   assert.equal(result.manifest.planning.advisoryConflicts[0].analyzer, "agent");
   assert.equal(result.manifest.planning.agentAnalysis.contextDigest, "a".repeat(64));
   assert.match(result.dependencySources.find((entry) => entry.issue === "2").source, /src\/core.js/);
@@ -223,6 +231,138 @@ test("closed, malformed, missing, and duplicate issue data stays unresolved", ()
   assert.match(result.unresolved.map((entry) => entry.reason).join("\n"), /no positive integer/);
   assert.match(result.unresolved.map((entry) => entry.reason).join("\n"), /did not return/);
   assert.match(result.unresolved.map((entry) => entry.reason).join("\n"), /duplicate records/);
+});
+
+test("open to closed reconciliation makes work inactive while preserving history and closure evidence", () => {
+  const initial = proposeDraft({ repository: "owner/repo", issues: [issue(7)] }).manifest;
+  initial.work["7"].note = "curated";
+  const result = proposeDraft({
+    repository: "owner/repo",
+    existingConfig: initial,
+    issues: [{ ...issue(7, "CLOSED"), stateReason: "NOT_PLANNED", closedAt: "2026-09-11T12:00:00Z" }]
+  });
+
+  assert.equal(result.manifest.work["7"].status, "inactive");
+  assert.equal(result.manifest.work["7"].note, "curated");
+  assert.equal(result.manifest.work["7"].github.stateReason, "NOT_PLANNED");
+  assert.deepEqual(result.manifest.work["7"].reconciliationHistory, [{ from: "ready", to: "inactive", reason: "GitHub issue closed (NOT_PLANNED)." }]);
+  assert.equal(result.drift[0].classification, "safe");
+  assert.equal(result.planning.waves.length, 0);
+});
+
+test("closed to reopened reconciliation restores inactive work but preserves integrated completion", () => {
+  const closed = proposeDraft({
+    repository: "owner/repo",
+    existingConfig: { repository: "owner/repo", work: { "7": { status: "ready" } } },
+    issues: [{ ...issue(7, "CLOSED"), stateReason: "COMPLETED" }]
+  }).manifest;
+  const reopened = proposeDraft({ repository: "owner/repo", existingConfig: closed, issues: [issue(7)] });
+  assert.equal(reopened.manifest.work["7"].status, "ready");
+
+  const completedWhileClosed = JSON.parse(JSON.stringify(closed));
+  completedWhileClosed.work["7"].status = "complete";
+  const reopenedComplete = proposeDraft({ repository: "owner/repo", existingConfig: completedWhileClosed, issues: [issue(7)] });
+  assert.equal(reopenedComplete.manifest.work["7"].status, "ready");
+
+  const integrated = proposeDraft({
+    repository: "owner/repo",
+    existingConfig: { repository: "owner/repo", work: { "8": { status: "complete" } } },
+    issues: [issue(8)]
+  });
+  assert.equal(integrated.manifest.work["8"].status, "complete");
+  assert.match(integrated.preserved[0].reason, /completion is preserved/);
+});
+
+test("GitHub dependencies and configured label mappings reconcile reversibly without deleting manual metadata", () => {
+  const config = {
+    repository: "owner/repo",
+    github: { labelMappings: {
+      priority: { urgent: 1 }, mode: { docs: "research" }, requires: { database: ["postgres"] }, humanGate: { legal: "Legal approval" }
+    } },
+    work: { "1": { status: "complete" }, "2": { status: "complete" }, "3": { status: "ready", blockedBy: ["1"], requires: ["node"], priority: 7, mode: "execute" } }
+  };
+  const first = proposeDraft({
+    repository: "owner/repo", existingConfig: config,
+    issues: [{ ...issue(3), body: "Blocked by #2", labels: [{ name: "urgent" }, { name: "docs" }, { name: "database" }, { name: "legal" }] }]
+  });
+  assert.deepEqual(first.manifest.work["3"].blockedBy, ["1", "2"]);
+  assert.deepEqual(first.manifest.work["3"].requires, ["node", "postgres"]);
+  assert.equal(first.manifest.work["3"].priority, 1);
+  assert.equal(first.manifest.work["3"].mode, "research");
+  assert.equal(first.manifest.work["3"].status, "human_gate");
+
+  const second = proposeDraft({ repository: "owner/repo", existingConfig: first.manifest, issues: [issue(3)] });
+  assert.deepEqual(second.manifest.work["3"].blockedBy, ["1"]);
+  assert.deepEqual(second.manifest.work["3"].requires, ["node"]);
+  assert.equal(second.manifest.work["3"].priority, 7);
+  assert.equal(second.manifest.work["3"].mode, "execute");
+  assert.equal(second.manifest.work["3"].status, "ready");
+});
+
+test("material GitHub changes conflict with unresolved Maestro execution state", () => {
+  const existing = proposeDraft({ repository: "owner/repo", issues: [issue(7)] }).manifest;
+  const result = proposeDraft({
+    repository: "owner/repo", existingConfig: existing,
+    issues: [issue(7, "CLOSED")],
+    executionStates: [{ runId: "run-1", status: "running", mode: "execute", plan: { selected: [{ id: "7" }] }, workers: [] }]
+  });
+  assert.equal(result.manifest.work["7"].status, "ready");
+  assert.equal(result.manifest.work["7"].github.state, "OPEN");
+  assert.match(result.conflicts[0].reason, /run-1 is running/);
+});
+
+test("full reconciliation reports vanished GitHub issues and selected reconciliation preserves unrelated provenance", () => {
+  const existing = proposeDraft({ repository: "owner/repo", issues: [issue(1), issue(2)] }).manifest;
+  const full = proposeDraft({ repository: "owner/repo", existingConfig: existing, issues: [issue(1)] });
+  assert.equal(full.conflicts[0].type, "missing-github");
+  const selected = proposeDraft({ repository: "owner/repo", existingConfig: existing, issues: [issue(1, "CLOSED")], selectedIssueIds: ["1"] });
+  assert.equal(selected.manifest.work["2"].github.state, "OPEN");
+  assert.equal(selected.conflicts.length, 0);
+});
+
+test("execution drift detection blocks closed and materially changed reconciled issues", () => {
+  const config = proposeDraft({ repository: "owner/repo", issues: [{ ...issue(7), body: "Blocked by #2" }], existingConfig: { repository: "owner/repo", work: { "2": { status: "complete" } } } }).manifest;
+  const findings = detectExecutionDrift(config, [{ ...issue(7, "CLOSED"), body: "" }], ["7"]);
+  assert.match(findings.map((entry) => entry.reason).join(" "), /closed/);
+  assert.match(findings.map((entry) => entry.reason).join(" "), /dependency metadata changed/);
+});
+
+test("manifest writes reject an intervening edit without overwriting it", () => {
+  const dir = tempDir();
+  const file = path.join(dir, ".maestro.json");
+  const original = `${JSON.stringify({ repository: "owner/repo", work: {} }, null, 2)}\n`;
+  fs.writeFileSync(file, original);
+  const intervening = `${JSON.stringify({ repository: "owner/repo", work: { "9": { status: "ready" } } }, null, 2)}\n`;
+  fs.writeFileSync(file, intervening);
+  assert.throws(() => writeManifest(file, { repository: "owner/repo", work: { "1": { status: "ready" } } }, { expectedContents: original }), /changed after reconciliation/);
+  assert.equal(fs.readFileSync(file, "utf8"), intervening);
+
+  fs.writeFileSync(`${file}.lock`, "another writer");
+  assert.throws(() => writeManifest(file, { repository: "owner/repo", work: {} }), /EEXIST/);
+  assert.equal(fs.readFileSync(`${file}.lock`, "utf8"), "another writer");
+});
+
+test("start refuses to execute a reconciled issue that GitHub has since closed", () => {
+  const repoPath = tempDir();
+  const binPath = path.join(repoPath, "bin");
+  fs.mkdirSync(binPath);
+  assert.equal(spawnSync("git", ["init", "-q"], { cwd: repoPath }).status, 0);
+  const config = proposeDraft({ repository: "owner/repo", issues: [issue(7)] }).manifest;
+  fs.writeFileSync(path.join(repoPath, ".maestro.json"), `${JSON.stringify(config, null, 2)}\n`);
+  fs.writeFileSync(path.join(binPath, "gh"), `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "repo") process.stdout.write('{"nameWithOwner":"owner/repo"}');
+else if (args[0] === "issue" && args[1] === "view") process.stdout.write('{"number":7,"state":"CLOSED","stateReason":"NOT_PLANNED","title":"Seven","body":"","labels":[]}');
+else process.exit(3);
+`, { mode: 0o755 });
+  const result = spawnSync(process.execPath, [path.resolve(__dirname, "../bin/maestro.js"), "start"], {
+    cwd: repoPath,
+    env: { ...process.env, PATH: `${binPath}${path.delimiter}${process.env.PATH}` },
+    encoding: "utf8"
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /GitHub\/manifest drift blocks execution.*#7 GitHub issue is closed/);
+  assert.match(result.stderr, /maestro draft --write/);
 });
 
 test("invalid existing metadata fails schema validation before it can be written", () => {
@@ -323,10 +463,10 @@ else process.exit(3);
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(repoPath, ".maestro.json"), "utf8")).work, {
-    "7": { status: "ready" },
-    "99": { status: "complete", note: "curated" }
-  });
+  const writtenWork = JSON.parse(fs.readFileSync(path.join(repoPath, ".maestro.json"), "utf8")).work;
+  assert.equal(writtenWork["7"].status, "ready");
+  assert.equal(writtenWork["7"].github.state, "OPEN");
+  assert.deepEqual(writtenWork["99"], { status: "complete", note: "curated" });
 });
 
 test("draft CLI reports unsafe dependencies and leaves the manifest unchanged", () => {

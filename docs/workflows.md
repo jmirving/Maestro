@@ -15,7 +15,7 @@ maestro plan
 maestro start
 ```
 
-The first draft command is a preview. `--write` saves the schema-valid proposal to `.maestro.json`; neither form launches work or grants integration permission. `plan` is also read-only. `start` executes the current ready wave in isolated worktrees and validates changed branches in fresh agent contexts, but it does not approve or integrate results.
+The first draft command previews safe GitHub/manifest changes, preserved Maestro-only state, and lifecycle conflicts. `--write` saves only the schema-valid proposal to `.maestro.json` and rejects an intervening edit; neither form launches work, expands a delegated scope, or grants integration permission. Closed issues become non-runnable `inactive` history rather than assumed-complete work. `plan` is also read-only. `start` checks selected reconciled issues for new GitHub drift, then executes the current ready wave in isolated worktrees and validates changed branches in fresh agent contexts, but it does not approve or integrate results.
 
 For routine validator-guided correction, opt in to the bounded loop:
 

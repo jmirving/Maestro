@@ -7,6 +7,7 @@ Maestro normalizes target work into:
 - `ready` — may be scheduled now;
 - `blocked` — waiting on another work item or failed prerequisite;
 - `human_gate` — explicit decision/authorization required;
+- `inactive` — GitHub closed the issue; retained for history but never schedulable and not treated as verified completion;
 - `running` — worker active;
 - `validating` — fresh review active;
 - `approved` — validator-approved and waiting on any configured human review;
@@ -16,7 +17,9 @@ Maestro normalizes target work into:
 
 ## Drafting
 
-`maestro draft` is a planning operation, not an execution state. It proposes `ready` entries for previously unknown open GitHub issues and preserves existing work metadata, completed state, and manually authored dependencies. Explicit `Blocked by` and `Depends on` issue lines may add hard `blockedBy` relationships; advisory analyzers write separate conflict records with provenance. The draft simulates expected waves using hard-dependency readiness, advisory conflict avoidance, and `defaultConcurrency`, but does not launch workers.
+`maestro draft` is a planning operation, not an execution state or execution authorization. GitHub owns issue existence, open/closed state, explicit issue-body dependencies, and repository-configured label mappings. Maestro owns persisted lifecycle state and curated fields that those mappings did not produce. Draft records per-item GitHub provenance, proposes `ready` entries for unknown open issues, changes stale actionable closed entries to history-preserving `inactive`, and reactivates entries only when their recorded GitHub state proves they were closed and later reopened. An open issue does not by itself reset an integrated `complete` item.
+
+GitHub-owned dependencies and mapped values are reversible on later drafts; manual dependencies and requirements survive. Closure reason is retained so `inactive` never implies verified acceptance. A missing formerly reconciled issue or a material GitHub change overlapping running, review, rework, or integration evidence is an explicit conflict, not an overwrite. Full drafts reconcile the returned issue set; selected drafts preserve unrelated work and planning evidence.
 
 A proposal is schema-validated and its dependency graph is checked before it can be written. Unknown dependency references and cycles fail closed with actionable diagnostics. Closed, malformed, duplicate, or otherwise unsafe issue records remain unresolved for human attention rather than being interpreted semantically.
 
@@ -88,6 +91,8 @@ Continuous execution pauses when:
 The manifest expresses repository intent, while persisted runs express execution lifecycle. Before `start` or `next`, Maestro overlays all persisted original and child runs and active isolated worktrees onto the dependency plan. A manifest-ready issue is deferred while any current run records it as running, awaiting validation or human review, awaiting rework, approved but not integrated, or integrated but not yet recorded complete in the manifest. Other genuinely ready work may still fill available concurrency; active workers consume concurrency until they finish.
 
 An intentional retry must use the explicit `--rerun` option. Editing or leaving a manifest item as `ready` does not silently discard its execution history.
+
+Before `start` or `next` launches a GitHub-provenanced selected item, Maestro rereads that issue. Closed state and changed explicit dependency or configured label mapping facts block execution and direct the user back to draft reconciliation. Legacy manually authored entries without provenance retain their existing behavior until drafted.
 
 ## Parallelism
 

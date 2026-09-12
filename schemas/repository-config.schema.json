@@ -102,18 +102,80 @@
       },
       "additionalProperties": false
     },
+    "github": {
+      "type": "object",
+      "properties": {
+        "labelMappings": {
+          "type": "object",
+          "properties": {
+            "priority": { "type": "object", "additionalProperties": { "type": "number" } },
+            "mode": { "type": "object", "additionalProperties": { "enum": ["execute", "research", "validate"] } },
+            "requires": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true } },
+            "humanGate": { "type": "object", "additionalProperties": { "type": "string", "minLength": 1 } }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "work": {
       "type": "object",
       "additionalProperties": {
         "type": "object",
         "required": ["status"],
         "properties": {
-          "status": { "enum": ["ready", "blocked", "human_gate", "complete"] },
+          "status": { "enum": ["ready", "blocked", "human_gate", "inactive", "complete"] },
           "mode": { "enum": ["execute", "research", "validate"] },
           "priority": { "type": "number" },
           "blockedBy": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
           "requires": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
-          "humanGate": { "type": ["string", "null"] }
+          "humanGate": { "type": ["string", "null"] },
+          "github": {
+            "type": "object",
+            "required": ["state", "labels", "blockedBy"],
+            "properties": {
+              "state": { "enum": ["OPEN", "CLOSED"] },
+              "stateReason": { "type": ["string", "null"] },
+              "closedAt": { "type": ["string", "null"] },
+              "updatedAt": { "type": ["string", "null"] },
+              "title": { "type": "string" },
+              "labels": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+              "blockedBy": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+              "mapped": {
+                "type": "object",
+                "properties": {
+                  "priority": { "type": "number" },
+                  "mode": { "enum": ["execute", "research", "validate"] },
+                  "requires": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+                  "humanGate": { "type": "string" }
+                },
+                "additionalProperties": false
+              },
+              "manual": {
+                "type": "object",
+                "properties": {
+                  "priority": { "type": "number" },
+                  "mode": { "enum": ["execute", "research", "validate"] },
+                  "humanGate": { "type": "string" }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          "reconciliationHistory": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["from", "to", "reason"],
+              "properties": {
+                "from": { "type": "string" },
+                "to": { "type": "string" },
+                "reason": { "type": "string" }
+              },
+              "additionalProperties": false
+            }
+          }
         },
         "additionalProperties": true
       }

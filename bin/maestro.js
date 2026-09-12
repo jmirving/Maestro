@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { parseInvocation, resolveHelp } = require("../src/help");
 const { computePlan } = require("../src/planner");
-const { computeEffectivePlan } = require("../src/work-state");
+const { computeEffectivePlan, loadExecutionStates } = require("../src/work-state");
 const { dryRun, executeRun, executeAndIntegrate, continuousRun } = require("../src/controller");
 const { latestRunBundle, copyToClipboard } = require("../src/reporter");
 const { recordReview } = require("../src/reviews");
@@ -22,7 +22,7 @@ const { statusSnapshot, formatStatus, watchStatus } = require("../src/display");
 const { formatRecommendationFooter, appendRecommendationFooter } = require("../src/recommendations");
 const { loadIssueDetails, formatDetails } = require("../src/details");
 const { discoverGitHubRepository, loadGitHubIssues } = require("../src/github");
-const { proposeDraft, formatDraftSummary, readExistingManifest, writeManifest } = require("../src/draft");
+const { proposeDraft, formatDraftSummary, readManifestSnapshot, writeManifest, detectExecutionDrift } = require("../src/draft");
 const { createAgentPlanner } = require("../src/agent-planner");
 const { runPlanningAnalyzer } = require("../src/planning-analysis");
 const {
@@ -246,12 +246,15 @@ async function main() {
     }
     const repository = await discoverGitHubRepository(repoPath);
     const issues = await loadGitHubIssues(repository, requestedIssues, { repoPath });
-    const existingConfig = readExistingManifest(manifestPath);
+    const manifestSnapshot = readManifestSnapshot(manifestPath);
+    const existingConfig = manifestSnapshot.config;
+    const executionStates = await loadExecutionStates(repoPath);
     const deterministicResult = proposeDraft({
       repository,
       existingConfig,
       issues,
-      selectedIssueIds: requestedIssues
+      selectedIssueIds: requestedIssues,
+      executionStates
     });
     let agentAnalysis = null;
     if (args.includes("--agent")) {
@@ -280,7 +283,8 @@ async function main() {
       existingConfig,
       issues,
       selectedIssueIds: requestedIssues,
-      agentAnalysis
+      agentAnalysis,
+      executionStates
     }) : deterministicResult;
     const write = args.includes("--write");
     process.stdout.write(formatDraftSummary({ repository, manifestPath, result, write }));
@@ -288,7 +292,7 @@ async function main() {
       process.exitCode = 1;
       return;
     }
-    if (write && result.changed) writeManifest(manifestPath, result.manifest);
+    if (write && result.changed) writeManifest(manifestPath, result.manifest, { expectedContents: manifestSnapshot.contents });
     return;
   }
 
@@ -327,6 +331,16 @@ async function main() {
 
   if (command === "start" || command === "next") {
     const plan = args.includes("--rerun") ? computePlan(config) : await computeEffectivePlan(config, repoPath);
+    const reconciledIssueIds = plan.selected.map((item) => item.id).filter((id) => config.work?.[id]?.github);
+    if (reconciledIssueIds.length) {
+      const repository = await discoverGitHubRepository(repoPath);
+      if (repository !== config.repository) throw new Error(`The manifest targets ${config.repository}, but the current checkout is ${repository}.`);
+      const issues = await loadGitHubIssues(repository, reconciledIssueIds, { repoPath });
+      const findings = detectExecutionDrift(config, issues, reconciledIssueIds);
+      if (findings.length) {
+        throw new Error(`GitHub/manifest drift blocks execution: ${findings.map((item) => `#${item.issue} ${item.reason}`).join(" ")} Run \`maestro draft --write\` and review any conflicts before retrying.`);
+      }
+    }
     const result = await executeRun(config, { repoPath, plan });
     let automatic = null;
     if (args.includes("--auto-rework")) {
