@@ -60,7 +60,7 @@ function activeRunIds(plan) {
 }
 
 function aggregateLimit(config, states, plan) {
-  const requested = Math.max(1, Number(config.defaultConcurrency || 2));
+  const requested = plan.concurrency;
   const activeIds = new Set(activeRunIds(plan));
   const owner = states
     .filter((state) => activeIds.has(String(state.runId)) && Number.isInteger(state.capacity?.limit))
@@ -76,8 +76,18 @@ function aggregateLimit(config, states, plan) {
 function capacitySnapshot(config, states, planOptions = {}) {
   const initial = reconcilePlan(config, states, planOptions);
   const aggregate = aggregateLimit(config, states, initial);
-  const effectiveConfig = { ...config, defaultConcurrency: aggregate.limit };
-  const plan = reconcilePlan(effectiveConfig, states, planOptions);
+  const concurrency = aggregate.inherited
+    ? {
+        value: aggregate.limit,
+        source: "captured session",
+        savedDefault: initial.savedDefaultConcurrency
+      }
+    : {
+        value: initial.concurrency,
+        source: initial.concurrencySource,
+        savedDefault: initial.savedDefaultConcurrency
+      };
+  const plan = reconcilePlan(config, states, { ...planOptions, concurrency });
   const used = plan.active.length;
   const available = Math.max(0, aggregate.limit - used);
   const lifecycleGates = plan.deferred.filter((item) => !["running", "rework-running"].includes(item.lifecycle?.state));
@@ -164,12 +174,13 @@ async function reserveExplicitWork(config, {
   stateSaver = saveRunState,
   expectedCurrent = [],
   currentEligibility = null,
+  planOptions = {},
   extraState = {}
 } = {}) {
   const requested = items.map((item) => ({ ...item, id: String(item.id) }));
   if (!requested.length) {
     const states = await stateLoader(repoPath);
-    const capacity = capacitySnapshot(config, states);
+    const capacity = capacitySnapshot(config, states, planOptions);
     return { reserved: false, reason: "no-work", capacity, plan: capacity.plan, state: null };
   }
   return withCapacityLock(repoPath, async () => {
@@ -197,7 +208,7 @@ async function reserveExplicitWork(config, {
         state: null
       };
     }
-    const capacity = capacitySnapshot(config, states);
+    const capacity = capacitySnapshot(config, states, planOptions);
     const activeIssues = new Set(capacity.active.map((entry) => String(entry.issue)));
     const duplicate = requested.find((item) => activeIssues.has(item.id));
     if (duplicate) {

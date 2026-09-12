@@ -124,6 +124,28 @@ test("an active rework child supersedes the source rework recommendation", () =>
   assert.deepEqual(plan.recommendations, ["maestro status"]);
 });
 
+test("effective planning keeps new work advisory-separated from active work", () => {
+  const manifest = {
+    ...config({ "1": { status: "ready" }, "2": { status: "ready" }, "3": { status: "ready" } }, 2),
+    planning: {
+      advisoryConflicts: [{ issues: ["1", "2"], confidence: "high", source: "test", reason: "shared files", analyzer: "test" }]
+    }
+  };
+  const plan = reconcilePlan(manifest, [{
+    runId: "20260910010101-active",
+    mode: "execute",
+    status: "running",
+    plan: { selected: [{ id: "1" }] },
+    workers: [],
+    validations: [],
+    reviews: {}
+  }]);
+
+  assert.deepEqual(plan.active.map((item) => item.issue), ["1"]);
+  assert.deepEqual(plan.selected.map((item) => item.id), ["3"]);
+  assert.deepEqual(plan.advisoryDeferred.map((item) => item.id), ["2"]);
+});
+
 test("next --auto-rework preserves a lexically lower same-second running child and its capacity", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-running-lineage-"));
   const repoPath = path.join(root, "target");

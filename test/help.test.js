@@ -126,11 +126,20 @@ test("aliases and important documented flags are accepted by the shared registry
   assert.equal(parseInvocation(["s"]).command, "start");
   assert.equal(parseInvocation(["start", "--auto-rework"]).options["--auto-rework"], true);
   assert.equal(parseInvocation(["next", "--auto-rework"]).options["--auto-rework"], true);
+  assert.equal(parseInvocation(["next", "-j", "4"]).options["-j"], "4");
+  assert.equal(parseInvocation(["draft", "57", "--concurrency", "4", "63"]).positionals.join(","), "57,63");
+  assert.deepEqual(parseInvocation(["config", "set", "defaultConcurrency", "4"]).positionals, ["set", "defaultConcurrency", "4"]);
+  assert.deepEqual(parseInvocation(["config", "config/maestro.json", "get", "defaultConcurrency"]).positionals, ["config/maestro.json", "get", "defaultConcurrency"]);
   assert.equal(parseInvocation(["st", "57", "--watch"]).command, "status");
   assert.equal(parseInvocation(["a", "57", "--override"]).command, "approve");
   assert.equal(parseInvocation(["run", "--continuous", "--allow-failing-baseline"]).command, "run");
   assert.equal(parseInvocation(["review", "--run", "run-1", "--issue", "57", "--disposition", "approve"]).command, "review");
   assert.throws(() => parseInvocation(["run", "--execute", "--integrate"]), /only one/);
+  assert.throws(() => parseInvocation(["next", "-j", "2", "--concurrency", "4"]), /only one/);
+  for (const value of ["0", "-1", "1.5", "four", "9", "9007199254740992"]) {
+    assert.throws(() => parseInvocation(["plan", "-j", value]), /between 1 and 8/);
+  }
+  assert.throws(() => parseInvocation(["details", "57", "-j", "2"]), /Unknown option/);
   assert.throws(() => parseInvocation(["approve", "--override"]), /explicit issue numbers/);
   assert.throws(() => parseInvocation(["plan", "--repo-path", "../target", "config.json"]), /manifest path.*first argument/);
   assert.throws(() => parseInvocation(["details"]), /requires at least 1 issue number/);

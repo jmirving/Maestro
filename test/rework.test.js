@@ -76,6 +76,26 @@ test("rework prompt preserves prior implementation and includes validator correc
   assert.match(prompt, /Mode: rework/);
 });
 
+test("manual rework records and respects a temporary concurrency bound", async (t) => {
+  const fixture = await autoFixture(t, ["7", "8"]);
+  const result = await executeReworkRun(fixture.config, {
+    repoPath: fixture.repoPath,
+    sourceRunId: fixture.sourceRunId,
+    runId: "20260910101010-bounded",
+    concurrency: { value: 1, source: "this invocation", savedDefault: 2 },
+    runner: fixture.runner,
+    workerExecutor: async ({ item, worktree }) => ({ issue: item.id, exitCode: 0, ...worktree, headSha: `new-${item.id}` }),
+    validatorExecutor: async ({ worker }) => ({ issue: worker.issue, verdict: "approve", exitCode: 0 }),
+    stateSaver: async () => {}
+  });
+
+  assert.equal(result.plan.concurrency, 1);
+  assert.equal(result.plan.concurrencySource, "this invocation");
+  assert.deepEqual(result.plan.ready.map((item) => item.id), ["7", "8"]);
+  assert.deepEqual(result.plan.selected.map((item) => item.id), ["7"]);
+  assert.deepEqual(result.workers.map((item) => item.issue), ["7"]);
+});
+
 test("a human-gated run marked rework-original can enter rework", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-gate-rework-"));
   const repoPath = path.join(root, "target");

@@ -1,4 +1,5 @@
 const { conflictFor } = require("./planning-analysis");
+const { resolveConcurrency } = require("./concurrency");
 
 function normalizeWork(work = {}) {
   return Object.entries(work).map(([id, item]) => ({
@@ -42,7 +43,7 @@ function selectReady(ready, capacity, conflicts = [], activeIssues = []) {
   return { selected, advisoryDeferred };
 }
 
-function computePlan(config, { issueIds = null, workset = null, scopeRevision = null } = {}) {
+function computePlan(config, { issueIds = null, workset = null, scopeRevision = null, concurrency: suppliedConcurrency } = {}) {
   const work = normalizeWork(config.work);
   const selectedScope = issueIds == null ? null : new Set(issueIds.map(String));
   if (workset && !selectedScope) throw new Error(`Planning workset '${workset}' requires a resolved issue scope.`);
@@ -78,13 +79,18 @@ function computePlan(config, { issueIds = null, workset = null, scopeRevision = 
   }
 
   ready.sort(compareReady);
-  const concurrency = Math.max(1, Number(config.defaultConcurrency || 2));
+  const concurrencySetting = suppliedConcurrency?.value
+    ? suppliedConcurrency
+    : resolveConcurrency({ override: suppliedConcurrency, savedDefault: config.defaultConcurrency });
+  const concurrency = concurrencySetting.value;
   const conflicts = config.planning?.advisoryConflicts || [];
   const { selected, advisoryDeferred } = selectReady(ready, concurrency, conflicts);
   return {
     repository: config.repository,
     ...(workset ? { workset, scopeRevision, authorizedIssueIds: [...selectedScope].sort((a, b) => Number(a) - Number(b)) } : {}),
     concurrency,
+    concurrencySource: concurrencySetting.source,
+    savedDefaultConcurrency: concurrencySetting.savedDefault,
     ready,
     selected,
     advisoryDeferred,

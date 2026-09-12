@@ -1,5 +1,9 @@
 const COMMON_REPO_OPTION = { value: "<path>", description: "Target repository path; defaults to the current Git checkout." };
 const RUN_OPTION = { value: "<run-id>", description: "Select a persisted historical run explicitly." };
+const CONCURRENCY_OPTIONS = {
+  "-j": { value: "<count>", description: "Use this concurrency limit for this invocation only (1-8)." },
+  "--concurrency": { value: "<count>", description: "Alias for -j; never changes the saved manifest default." }
+};
 
 const COMMANDS = [
   {
@@ -7,10 +11,11 @@ const COMMANDS = [
     category: "Planning",
     summary: "Preview or reconcile GitHub issue truth with repository work.",
     when: "Use before planning and whenever GitHub issue state, dependencies, or mapped labels may have changed.",
-    usages: ["maestro draft [manifest.json] [issue ...|--all|--epic <number>|--workset <name>] [--name <name>] [--agent] [--write] [--verbose|--json]"],
+    usages: ["maestro draft [manifest.json] [issue ...|--all|--epic <number>|--workset <name>] [--name <name>] [-j <count>] [--agent] [--write] [--verbose|--json]"],
     positionals: "Optional manifest path followed by issue numbers. Omit issues to reconcile the full issue set.",
     options: {
       "--repo-path": COMMON_REPO_OPTION,
+      ...CONCURRENCY_OPTIONS,
       "--all": { description: "Explicitly reconsider the full open and closed issue set; cannot be combined with issue numbers." },
       "--epic": { value: "<number>", description: "Resolve documented GitHub sub-issue relationships recursively and propose a named workset." },
       "--workset": { value: "<name>", description: "Refresh an existing named workset using its recorded source." },
@@ -31,22 +36,44 @@ const COMMANDS = [
     positionalKind: "manifest-issues",
     conflicts: [["--all", "$issues"], ["--epic", "$issues"], ["--workset", "$issues"], ["--all", "--epic"], ["--all", "--workset"], ["--all", "--name"], ["--epic", "--workset"]],
     numericOptions: ["--epic"],
-    exclusive: [["--verbose", "--json"]]
+    exclusive: [["--verbose", "--json"], ["-j", "--concurrency"]]
+  },
+  {
+    name: "config",
+    category: "Planning",
+    summary: "Read or save the repository's default concurrency.",
+    when: "Use config get to inspect the resolved setting, or config set to change future independent invocations.",
+    usages: [
+      "maestro config [manifest.json] get defaultConcurrency [--repo-path <path>]",
+      "maestro config [manifest.json] set defaultConcurrency <count> [--repo-path <path>]"
+    ],
+    positionals: "Optional manifest path, then action (`get` or `set`), the defaultConcurrency key, and a value for set.",
+    options: {
+      "--repo-path": COMMON_REPO_OPTION,
+      "--manifest": { value: "<path>", description: "Explicit manifest path; defaults to .maestro.json in the target repository." }
+    },
+    prerequisites: "An existing, readable, schema-valid target manifest.",
+    effects: "get is read-only. set atomically changes only defaultConcurrency in the local manifest; it does not execute work or run Git commands.",
+    cautions: "A saved default affects new independent invocations, not running or captured sessions. Commit and push it through the normal Git workflow to share it.",
+    next: ["maestro plan", "Commit the manifest through your normal Git workflow"],
+    examples: [["config", "get", "defaultConcurrency"], ["config", "set", "defaultConcurrency", "4"]],
+    positionalKind: "config"
   },
   {
     name: "plan",
     category: "Planning",
     summary: "Show the next dependency- and concurrency-aware wave without executing it.",
     when: "Use to inspect what the manifest currently makes ready.",
-    usages: ["maestro plan [manifest.json] [--repo-path <path>] [--workset <name>]"],
+    usages: ["maestro plan [manifest.json] [--repo-path <path>] [--workset <name>] [-j <count>]"],
     positionals: "Optional manifest path; defaults to .maestro.json in the target repository.",
-    options: { "--repo-path": COMMON_REPO_OPTION, "--workset": { value: "<name>", description: "Limit the preview to a saved workset scope snapshot." } },
+    options: { "--repo-path": COMMON_REPO_OPTION, ...CONCURRENCY_OPTIONS, "--workset": { value: "<name>", description: "Limit the preview to a saved workset scope snapshot." } },
     prerequisites: "A target Git repository and Maestro manifest.",
     effects: "Prints a deterministic plan. It creates no run and changes no files or remote state.",
     cautions: "A plan reflects manifest state, not unresolved product decisions outside the manifest.",
     next: ["maestro start", "maestro status"],
     examples: [["plan"], ["plan", "config/maestro.json", "--repo-path", "../target"]],
-    positionalKind: "optional-manifest"
+    positionalKind: "optional-manifest",
+    exclusive: [["-j", "--concurrency"]]
   },
   {
     name: "start",
@@ -54,10 +81,11 @@ const COMMANDS = [
     category: "Execution",
     summary: "Execute the current ready wave in isolated workers and fresh validators.",
     when: "Use after planning when status shows ready work and required capabilities are available.",
-    usages: ["maestro start [manifest.json] [--repo-path <path>] [--workset <name>] [--rerun] [--auto-rework]"],
+    usages: ["maestro start [manifest.json] [--repo-path <path>] [--workset <name>] [-j <count>] [--rerun] [--auto-rework]"],
     positionals: "Optional manifest path; defaults to .maestro.json in the target repository.",
     options: {
       "--repo-path": COMMON_REPO_OPTION,
+      ...CONCURRENCY_OPTIONS,
       "--workset": { value: "<name>", description: "Execute only a previously drafted scope after checking it for drift." },
       "--rerun": { description: "Intentionally bypass persisted lifecycle deferrals and retry manifest-ready work." },
       "--auto-rework": { description: "Automatically correct and revalidate REWORK results, up to three attempts within a 30-minute session." }
@@ -68,7 +96,8 @@ const COMMANDS = [
     next: ["maestro status", "maestro details <issue>", "maestro output"],
     examples: [["start"], ["start", "--auto-rework"]],
     positionalKind: "optional-manifest",
-    conflicts: [["--workset", "--rerun"]]
+    conflicts: [["--workset", "--rerun"]],
+    exclusive: [["-j", "--concurrency"]]
   },
   {
     name: "next",
@@ -76,10 +105,11 @@ const COMMANDS = [
     category: "Execution",
     summary: "Start the next ready wave while respecting all persisted lifecycle deferrals.",
     when: "Use after reviewed work is integrated, or whenever status recommends the next eligible wave.",
-    usages: ["maestro next [manifest.json] [--repo-path <path>] [--workset <name>] [--rerun] [--auto-rework]"],
+    usages: ["maestro next [manifest.json] [--repo-path <path>] [--workset <name>] [-j <count>] [--rerun] [--auto-rework]"],
     positionals: "Optional manifest path; defaults to .maestro.json in the target repository.",
     options: {
       "--repo-path": COMMON_REPO_OPTION,
+      ...CONCURRENCY_OPTIONS,
       "--workset": { value: "<name>", description: "Continue only the authorized members of a previously drafted workset." },
       "--rerun": { description: "Intentionally retry manifest-ready work despite prior lifecycle evidence." },
       "--auto-rework": { description: "Automatically correct and revalidate REWORK results, up to three attempts within a 30-minute session." }
@@ -90,7 +120,8 @@ const COMMANDS = [
     next: ["maestro status", "maestro output"],
     examples: [["next"], ["next", "--auto-rework"]],
     positionalKind: "optional-manifest",
-    conflicts: [["--workset", "--rerun"]]
+    conflicts: [["--workset", "--rerun"]],
+    exclusive: [["-j", "--concurrency"]]
   },
   {
     name: "status",
@@ -98,10 +129,11 @@ const COMMANDS = [
     category: "Inspection",
     summary: "Show current issue states and executable next-action recommendations.",
     when: "Use between every workflow action, especially for mixed validator or review outcomes.",
-    usages: ["maestro status [manifest.json] [issue ...] [--repo-path <path>] [--watch]"],
+    usages: ["maestro status [manifest.json] [issue ...] [--repo-path <path>] [-j <count>] [--watch]"],
     positionals: "Optional manifest path and optional issue numbers for a focused view.",
     options: {
       "--repo-path": COMMON_REPO_OPTION,
+      ...CONCURRENCY_OPTIONS,
       "--watch": { description: "Continuously refresh the current or issue-focused status view." }
     },
     prerequisites: "A target repository and manifest. Persisted runs are optional.",
@@ -109,7 +141,8 @@ const COMMANDS = [
     cautions: "Validator approval, human approval, and integration are displayed as distinct states.",
     next: ["Follow the Recommended command", "maestro details <issue>"],
     examples: [["status"], ["status", "57", "63"]],
-    positionalKind: "manifest-issues"
+    positionalKind: "manifest-issues",
+    exclusive: [["-j", "--concurrency"]]
   },
   {
     name: "details",
@@ -164,15 +197,16 @@ const COMMANDS = [
     category: "Review",
     summary: "Create correction runs for current validator- or human-rejected work.",
     when: "Use when status recommends rework; issue-oriented selection is the normal form.",
-    usages: ["maestro rework [issue ...] [manifest.json] [--run <source-run-id>] [--allow-failing-baseline]"],
+    usages: ["maestro rework [issue ...] [manifest.json] [--run <source-run-id>] [-j <count>] [--allow-failing-baseline]"],
     positionals: "Optional issue numbers and at most one manifest path. With neither issues nor --run, selects the newest actionable rejected set.",
-    options: { "--repo-path": COMMON_REPO_OPTION, "--run": { ...RUN_OPTION, description: "Deliberately select a historical source run." }, "--allow-failing-baseline": { description: "Explicitly continue despite a failing configured baseline." } },
+    options: { "--repo-path": COMMON_REPO_OPTION, ...CONCURRENCY_OPTIONS, "--run": { ...RUN_OPTION, description: "Deliberately select a historical source run." }, "--allow-failing-baseline": { description: "Explicitly continue despite a failing configured baseline." } },
     prerequisites: "Current rejected evidence, or an explicitly selected historical source run containing eligible work.",
     effects: "Creates child run(s), reuses existing implementation worktrees, and shares repository capacity with safe ready backfill from the resolved manifest.",
     cautions: "Manual rework performs one correction generation. start/next --auto-rework repeat validator-directed corrections up to three attempts. Backfill never expands manifest scope or grants review/integration authority.",
     next: ["maestro status", "maestro details <issue>", "maestro approve <issue>"],
     examples: [["rework", "57"], ["rework"]],
-    positionalKind: "loose-manifest-issues"
+    positionalKind: "loose-manifest-issues",
+    exclusive: [["-j", "--concurrency"]]
   },
   {
     name: "discard",
@@ -211,16 +245,16 @@ const COMMANDS = [
     category: "Advanced / debugging",
     summary: "Use the explicit legacy runner for dry-run, execution, integration, or continuous modes.",
     when: "Use for explicit low-level control or compatibility; prefer start/status/approve/commit/next for supervised work.",
-    usages: ["maestro run [manifest.json] [--execute|--integrate|--continuous] [--allow-failing-baseline]"],
+    usages: ["maestro run [manifest.json] [-j <count>] [--execute|--integrate|--continuous] [--allow-failing-baseline]"],
     positionals: "Optional manifest path; defaults to .maestro.json in the target repository.",
-    options: { "--repo-path": COMMON_REPO_OPTION, "--execute": { description: "Execute and validate one wave without integration." }, "--integrate": { description: "Execute, validate, and integrate one wave when manifest policy enables it." }, "--continuous": { description: "Repeat the legacy execute-and-integrate loop until a stop condition." }, "--allow-failing-baseline": { description: "Explicitly continue despite a failing configured baseline." } },
+    options: { "--repo-path": COMMON_REPO_OPTION, ...CONCURRENCY_OPTIONS, "--execute": { description: "Execute and validate one wave without integration." }, "--integrate": { description: "Execute, validate, and integrate one wave when manifest policy enables it." }, "--continuous": { description: "Repeat the legacy execute-and-integrate loop until a stop condition." }, "--allow-failing-baseline": { description: "Explicitly continue despite a failing configured baseline." } },
     prerequisites: "Mode-specific capabilities and gates. Integration modes require repository authorization in the manifest.",
     effects: "With no mode flag, prints a dry run. Other modes can create workers or integrate according to the explicit flag.",
     cautions: "--continuous is the existing advanced compatibility path, not the supervised persisted-review workflow and not proof of epic completion.",
     next: ["maestro report", "maestro status"],
     examples: [["run"], ["run", "--execute"]],
     positionalKind: "optional-manifest",
-    exclusive: [["--execute", "--integrate", "--continuous"]]
+    exclusive: [["--execute", "--integrate", "--continuous"], ["-j", "--concurrency"]]
   },
   {
     name: "reconcile",

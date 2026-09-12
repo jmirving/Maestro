@@ -151,7 +151,7 @@ function agentSource(agentAnalysis, recommendation) {
   return `agent:${agentAnalysis.metadata.provider} context:${agentAnalysis.metadata.contextDigest.slice(0, 12)}; evidence: ${recommendation.evidence.join(" | ")}`;
 }
 
-function proposeDraft({ repository, existingConfig = null, issues = [], selectedIssueIds = [], supportingIssueIds = [], analyzers = null, agentAnalysis = null, executionStates = [], worksetProposal = null, analysisScope = null, worksetMemberships = {} }) {
+function proposeDraft({ repository, existingConfig = null, issues = [], selectedIssueIds = [], supportingIssueIds = [], analyzers = null, agentAnalysis = null, executionStates = [], worksetProposal = null, analysisScope = null, worksetMemberships = {}, concurrency = null }) {
   if (existingConfig?.repository && existingConfig.repository !== repository) {
     throw new Error(`The existing manifest targets ${existingConfig.repository}, but the current checkout is ${repository}.`);
   }
@@ -470,7 +470,10 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
     ...referenceDiagnostics,
     ...agentDiagnostics
   ];
-  const planning = computeExpectedWaves(manifest, worksetProposal ? { issueIds: selectedIssueIds } : {});
+  const planning = computeExpectedWaves(manifest, {
+    ...(worksetProposal ? { issueIds: selectedIssueIds } : {}),
+    concurrency
+  });
   added.sort((a, b) => Number(a) - Number(b) || a.localeCompare(b));
   unresolved.sort((a, b) => String(a.issue || "").localeCompare(String(b.issue || "")) || a.reason.localeCompare(b.reason));
   drift.sort((a, b) => issueOrder(a.issue, b.issue) || a.type.localeCompare(b.type));
@@ -761,7 +764,12 @@ function formatDraftVerbose({ repository, manifestPath, result, write = false, o
   } else {
     lines.push("  (no schedulable work)");
   }
-  lines.push(`  ${result.planning.available}-way dependency independence available; repository limit is ${result.planning.concurrency}.`);
+  const saved = result.planning.savedDefaultConcurrency == null ? "built-in fallback: 2" : `saved default: ${result.planning.savedDefaultConcurrency}`;
+  if (result.planning.concurrencySource === "this invocation") {
+    lines.push(`  ${result.planning.available}-way dependency independence available; projected concurrency is ${result.planning.concurrency} (this invocation; ${saved}).`);
+  } else {
+    lines.push(`  ${result.planning.available}-way dependency independence available; repository limit is ${result.planning.concurrency} (${result.planning.concurrencySource}).`);
+  }
   for (const decision of result.planning.decisions.filter((entry) => entry.state === "serialized")) {
     lines.push(`  #${decision.issue} serialized conservatively: ${decision.reason} (${decision.confidence}; ${decision.source})`);
   }

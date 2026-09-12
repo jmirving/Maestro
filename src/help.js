@@ -109,6 +109,13 @@ function isManifest(value) {
 function parsePositionals(command, positionals) {
   const kind = command.positionalKind;
   let issues = [];
+  if (kind === "config") {
+    const values = isManifest(positionals[0] || "") ? positionals.slice(1) : positionals;
+    const [action, key, value, ...extra] = values;
+    if (!["get", "set"].includes(action) || key !== "defaultConcurrency" || extra.length || (action === "get" && value != null) || (action === "set" && value == null)) {
+      throw cliError("maestro config expects `get defaultConcurrency` or `set defaultConcurrency <count>`. Try `maestro help config`.");
+    }
+  }
   if (kind === "none" && positionals.length) throw cliError(`maestro ${command.name} does not accept positional arguments.`);
   if (kind === "optional-manifest") {
     if (positionals.length > 1 || (positionals.length === 1 && !isManifest(positionals[0]))) {
@@ -141,6 +148,11 @@ function parseInvocation(args) {
   const positionals = [];
   for (let index = 1; index < args.length; index += 1) {
     const token = args[index];
+    const configValues = name === "config" && isManifest(positionals[0] || "") ? positionals.slice(1) : positionals;
+    if (name === "config" && configValues[0] === "set" && configValues.length === 2 && /^-\d/.test(token)) {
+      positionals.push(token);
+      continue;
+    }
     if (!token.startsWith("-")) {
       positionals.push(token);
       continue;
@@ -150,7 +162,8 @@ function parseInvocation(args) {
     if (values[token] !== undefined) throw cliError(`Option ${token} may only be provided once.`);
     if (definition.value) {
       const value = args[index + 1];
-      if (!value || value.startsWith("-")) throw cliError(`${token} requires a value. Try \`maestro help ${name}\`.`);
+      const concurrencyOption = ["-j", "--concurrency"].includes(token);
+      if (!value || (value.startsWith("-") && !concurrencyOption)) throw cliError(`${token} requires a value. Try \`maestro help ${name}\`.`);
       values[token] = value;
       index += 1;
     } else {
@@ -174,6 +187,13 @@ function parseInvocation(args) {
   for (const option of command.numericOptions || []) {
     if (values[option] !== undefined && !/^[1-9]\d*$/.test(values[option])) {
       throw cliError(`${option} requires a positive issue number.`);
+    }
+  }
+  const concurrencyOptions = ["-j", "--concurrency"].filter((option) => values[option] !== undefined);
+  for (const option of concurrencyOptions) {
+    const value = values[option];
+    if (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) > 8) {
+      throw cliError(`${option} requires a safe integer between 1 and 8.`);
     }
   }
   const parsed = parsePositionals(command, positionals);

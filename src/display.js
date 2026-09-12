@@ -4,6 +4,7 @@ const { assessRunItems } = require("./existing-run");
 const { buildRecommendations, formatRecommendations } = require("./recommendations");
 const { isValidValidatorOverride } = require("./reviews");
 const { capacitySnapshot } = require("./scheduler");
+const { formatConcurrency } = require("./concurrency");
 
 function numericSort(left, right) {
   return String(left).localeCompare(String(right), undefined, { numeric: true });
@@ -183,11 +184,12 @@ function runReadiness(states, currentByIssue, effectiveByIssue = null) {
 }
 
 async function statusSnapshot(config, repoPath, requestedIssues = [], {
-  stateLoader = loadExecutionStates
+  stateLoader = loadExecutionStates,
+  concurrency
 } = {}) {
   const states = await stateLoader(repoPath);
-  const plan = reconcilePlan(config, states);
-  const capacity = capacitySnapshot(config, states);
+  const capacity = capacitySnapshot(config, states, { concurrency });
+  const plan = capacity.plan;
   const requested = [...new Set(requestedIssues.map(String))];
   const current = states.length ? currentIssueEvidenceFromStates(states) : [];
   const currentByIssue = new Map(current.map((entry) => [entry.issue, entry]));
@@ -205,6 +207,11 @@ async function statusSnapshot(config, repoPath, requestedIssues = [], {
   const readiness = runReadiness(states, currentByIssue, effectiveByIssue);
   return {
     repository: config.repository,
+    concurrency: {
+      value: plan.concurrency,
+      source: plan.concurrencySource,
+      savedDefault: plan.savedDefaultConcurrency
+    },
     focused: requested.length > 0,
     items,
     readiness,
@@ -238,7 +245,7 @@ function formatCommit(lines, run) {
 
 function formatStatus(snapshot) {
   const heading = `MAESTRO  ${snapshot.repository || "repository"}`;
-  const lines = [heading, "=".repeat(Math.max(24, heading.length))];
+  const lines = [heading, "=".repeat(Math.max(24, heading.length)), formatConcurrency(snapshot.concurrency)];
 
   if (snapshot.focused) {
     for (const item of snapshot.items) {
@@ -272,11 +279,11 @@ function formatStatus(snapshot) {
   return `${lines.join("\n")}\n`;
 }
 
-async function watchStatus(config, repoPath, requestedIssues = [], { intervalMs = 2000 } = {}) {
+async function watchStatus(config, repoPath, requestedIssues = [], { intervalMs = 2000, concurrency } = {}) {
   const interactive = Boolean(process.stdout.isTTY);
   let first = true;
   for (;;) {
-    const text = formatStatus(await statusSnapshot(config, repoPath, requestedIssues));
+    const text = formatStatus(await statusSnapshot(config, repoPath, requestedIssues, { concurrency }));
     if (interactive && !first) process.stdout.write("\x1b[2J\x1b[H");
     process.stdout.write(text);
     first = false;

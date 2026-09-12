@@ -1,3 +1,5 @@
+const { resolveConcurrency } = require("./concurrency");
+
 function issueOrder(a, b) {
   return Number(a) - Number(b) || String(a).localeCompare(String(b));
 }
@@ -155,10 +157,13 @@ function compareWorkIds(work, left, right) {
   return leftPriority - rightPriority || issueOrder(left, right);
 }
 
-function computeExpectedWaves(config, { issueIds = null } = {}) {
+function computeExpectedWaves(config, { issueIds = null, concurrency: suppliedConcurrency } = {}) {
   const work = config.work || {};
   const scope = issueIds == null ? null : new Set(issueIds.map(String));
-  const concurrency = Math.max(1, Number(config.defaultConcurrency || 2));
+  const concurrencySetting = suppliedConcurrency?.value
+    ? suppliedConcurrency
+    : resolveConcurrency({ override: suppliedConcurrency, savedDefault: config.defaultConcurrency });
+  const concurrency = concurrencySetting.value;
   const complete = new Set(Object.entries(work).filter(([, item]) => item.status === "complete").map(([id]) => String(id)));
   const remaining = new Set(Object.entries(work).filter(([id, item]) => item.status === "ready" && (!scope || scope.has(String(id)))).map(([id]) => String(id)));
   const conflicts = config.planning?.advisoryConflicts || [];
@@ -214,7 +219,15 @@ function computeExpectedWaves(config, { issueIds = null } = {}) {
       unresolved.push({ issue: id, state: "unresolved", reason: `Human gate: ${item.humanGate || "approval required"}.`, source: "manifest work status" });
     }
   }
-  return { concurrency, available, waves, decisions, unresolved };
+  return {
+    concurrency,
+    concurrencySource: concurrencySetting.source,
+    savedDefaultConcurrency: concurrencySetting.savedDefault,
+    available,
+    waves,
+    decisions,
+    unresolved
+  };
 }
 
 module.exports = {

@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { executeRun } = require("../src/controller");
+const { resolveConcurrency } = require("../src/concurrency");
 
 const config = {
   repository: "example/repo",
@@ -22,6 +23,7 @@ test("executeRun preflights once, creates isolated worktrees, runs workers, vali
   const result = await executeRun(config, {
     repoPath: "/target",
     runId: "run-1",
+    concurrency: resolveConcurrency({ override: 2, savedDefault: config.defaultConcurrency }),
     preflightRunner: async (command, options) => {
       preflightCalls.push({ command, options });
       return { code: 0, stdout: "ok", stderr: "" };
@@ -58,6 +60,9 @@ test("executeRun preflights once, creates isolated worktrees, runs workers, vali
   assert.equal(saved.length, 2);
   assert.equal(saved[0].runId, "run-1");
   assert.equal(saved[0].state.status, "running");
+  assert.equal(saved[0].state.plan.concurrency, 2);
+  assert.equal(saved[0].state.plan.concurrencySource, "this invocation");
+  assert.equal(saved[0].state.plan.savedDefaultConcurrency, 2);
   assert.deepEqual(saved[0].state.workers, []);
   assert.equal(saved[1].state.status, "awaiting-review");
   assert.deepEqual(saved[1].state.reviews, {});

@@ -168,6 +168,45 @@ test("maestro plan runs from a target repo without explicit manifest or repo pat
   assert.deepEqual(plan.selected.map((item) => item.id), ["1"]);
 });
 
+test("CLI concurrency overrides are temporary and config set persists only the explicit target manifest", () => {
+  const repoPath = tempDir();
+  initGitRepo(repoPath);
+  const defaultManifest = path.join(repoPath, ".maestro.json");
+  const explicitManifest = path.join(repoPath, "other.json");
+  const config = {
+    repository: "owner/repo",
+    defaultConcurrency: 2,
+    work: Object.fromEntries([1, 2, 3, 4, 5].map((id) => [id, { status: "ready" }]))
+  };
+  fs.writeFileSync(defaultManifest, `${JSON.stringify(config, null, 2)}\n`);
+  fs.writeFileSync(explicitManifest, `${JSON.stringify(config, null, 2)}\n`);
+  const cliPath = path.resolve(__dirname, "../bin/maestro.js");
+
+  const preview = spawnSync(process.execPath, [cliPath, "plan", "-j", "4"], { cwd: repoPath, encoding: "utf8" });
+  assert.equal(preview.status, 0, preview.stderr);
+  assert.equal(JSON.parse(preview.stdout).selected.length, 4);
+  assert.equal(JSON.parse(preview.stdout).concurrencySource, "this invocation");
+  assert.equal(JSON.parse(fs.readFileSync(defaultManifest, "utf8")).defaultConcurrency, 2);
+
+  const longPreview = spawnSync(process.execPath, [cliPath, "status", "--concurrency", "3"], { cwd: repoPath, encoding: "utf8" });
+  assert.equal(longPreview.status, 0, longPreview.stderr);
+  assert.match(longPreview.stdout, /Concurrency: 3 \(this invocation; saved default: 2\)/);
+  assert.match(longPreview.stdout, /Next wave: #1, #2, #3/);
+  assert.equal(JSON.parse(fs.readFileSync(defaultManifest, "utf8")).defaultConcurrency, 2);
+
+  const saved = spawnSync(process.execPath, [cliPath, "config", explicitManifest, "set", "defaultConcurrency", "4"], { cwd: repoPath, encoding: "utf8" });
+  assert.equal(saved.status, 0, saved.stderr);
+  assert.match(saved.stdout, /2 -> 4/);
+  assert.equal(JSON.parse(fs.readFileSync(explicitManifest, "utf8")).defaultConcurrency, 4);
+  assert.equal(JSON.parse(fs.readFileSync(defaultManifest, "utf8")).defaultConcurrency, 2);
+  assert.equal(git(repoPath, "rev-list", "--count", "--all"), "0", "config set must not commit");
+
+  const get = spawnSync(process.execPath, [cliPath, "config", "get", "defaultConcurrency", "--manifest", explicitManifest], { cwd: repoPath, encoding: "utf8" });
+  assert.equal(get.status, 0, get.stderr);
+  assert.ok(get.stdout.includes(`Manifest: ${explicitManifest}`));
+  assert.match(get.stdout, /Saved defaultConcurrency: 4/);
+});
+
 test("package exposes the maestro binary", () => {
   const pkg = require("../package.json");
   assert.equal(pkg.bin.maestro, "./bin/maestro.js");

@@ -31,6 +31,8 @@ const { stableWorksetName, epicWorkset, issueWorkset, resolveWorksetScope, asser
 const { loadScopeSnapshot, readScopeSnapshot } = require("../src/scope-store");
 const { persistScopedDraft } = require("../src/scoped-persistence");
 const { reserveReadyWork, reserveExplicitWork, runLifecycleBackfill } = require("../src/scheduler");
+const { resolveConcurrency } = require("../src/concurrency");
+const { runConfigCommand } = require("../src/config-command");
 const {
   resolveRepoPath,
   resolveManifestPath,
@@ -42,6 +44,10 @@ const {
 function option(args, name) {
   const index = args.indexOf(name);
   return index >= 0 ? args[index + 1] : null;
+}
+
+function concurrencyOverride(invocation) {
+  return invocation.options["-j"] ?? invocation.options["--concurrency"] ?? null;
 }
 
 function shellArgument(value) {
@@ -63,7 +69,7 @@ function issuePositionals(rest) {
   const issues = [];
   for (let index = start; index < rest.length; index += 1) {
     const value = rest[index];
-    if (["--repo-path", "--run"].includes(value)) {
+    if (["--repo-path", "--run", "-j", "--concurrency"].includes(value)) {
       if (!rest[index + 1] || rest[index + 1].startsWith("--")) throw new Error(`${value} requires a value.`);
       index += 1;
       continue;
@@ -81,7 +87,7 @@ function draftIssuePositionals(rest) {
   const issues = [];
   for (let index = manifest ? 1 : 0; index < rest.length; index += 1) {
     const value = rest[index];
-    if (["--repo-path", "--epic", "--workset", "--name"].includes(value)) {
+    if (["--repo-path", "--epic", "--workset", "--name", "-j", "--concurrency"].includes(value)) {
       if (!rest[index + 1] || rest[index + 1].startsWith("--")) throw new Error(`${value} requires a value.`);
       index += 1;
       continue;
@@ -146,8 +152,8 @@ function statusIssuePositionals(rest) {
   const issues = [];
   for (let index = manifest ? 1 : 0; index < rest.length; index += 1) {
     const value = rest[index];
-    if (value === "--repo-path") {
-      if (!rest[index + 1] || rest[index + 1].startsWith("--")) throw new Error("--repo-path requires a value.");
+    if (["--repo-path", "-j", "--concurrency"].includes(value)) {
+      if (!rest[index + 1] || rest[index + 1].startsWith("--")) throw new Error(`${value} requires a value.`);
       index += 1;
       continue;
     }
@@ -164,7 +170,7 @@ function reworkPositionals(rest) {
   const manifests = [];
   for (let index = 0; index < rest.length; index += 1) {
     const value = rest[index];
-    if (["--repo-path", "--run"].includes(value)) {
+    if (["--repo-path", "--run", "-j", "--concurrency"].includes(value)) {
       if (!rest[index + 1] || rest[index + 1].startsWith("--")) throw new Error(`${value} requires a value.`);
       index += 1;
       continue;
@@ -209,8 +215,8 @@ function setAutoReworkExitCode(result) {
   if (result.issues?.some((entry) => entry.outcome !== "approved")) process.exitCode = 1;
 }
 
-async function workflowFooter(config, repoPath, { includeIssues = true } = {}) {
-  const snapshot = await statusSnapshot(config || { work: {} }, repoPath);
+async function workflowFooter(config, repoPath, { includeIssues = true, concurrency } = {}) {
+  const snapshot = await statusSnapshot(config || { work: {} }, repoPath, [], { concurrency });
   return formatRecommendationFooter(snapshot, { includeIssues });
 }
 
@@ -299,6 +305,18 @@ async function main() {
   const command = invocation.command;
   const rest = args.slice(1);
 
+  if (command === "config") {
+    const repoPath = resolveRepoPath(invocation.options["--repo-path"]);
+    const positionalManifest = looksLikeManifest(invocation.positionals[0]) ? invocation.positionals[0] : null;
+    if (positionalManifest && invocation.options["--manifest"]) {
+      throw new Error("maestro config accepts one explicit manifest path, either as the first argument or with --manifest.");
+    }
+    const manifestPath = resolveManifestPath(invocation.options["--manifest"] || positionalManifest, repoPath);
+    const [action, key, value] = positionalManifest ? invocation.positionals.slice(1) : invocation.positionals;
+    process.stdout.write(runConfigCommand({ action, key, value, manifestPath }));
+    return;
+  }
+
   if (command === "output") {
     const { repoPath } = resolveContext(rest, args, { manifest: false });
     const defaultManifestPath = path.join(repoPath, ".maestro.json");
@@ -323,6 +341,10 @@ async function main() {
     const repository = await discoverGitHubRepository(repoPath);
     const manifestSnapshot = readManifestSnapshot(manifestPath);
     const existingConfig = manifestSnapshot.config;
+    const concurrency = resolveConcurrency({
+      override: concurrencyOverride(invocation),
+      savedDefault: existingConfig?.defaultConcurrency
+    });
     const epicNumber = option(args, "--epic");
     const selectedWorkset = option(args, "--workset");
     const requestedName = option(args, "--name");
@@ -387,7 +409,8 @@ async function main() {
       executionStates,
       worksetProposal,
       analysisScope: worksetProposal?.name || null,
-      worksetMemberships
+      worksetMemberships,
+      concurrency
     });
     if (scope?.diagnostics.length) {
       deterministicResult.diagnostics.push(...scope.diagnostics.map((item) => ({ issue: item.issue?.number || null, reason: item.reason })));
@@ -429,7 +452,8 @@ async function main() {
       executionStates,
       worksetProposal,
       analysisScope: worksetProposal?.name || null,
-      worksetMemberships
+      worksetMemberships,
+      concurrency
     }) : deterministicResult;
     if (scope?.diagnostics.length && result !== deterministicResult) {
       result.diagnostics.push(...scope.diagnostics.map((item) => ({ issue: item.issue?.number || null, reason: item.reason })));
@@ -503,18 +527,19 @@ async function main() {
   }
   const { repoPath, manifestPath } = context;
   const config = loadConfig(manifestPath, args);
+  const concurrency = resolveConcurrency({ override: concurrencyOverride(invocation), savedDefault: config.defaultConcurrency });
 
   if (command === "plan") {
     const worksetName = option(args, "--workset");
     const scope = worksetName ? await resolveSavedWorkset(config, repoPath, worksetName) : null;
-    process.stdout.write(`${JSON.stringify(computePlan(config, scopedPlanOptions(scope)), null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify(computePlan(config, { ...scopedPlanOptions(scope), concurrency }), null, 2)}\n`);
     return;
   }
 
   if (command === "status") {
     const requestedIssues = statusIssuePositionals(rest);
-    if (args.includes("--watch")) await watchStatus(config, repoPath, requestedIssues);
-    else process.stdout.write(formatStatus(await statusSnapshot(config, repoPath, requestedIssues)));
+    if (args.includes("--watch")) await watchStatus(config, repoPath, requestedIssues, { concurrency });
+    else process.stdout.write(formatStatus(await statusSnapshot(config, repoPath, requestedIssues, { concurrency })));
     return;
   }
 
@@ -531,7 +556,7 @@ async function main() {
   if (command === "start" || command === "next") {
     const worksetName = option(args, "--workset");
     const scope = worksetName ? await resolveSavedWorkset(config, repoPath, worksetName, { refresh: true }) : null;
-    const planOptions = scopedPlanOptions(scope);
+    const planOptions = { ...scopedPlanOptions(scope), concurrency };
     const candidatePlan = args.includes("--rerun") ? computePlan(config, planOptions) : await computeEffectivePlan(config, repoPath, planOptions);
     const selectedIssueIds = candidatePlan.selected.map((item) => item.id);
     await verifyExecutionSelection(config, repoPath, selectedIssueIds);
@@ -550,6 +575,7 @@ async function main() {
           runId: requestedRunId,
           mode: "rerun",
           items: candidatePlan.selected,
+          planOptions,
           extraState: authorization ? { scope: authorization } : {}
         })
       : await reserveReadyWork(config, {
@@ -605,7 +631,8 @@ async function main() {
               currentEligibility: (current) => (
                 current.evidence?.state === "awaiting-rework" &&
                 isRecoverableValidatorRework(current.evidence)
-              )
+              ),
+              planOptions
             });
             return {
               ...correctionReservation,
@@ -666,7 +693,7 @@ async function main() {
       automatic = {
         mode: "auto-rework",
         retryLimit: corrections[0]?.retryLimit || 3,
-        capacity: config.defaultConcurrency || 2,
+        capacity: reservation.capacity?.limit ?? candidatePlan.concurrency,
         timeoutMs: automaticTimeoutMs,
         issues: corrections.flatMap((entry) => entry.issues || [])
       };
@@ -676,7 +703,7 @@ async function main() {
       ? { ...result, autoRework: automatic, backfill }
       : backfill.length ? { ...result, backfill } : result;
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
-    process.stdout.write(await workflowFooter(config, repoPath));
+    process.stdout.write(await workflowFooter(config, repoPath, { concurrency }));
     if (automatic) setAutoReworkExitCode(automatic);
     else setResultExitCode(result);
     return;
@@ -752,7 +779,7 @@ async function main() {
     const authorizedIssueIds = requestedIssues.length
       ? requestedIssues.map(String)
       : inheritedScope.length ? [...new Set(inheritedScope.map(String))] : Object.keys(config.work || {});
-    const planOptions = { issueIds: authorizedIssueIds };
+    const planOptions = { issueIds: authorizedIssueIds, concurrency };
     const outcomes = await runLifecycleBackfill(config, {
       repoPath,
       authorizedIssueIds,
@@ -766,6 +793,7 @@ async function main() {
           runId,
           mode: "rework",
           items,
+          planOptions,
           extraState: { parentRunId: source.parentRunId }
         });
         return { ...reservation, runId };
@@ -774,7 +802,8 @@ async function main() {
         repoPath,
         ...source,
         runId: prepared.runId,
-        reservedState: prepared.state
+        reservedState: prepared.state,
+        concurrency
       }),
       verifySelection: (issueIds) => verifyExecutionSelection(config, repoPath, issueIds),
       runIdFactory: newRunId,
@@ -791,7 +820,7 @@ async function main() {
       for (const result of results) result.backfillRunIds = backfill.filter((entry) => entry.runId).map((entry) => entry.runId);
     }
     process.stdout.write(`${JSON.stringify(results.length === 1 ? results[0] : results, null, 2)}\n`);
-    process.stdout.write(await workflowFooter(config, repoPath));
+    process.stdout.write(await workflowFooter(config, repoPath, { concurrency }));
     for (const result of results) setResultExitCode(result);
     return;
   }
@@ -830,10 +859,10 @@ async function main() {
   }
 
   let result;
-  if (args.includes("--continuous")) result = await continuousRun(config, { repoPath });
-  else if (args.includes("--integrate")) result = await executeAndIntegrate(config, { repoPath });
-  else if (args.includes("--execute")) result = await executeRun(config, { repoPath });
-  else result = await dryRun(config, { repoPath });
+  if (args.includes("--continuous")) result = await continuousRun(config, { repoPath, concurrency });
+  else if (args.includes("--integrate")) result = await executeAndIntegrate(config, { repoPath, concurrency });
+  else if (args.includes("--execute")) result = await executeRun(config, { repoPath, concurrency });
+  else result = await dryRun(config, { repoPath, concurrency });
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   setResultExitCode(result);
 }

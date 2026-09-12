@@ -17,8 +17,8 @@ function cloneConfig(config) {
   return JSON.parse(JSON.stringify(config));
 }
 
-async function dryRun(config, { repoPath, planOptions = {} }) {
-  const plan = computePlan(config, planOptions);
+async function dryRun(config, { repoPath, planOptions = {}, concurrency } = {}) {
+  const plan = computePlan(config, { ...planOptions, ...(concurrency ? { concurrency } : {}) });
   return {
     runId: newRunId(),
     mode: "dry-run",
@@ -35,7 +35,8 @@ async function dryRun(config, { repoPath, planOptions = {} }) {
 async function executeRun(config, {
   repoPath,
   runId = newRunId(),
-  plan = computePlan(config),
+  plan = null,
+  concurrency,
   workerExecutor = executeWorker,
   validatorExecutor = validateWorker,
   worktreeFactory = prepareWorktree,
@@ -46,6 +47,7 @@ async function executeRun(config, {
   reservedState = null,
   onIssueSettled = async () => {}
 } = {}) {
+  plan = plan || computePlan(config, { concurrency });
   if (!plan.selected.length) {
     const empty = { runId, mode: "execute", status: "no-ready-work", plan, baseline: null, preflights: [], workers: [], validations: [], reviews: {}, ...(scope ? { scope } : {}) };
     if (scope) await stateSaver(repoPath, runId, empty);
@@ -147,23 +149,23 @@ async function executeAndIntegrate(config, options = {}) {
   return { ...result, integration };
 }
 
-async function continuousRun(config, { repoPath, maxCycles = 20 } = {}) {
+async function continuousRun(config, { repoPath, maxCycles = 20, concurrency } = {}) {
   const runtime = cloneConfig(config);
   const cycles = [];
   for (let cycle = 0; cycle < maxCycles; cycle += 1) {
-    const plan = computePlan(runtime);
+    const plan = computePlan(runtime, { concurrency });
     if (!plan.selected.length) {
       return { mode: "continuous", cycles, finalPlan: plan, stopped: plan.humanGates.length ? "human-gate" : "no-ready-work" };
     }
-    const result = await executeAndIntegrate(runtime, { repoPath });
+    const result = await executeAndIntegrate(runtime, { repoPath, concurrency });
     cycles.push(result);
-    if (result.stopped) return { mode: "continuous", cycles, finalPlan: computePlan(runtime), stopped: result.stopped };
-    if (!result.integration.length) return { mode: "continuous", cycles, finalPlan: computePlan(runtime), stopped: "nothing-integrated" };
+    if (result.stopped) return { mode: "continuous", cycles, finalPlan: computePlan(runtime, { concurrency }), stopped: result.stopped };
+    if (!result.integration.length) return { mode: "continuous", cycles, finalPlan: computePlan(runtime, { concurrency }), stopped: "nothing-integrated" };
     for (const integrated of result.integration) {
       if (runtime.work?.[integrated.issue]) runtime.work[integrated.issue].status = "complete";
     }
   }
-  return { mode: "continuous", cycles, finalPlan: computePlan(runtime), stopped: "max-cycles" };
+  return { mode: "continuous", cycles, finalPlan: computePlan(runtime, { concurrency }), stopped: "max-cycles" };
 }
 
 module.exports = { newRunId, dryRun, executeRun, executeAndIntegrate, continuousRun };

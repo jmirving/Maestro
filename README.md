@@ -56,6 +56,43 @@ maestro commit
 maestro next
 ```
 
+Concurrency defaults to two when `defaultConcurrency` is absent. Use `-j` (or
+`--concurrency`) on a scheduling command to change only that invocation:
+
+```bash
+maestro plan -j 4                 # preview four slots
+maestro start --concurrency 4     # execute this wave with four slots
+maestro status -j 4               # show the same temporary projection
+maestro draft -j 4                # project draft waves; --write still will not save 4
+maestro run -j 4 --execute        # advanced runner, same resolution rules
+maestro rework -j 2               # bound this correction run
+```
+
+The precedence is invocation override, then the repository's saved
+`defaultConcurrency`, then the built-in fallback of two. Output identifies the
+effective value and source. The value is an upper bound: dependencies, advisory
+conflicts, active-work exclusions, human gates, and capability requirements can
+still select fewer items, and integration remains serialized. An override is
+recorded with execution evidence but never written to the manifest, so a later
+independent invocation returns to the saved default.
+
+Use the deliberately narrow config command to inspect or save the repository
+default:
+
+```bash
+maestro config get defaultConcurrency
+maestro config set defaultConcurrency 4
+maestro config config/maestro.json set defaultConcurrency 4 --repo-path ../target
+```
+
+`config set` validates and atomically updates only `defaultConcurrency` while
+preserving the rest of the manifest. It does not launch agents or workers, mutate
+GitHub, or run Git commands. Commit and push the changed manifest through the
+repository's normal Git workflow when the new default should be shared with other
+checkouts. Changing the saved default affects new independent invocations; it does
+not resize a running process or a future durable session that has already captured
+its effective setting.
+
 Create or refresh that manifest from GitHub issues before planning:
 
 ```bash

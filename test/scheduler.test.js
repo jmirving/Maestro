@@ -147,7 +147,7 @@ test("reserveReadyWork applies authorization before capacity selection", async (
   assert.deepEqual(reservation.state.capacity.issues, ["2"]);
 });
 
-test("the first active invocation owns the aggregate limit until its session drains", () => {
+test("the first active invocation owns the aggregate limit over later temporary overrides until its session drains", () => {
   const states = [{
     runId: "20260912010101-aaaaaa",
     mode: "execute",
@@ -158,10 +158,19 @@ test("the first active invocation owns the aggregate limit until its session dra
     reviews: {},
     capacity: { limit: 2, sessionId: "session-a", sessionStartedAt: "2026-09-12T01:01:01.000Z" }
   }];
-  const snapshot = capacitySnapshot(config({ "1": { status: "ready" }, "2": { status: "ready" } }, 5), states);
+  const manifest = config({ "1": { status: "ready" }, "2": { status: "ready" } }, 3);
+  const concurrency = { value: 5, source: "this invocation", savedDefault: 3 };
+  const snapshot = capacitySnapshot(manifest, states, { concurrency });
   assert.equal(snapshot.limit, 2);
   assert.equal(snapshot.requestedLimit, 5);
   assert.equal(snapshot.available, 1);
+  assert.equal(snapshot.plan.concurrency, 2);
+  assert.equal(snapshot.plan.concurrencySource, "captured session");
+
+  const drained = capacitySnapshot(manifest, [], { concurrency });
+  assert.equal(drained.limit, 5);
+  assert.equal(drained.plan.concurrency, 5);
+  assert.equal(drained.plan.concurrencySource, "this invocation");
 });
 
 test("outside-selection active work constrains advisory-conflicting backfill", () => {

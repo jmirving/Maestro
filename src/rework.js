@@ -1,4 +1,5 @@
 const { loadRunState, saveRunState } = require("./run-store");
+const { resolveConcurrency } = require("./concurrency");
 const { runPreflights } = require("./preflight");
 const { captureBaseline } = require("./baseline");
 const { executeWorker } = require("./worker");
@@ -191,7 +192,8 @@ async function executeReworkRun(config, {
   deadlineAt = null,
   reserveCapacity = false,
   capacityReserver = reserveExplicitWork,
-  reservedState = null
+  reservedState = null,
+  concurrency = null
 } = {}) {
   const source = await loadRunState(repoPath, sourceRunId);
   const workersByIssue = new Map();
@@ -225,13 +227,22 @@ async function executeReworkRun(config, {
       throw new Error(`Cannot rework non-REWORK issue state in run ${sourceRunId}: ${details}.`);
     }
   }
-  const candidates = (source.workers || []).filter((worker) => {
+  const eligibleCandidates = (source.workers || []).filter((worker) => {
     const issue = String(worker.issue);
     const validationRequiresRework = validationByIssue.get(issue)?.verdict === "rework";
     const humanRequestedRework = source.reviews?.[issue]?.disposition === "rework-original";
     return (!requested || requested.has(issue)) && (validationRequiresRework || humanRequestedRework);
   });
-  if (!candidates.length) throw new Error(`Run ${sourceRunId} has no selected REWORK issues.`);
+  if (!eligibleCandidates.length) throw new Error(`Run ${sourceRunId} has no selected REWORK issues.`);
+  const concurrencySetting = concurrency?.value
+    ? concurrency
+    : resolveConcurrency({ savedDefault: config.defaultConcurrency });
+  const reservedIssues = reservedState?.plan?.selected
+    ? new Set(reservedState.plan.selected.map((item) => String(item.id)))
+    : null;
+  const candidates = reservedIssues
+    ? eligibleCandidates.filter((worker) => reservedIssues.has(String(worker.issue)))
+    : eligibleCandidates.slice(0, concurrencySetting.value);
 
   const items = candidates.map((worker) => {
     const configured = config.work?.[String(worker.issue)] || {};
@@ -267,7 +278,13 @@ async function executeReworkRun(config, {
     mode: "rework",
     status: "running",
     repoPath,
-    plan: { selected: items },
+    plan: {
+      concurrency: concurrencySetting.value,
+      concurrencySource: concurrencySetting.source,
+      savedDefaultConcurrency: concurrencySetting.savedDefault,
+      ready: eligibleCandidates.map((worker) => ({ id: String(worker.issue), mode: "rework" })),
+      selected: items
+    },
     baseline: null,
     preflights: [],
     workers: [],
@@ -281,6 +298,7 @@ async function executeReworkRun(config, {
       runId,
       mode: "rework",
       items,
+      planOptions: { concurrency: concurrencySetting },
       stateLoader: async () => require("./work-state").loadExecutionStates(repoPath),
       stateSaver,
       extraState: { parentRunId, correction: { attempts } }
