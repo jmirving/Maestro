@@ -14,7 +14,7 @@ function hasRecordedIntegration(states) {
 function buildRecommendations(items, readiness, selected, { states = [] } = {}) {
   const primary = [];
   const alternatives = [];
-  const exhaustedRework = items.filter((item) => item.autoReworkStatus === "retry-exhausted");
+  const exhaustedRework = items.filter((item) => item.autoReworkStatus === "retry-exhausted" && !item.humanReview);
   const technicalConflicts = items.filter((item) => item.autoReworkStatus === "technical-conflict");
   const currentRework = items.filter((item) => item.validator === "rework" && !item.humanReview && item.autoReworkStatus !== "retry-exhausted");
   const reviewedRework = items.filter((item) => item.humanReview === "rework-original");

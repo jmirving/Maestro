@@ -61,15 +61,15 @@ function describeIssue(config, issue, evidence, plan) {
     state = "human rework disposition recorded, excluded from integration";
     integrationState = "excluded; will be reworked";
     action = `maestro rework ${issue}`;
+  } else if (isValidValidatorOverride(review, validation)) {
+    state = "human override approved, ready to integrate";
+    integrationState = "eligible when every item in its run has a human disposition";
   } else if (evidence?.autoRework?.status === "retry-exhausted") {
     const attempts = evidence.autoRework.attemptsUsed;
     const limit = evidence.autoRework.retryLimit;
     state = `automatic rework exhausted after ${attempts} of ${limit} correction attempts; human review required`;
     integrationState = "not eligible; inspect the correction lineage and decide whether to rework manually, override, or discard";
     action = `maestro details ${issue}`;
-  } else if (isValidValidatorOverride(review, validation)) {
-    state = "human override approved, ready to integrate";
-    integrationState = "eligible when every item in its run has a human disposition";
   } else if (review && validation?.verdict === "approve") {
     state = "human approved, ready to integrate";
     integrationState = "eligible when every item in its run has a human disposition";

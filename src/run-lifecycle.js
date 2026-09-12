@@ -1,5 +1,11 @@
 const { isValidValidatorOverride } = require("./reviews");
 
+function isRecoverableValidatorRework(evidence) {
+  return ["awaiting-rework", "rework-exhausted"].includes(evidence?.state) &&
+    evidence.verdict === "rework" &&
+    !evidence.review;
+}
+
 function classifyRunIssue(state, worker) {
   const issue = String(worker.issue);
   const validation = (state.validations || []).find((entry) => String(entry.issue) === issue);
@@ -19,14 +25,14 @@ function classifyRunIssue(state, worker) {
   if (review?.disposition === "rework-original") {
     return { state: "awaiting-rework", action: `maestro rework ${issue}` };
   }
+  if (isValidValidatorOverride(review, validation)) {
+    return { state: "awaiting-integration", action: `maestro commit --run ${state.runId}` };
+  }
   if (state.autoRework?.[issue]?.status === "retry-exhausted") {
     return { state: "rework-exhausted", action: `maestro details ${issue}` };
   }
   if (["worker-failure", "validator-failure", "infrastructure-failure", "technical-conflict"].includes(state.autoRework?.[issue]?.status)) {
     return { state: "failed-awaiting-retry", action: `maestro details ${issue}` };
-  }
-  if (isValidValidatorOverride(review, validation)) {
-    return { state: "awaiting-integration", action: `maestro commit --run ${state.runId}` };
   }
   if (review && validation?.verdict === "approve") {
     return { state: "awaiting-integration", action: `maestro commit --run ${state.runId}` };
@@ -49,4 +55,4 @@ function classifyRunIssue(state, worker) {
   return { state: "awaiting-validation-or-review", action: "maestro status" };
 }
 
-module.exports = { classifyRunIssue };
+module.exports = { classifyRunIssue, isRecoverableValidatorRework };

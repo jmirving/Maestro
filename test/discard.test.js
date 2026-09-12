@@ -149,3 +149,31 @@ test("discard CLI is explicit, refuses non-REWORK work, and leaves the manifest 
   assert.equal(await fs.readFile(manifestPath, "utf8"), before);
   assert.deepEqual((await loadRunState(repoPath, runId)).reviews, {});
 });
+
+test("displayed discard action accepts an exhausted validator-REWORK item without integration", async (t) => {
+  const { repoPath, manifestPath } = await fixture(t);
+  const runId = "20260910040404-dddddd";
+  const state = rejectedRun(runId);
+  state.autoRework = {
+    "7": { status: "retry-exhausted", retryLimit: 3, attemptsUsed: 3, finalVerdict: "rework" }
+  };
+  await saveRunState(repoPath, runId, state);
+  const cli = path.resolve(__dirname, "../bin/maestro.js");
+
+  const status = spawnSync(process.execPath, [
+    cli, "status", manifestPath, "7", "--repo-path", repoPath
+  ], { encoding: "utf8" });
+  assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, /`maestro discard 7`/);
+
+  const discard = spawnSync(process.execPath, [
+    cli, "discard", manifestPath, "7", "--repo-path", repoPath
+  ], { encoding: "utf8" });
+  assert.equal(discard.status, 0, discard.stderr);
+  assert.match(discard.stdout, new RegExp(`Discarded: #7 \\(run ${runId}\\)`));
+
+  const persisted = await loadRunState(repoPath, runId);
+  assert.equal(persisted.reviews["7"].disposition, "discard");
+  assert.deepEqual(persisted.integration, []);
+  assert.equal(persisted.workers[0].worktreePath, state.workers[0].worktreePath);
+});

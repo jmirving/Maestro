@@ -29,6 +29,13 @@ function run(runId, issues, verdicts, { parentRunId = null, reviews = {}, integr
   };
 }
 
+function markReworkExhausted(state, issue = "7") {
+  state.autoRework = {
+    [issue]: { status: "retry-exhausted", retryLimit: 3, attemptsUsed: 3, finalVerdict: "rework" }
+  };
+  return state;
+}
+
 async function fixture(t, work = { "2": { status: "ready" }, "5": { status: "ready" }, "7": { status: "ready" }, "12": { status: "ready" } }) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-approval-"));
   const repoPath = path.join(root, "target");
@@ -221,4 +228,28 @@ test("approve CLI requires --override for validator-REWORK and accepts flags bef
   assert.equal(override.status, 0, override.stderr);
   assert.match(override.stdout, new RegExp(`Override-approved: #7 \\(run ${runId}\\)`));
   assert.equal((await loadRunState(repoPath, runId)).reviews["7"].disposition, "approve-override");
+});
+
+test("displayed override action accepts an exhausted validator-REWORK item without integrating it", async (t) => {
+  const { repoPath, manifestPath } = await fixture(t);
+  const runId = "20260910010101-aaaaaa";
+  await saveRunState(repoPath, runId, markReworkExhausted(run(runId, [7], { "7": "rework" })));
+  const cli = path.resolve(__dirname, "../bin/maestro.js");
+
+  const status = spawnSync(process.execPath, [
+    cli, "status", manifestPath, "7", "--repo-path", repoPath
+  ], { encoding: "utf8" });
+  assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, /`maestro approve 7 --override`/);
+
+  const override = spawnSync(process.execPath, [
+    cli, "approve", manifestPath, "7", "--override", "--repo-path", repoPath
+  ], { encoding: "utf8" });
+  assert.equal(override.status, 0, override.stderr);
+  assert.match(override.stdout, new RegExp(`Override-approved: #7 \\(run ${runId}\\)`));
+
+  const persisted = await loadRunState(repoPath, runId);
+  assert.equal(persisted.reviews["7"].disposition, "approve-override");
+  assert.deepEqual(persisted.integration, []);
+  assert.match(override.stdout, /human override approved, ready to integrate/);
 });

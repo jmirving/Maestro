@@ -1,9 +1,10 @@
 const { loadRunState } = require("./run-store");
 const { evidenceForIssue, issueIdsForRun, resolveCurrentIssueStates } = require("./run-resolver");
 const { recordReview } = require("./reviews");
+const { isRecoverableValidatorRework } = require("./run-lifecycle");
 
 function approvalReason(evidence) {
-  if (evidence.state === "awaiting-rework") return "rework-required";
+  if (isRecoverableValidatorRework(evidence)) return "rework-required";
   if (evidence.state === "awaiting-integration") return "already-reviewed";
   if (evidence.state === "integrated-pending-manifest") return "already-integrated";
   if (evidence.state === "awaiting-human-review" && evidence.verdict === "human_gate") return "human-decision-required";
@@ -17,7 +18,7 @@ function isNormallyApprovable(evidence) {
 }
 
 function isOverrideApprovable(evidence) {
-  return evidence.state === "awaiting-rework" && evidence.verdict === "rework" && !evidence.review;
+  return isRecoverableValidatorRework(evidence);
 }
 
 function summarizeEntry(resolved) {

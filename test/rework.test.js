@@ -427,6 +427,74 @@ test("automatic rework exhausts a durable three-attempt budget across child runs
   });
 });
 
+test("displayed manual rework action resumes after automatic exhaustion without approval or integration", async (t) => {
+  const fixture = await autoFixture(t);
+  let workers = 0;
+  const exhausted = await autoRework(fixture.config, {
+    repoPath: fixture.repoPath,
+    issueIds: ["7"],
+    retryLimit: 3,
+    reworkOptions: {
+      runner: fixture.runner,
+      workerExecutor: async ({ worktree }) => ({
+        issue: "7",
+        exitCode: 0,
+        ...worktree,
+        headSha: `corrected-${++workers}`,
+        report: "attempted"
+      }),
+      validatorExecutor: async () => ({
+        issue: "7",
+        exitCode: 0,
+        verdict: "rework",
+        report: "still failing"
+      })
+    }
+  });
+  assert.equal(exhausted.issues[0].outcome, "retry-exhausted");
+  assert.equal(workers, 3);
+
+  const manifestPath = path.join(fixture.repoPath, ".maestro.json");
+  const binPath = path.join(path.dirname(fixture.repoPath), "bin");
+  await fs.writeFile(manifestPath, `${JSON.stringify(fixture.config)}\n`);
+  await fs.mkdir(binPath);
+  await fs.writeFile(path.join(binPath, "git"), `#!/usr/bin/env node
+if (process.argv[2] === "rev-parse") process.stdout.write(process.argv[3] === "HEAD" ? "head-manual\\n" : "base-manual\\n");
+`);
+  await fs.writeFile(path.join(binPath, "codex"), `#!/usr/bin/env node
+const fs = require("node:fs");
+const index = process.argv.indexOf("--output-last-message");
+if (index >= 0) fs.writeFileSync(process.argv[index + 1], process.argv.includes("read-only") ? "VERDICT: APPROVE\\n" : "Result: complete\\n");
+`);
+  await fs.chmod(path.join(binPath, "git"), 0o755);
+  await fs.chmod(path.join(binPath, "codex"), 0o755);
+
+  const cli = path.resolve(__dirname, "../bin/maestro.js");
+  const env = { ...process.env, PATH: `${binPath}${path.delimiter}${process.env.PATH}` };
+  const status = spawnSync(process.execPath, [
+    cli, "status", manifestPath, "7", "--repo-path", fixture.repoPath
+  ], { encoding: "utf8", env });
+  assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, /`maestro rework 7`/);
+
+  const manual = spawnSync(process.execPath, [
+    cli, "rework", manifestPath, "7", "--repo-path", fixture.repoPath
+  ], { encoding: "utf8", env });
+  assert.equal(manual.status, 0, manual.stderr);
+  const child = parseLeadingJson(manual.stdout);
+  assert.equal(child.parentRunId, exhausted.issues[0].finalRunId);
+  assert.equal(child.correction.attempts["7"].number, 4);
+  assert.equal(child.correction.attempts["7"].automatic, false);
+  assert.equal(child.validations[0].verdict, "approve");
+  assert.deepEqual(child.reviews, {});
+  assert.deepEqual(child.integration || [], []);
+
+  const terminal = await loadRunState(fixture.repoPath, exhausted.issues[0].finalRunId);
+  assert.equal(terminal.autoRework["7"].status, "retry-exhausted");
+  assert.deepEqual(terminal.reviews, {});
+  assert.deepEqual(terminal.integration || [], []);
+});
+
 test("automatic rework fails safely on worker, validator, and pre-worker refresh failures", async (t) => {
   const workerFixture = await autoFixture(t);
   const workerFailure = await autoRework(workerFixture.config, {

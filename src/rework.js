@@ -6,6 +6,7 @@ const { validateWorker } = require("./validator");
 const { runChecked } = require("./process");
 const { newRunId } = require("./controller");
 const { resolveCurrentIssueStates } = require("./run-resolver");
+const { isRecoverableValidatorRework } = require("./run-lifecycle");
 
 const DEFAULT_AUTO_REWORK_LIMIT = 3;
 
@@ -60,7 +61,7 @@ async function resolveIssueReworkSources(repoPath, issueIds) {
   const resolved = await resolveCurrentIssueStates(repoPath, requested);
   if (!requested.length) {
     const actionable = resolved.filter((entry) => (
-      entry.evidence.state === "awaiting-rework" && entry.evidence.verdict === "rework"
+      isRecoverableValidatorRework(entry.evidence)
     ));
     if (!actionable.length) {
       throw new Error("No currently relevant validator-REWORK issues are available.");
@@ -76,7 +77,7 @@ async function resolveIssueReworkSources(repoPath, issueIds) {
     }];
   }
 
-  const refused = resolved.filter((entry) => entry.evidence.state !== "awaiting-rework");
+  const refused = resolved.filter((entry) => !isRecoverableValidatorRework(entry.evidence));
   if (refused.length) {
     const details = refused
       .map((entry) => `#${entry.issue} (${entry.evidence.state || "unknown"} in run ${entry.runId})`)

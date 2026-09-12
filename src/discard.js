@@ -1,9 +1,10 @@
 const { loadRunState } = require("./run-store");
 const { evidenceForIssue, resolveCurrentIssueStates } = require("./run-resolver");
 const { recordReview } = require("./reviews");
+const { isRecoverableValidatorRework } = require("./run-lifecycle");
 
 function isDiscardable(evidence) {
-  return evidence?.state === "awaiting-rework" && evidence.verdict === "rework" && !evidence.review;
+  return isRecoverableValidatorRework(evidence);
 }
 
 async function discardIssues({ repoPath, runId = null, requestedIssues = [], reviewRecorder = recordReview }) {

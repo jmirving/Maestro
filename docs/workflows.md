@@ -65,6 +65,8 @@ Passing siblings remain approvable while rejected work moves through child rewor
 
 Use `maestro approve 57 --override` only for an intentional, audited human override of a current validator-REWORK verdict. Use `maestro discard 57` to settle and preserve rejected evidence without integrating, completing the manifest item, deleting its worktree, or closing its GitHub issue.
 
+When automatic correction exhausts its retry cap, inspect the lineage first. Status continues to offer `maestro rework 57`, `maestro approve 57 --override`, and `maestro discard 57` as executable, explicit human choices. Manual rework records another correction generation beyond the automatic cap and still waits for review before integration.
+
 ## Resume, retry, and no-ready states
 
 Resume an interrupted workflow by reading persisted state:
