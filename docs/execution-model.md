@@ -92,7 +92,7 @@ The manifest expresses repository intent, while persisted runs express execution
 
 An intentional retry must use the explicit `--rerun` option. Editing or leaving a manifest item as `ready` does not silently discard its execution history.
 
-Before `start` or `next` launches a GitHub-provenanced selected item, Maestro rereads that issue. Closed state and changed explicit dependency or configured label mapping facts block execution and direct the user back to draft reconciliation. Legacy manually authored entries without provenance retain their existing behavior until drafted.
+Before `start` or `next` launches selected work, Maestro rereads every selected GitHub issue. Closed state and changed explicit dependency or configured label mapping facts block execution and direct the user back to draft reconciliation. Legacy manually authored entries without provenance also fail closed until `maestro draft --write` records the baseline needed to distinguish GitHub-owned facts from curated manifest metadata.
 
 ## Parallelism
 

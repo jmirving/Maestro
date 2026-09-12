@@ -331,12 +331,12 @@ async function main() {
 
   if (command === "start" || command === "next") {
     const plan = args.includes("--rerun") ? computePlan(config) : await computeEffectivePlan(config, repoPath);
-    const reconciledIssueIds = plan.selected.map((item) => item.id).filter((id) => config.work?.[id]?.github);
-    if (reconciledIssueIds.length) {
+    const selectedIssueIds = plan.selected.map((item) => item.id);
+    if (selectedIssueIds.length) {
       const repository = await discoverGitHubRepository(repoPath);
       if (repository !== config.repository) throw new Error(`The manifest targets ${config.repository}, but the current checkout is ${repository}.`);
-      const issues = await loadGitHubIssues(repository, reconciledIssueIds, { repoPath });
-      const findings = detectExecutionDrift(config, issues, reconciledIssueIds);
+      const issues = await loadGitHubIssues(repository, selectedIssueIds, { repoPath });
+      const findings = detectExecutionDrift(config, issues, selectedIssueIds);
       if (findings.length) {
         throw new Error(`GitHub/manifest drift blocks execution: ${findings.map((item) => `#${item.issue} ${item.reason}`).join(" ")} Run \`maestro draft --write\` and review any conflicts before retrying.`);
       }

@@ -112,7 +112,6 @@ function detectExecutionDrift(config, issues, issueIds) {
   const findings = [];
   for (const id of issueIds.map(String)) {
     const item = config.work?.[id];
-    if (!item?.github) continue;
     const issue = byId.get(id);
     if (!issue) {
       findings.push({ issue: id, reason: "GitHub issue no longer resolves." });
@@ -122,6 +121,10 @@ function detectExecutionDrift(config, issues, issueIds) {
     const mapped = mappedMetadata(config, issueLabels(issue));
     const snapshot = githubSnapshot(issue, dependencies, mapped);
     if (snapshot.state !== "OPEN") findings.push({ issue: id, reason: `GitHub issue is ${snapshot.state.toLowerCase()}.` });
+    if (!item?.github) {
+      findings.push({ issue: id, reason: "Manifest entry has no GitHub reconciliation provenance." });
+      continue;
+    }
     if (snapshot.state !== item.github.state) findings.push({ issue: id, reason: `GitHub state changed from ${item.github.state.toLowerCase()} to ${snapshot.state.toLowerCase()}.` });
     if (!same(snapshot.blockedBy, item.github.blockedBy || [])) findings.push({ issue: id, reason: "GitHub dependency metadata changed." });
     if (!same(snapshot.mapped || {}, item.github.mapped || {})) findings.push({ issue: id, reason: "GitHub label mappings changed." });

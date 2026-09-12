@@ -327,6 +327,12 @@ test("execution drift detection blocks closed and materially changed reconciled 
   assert.match(findings.map((entry) => entry.reason).join(" "), /dependency metadata changed/);
 });
 
+test("execution drift detection fails closed for legacy entries without GitHub provenance", () => {
+  const config = { repository: "owner/repo", work: { "7": { status: "ready" } } };
+  const findings = detectExecutionDrift(config, [issue(7)], ["7"]);
+  assert.match(findings.map((entry) => entry.reason).join(" "), /no GitHub reconciliation provenance/);
+});
+
 test("manifest writes reject an intervening edit without overwriting it", () => {
   const dir = tempDir();
   const file = path.join(dir, ".maestro.json");
@@ -363,6 +369,34 @@ else process.exit(3);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /GitHub\/manifest drift blocks execution.*#7 GitHub issue is closed/);
   assert.match(result.stderr, /maestro draft --write/);
+});
+
+test("start refuses a closed ready legacy entry without creating a run", () => {
+  const repoPath = tempDir();
+  const binPath = path.join(repoPath, "bin");
+  fs.mkdirSync(binPath);
+  assert.equal(spawnSync("git", ["init", "-q"], { cwd: repoPath }).status, 0);
+  fs.writeFileSync(path.join(repoPath, ".maestro.json"), `${JSON.stringify({
+    repository: "owner/repo",
+    work: { "7": { status: "ready" } }
+  }, null, 2)}\n`);
+  fs.writeFileSync(path.join(binPath, "gh"), `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "repo") process.stdout.write('{"nameWithOwner":"owner/repo"}');
+else if (args[0] === "issue" && args[1] === "view") process.stdout.write('{"number":7,"state":"CLOSED","stateReason":"NOT_PLANNED","title":"Seven","body":"","labels":[]}');
+else process.exit(3);
+`, { mode: 0o755 });
+  const result = spawnSync(process.execPath, [path.resolve(__dirname, "../bin/maestro.js"), "start"], {
+    cwd: repoPath,
+    env: { ...process.env, PATH: `${binPath}${path.delimiter}${process.env.PATH}` },
+    encoding: "utf8"
+  });
+  const reportRoot = path.join(path.dirname(repoPath), ".maestro-worktrees", path.basename(repoPath), ".maestro-reports");
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /GitHub\/manifest drift blocks execution.*#7 GitHub issue is closed/);
+  assert.match(result.stderr, /#7 Manifest entry has no GitHub reconciliation provenance/);
+  assert.match(result.stderr, /maestro draft --write/);
+  assert.equal(fs.existsSync(reportRoot), false, "preflight must fail before run persistence");
 });
 
 test("invalid existing metadata fails schema validation before it can be written", () => {
