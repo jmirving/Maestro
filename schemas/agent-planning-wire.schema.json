@@ -1,0 +1,77 @@
+{
+  "type": "object",
+  "required": ["version", "dependencies", "conflicts", "work", "waves", "unresolved"],
+  "properties": {
+    "version": { "type": "integer", "const": 1 },
+    "dependencies": { "type": "array", "items": { "$ref": "#/$defs/dependency" } },
+    "conflicts": { "type": "array", "items": { "$ref": "#/$defs/conflict" } },
+    "work": { "type": "array", "items": { "$ref": "#/$defs/work" } },
+    "waves": { "type": "array", "items": { "$ref": "#/$defs/wave" } },
+    "unresolved": { "type": "array", "items": { "$ref": "#/$defs/unresolved" } }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
+    "evidence": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 8 },
+    "dependency": {
+      "type": "object",
+      "required": ["issue", "blockedBy", "confidence", "reason", "evidence"],
+      "properties": {
+        "issue": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+        "blockedBy": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "reason": { "type": "string" },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      },
+      "additionalProperties": false
+    },
+    "conflict": {
+      "type": "object",
+      "required": ["issues", "confidence", "reason", "evidence"],
+      "properties": {
+        "issues": { "type": "array", "items": { "type": "string", "pattern": "^[1-9][0-9]*$" }, "minItems": 2, "maxItems": 2 },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "reason": { "type": "string" },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      },
+      "additionalProperties": false
+    },
+    "work": {
+      "type": "object",
+      "required": ["issue", "confidence", "reason", "evidence", "mode", "requires", "priority", "humanGate"],
+      "properties": {
+        "issue": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "reason": { "type": "string" },
+        "evidence": { "$ref": "#/$defs/evidence" },
+        "mode": { "type": ["string", "null"], "enum": ["execute", "research", "validate", null] },
+        "requires": { "type": ["array", "null"], "items": { "type": "string" } },
+        "priority": { "type": ["number", "null"] },
+        "humanGate": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "wave": {
+      "type": "object",
+      "required": ["issues", "confidence", "reason", "evidence"],
+      "properties": {
+        "issues": { "type": "array", "items": { "type": "string", "pattern": "^[1-9][0-9]*$" }, "minItems": 1 },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "reason": { "type": "string" },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      },
+      "additionalProperties": false
+    },
+    "unresolved": {
+      "type": "object",
+      "required": ["issue", "question", "reason", "evidence"],
+      "properties": {
+        "issue": { "type": ["string", "null"], "pattern": "^[1-9][0-9]*$" },
+        "question": { "type": "string" },
+        "reason": { "type": "string" },
+        "evidence": { "type": "array", "items": { "type": "string" }, "maxItems": 8 }
+      },
+      "additionalProperties": false
+    }
+  }
+}

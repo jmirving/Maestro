@@ -75,6 +75,11 @@ test("help works outside a Git checkout and both command forms are identical", (
 });
 
 test("command help documents operational state boundaries and realistic next actions", () => {
+  const draft = invoke(tempDir(), "help", "draft");
+  assert.equal(draft.status, 0, draft.stderr);
+  assert.match(draft.stdout, /provider error does not mean the repository manifest is invalid/);
+  assert.match(draft.stdout, /without --agent/);
+
   const start = invoke(tempDir(), "help", "s");
   assert.equal(start.status, 0, start.stderr);
   assert.match(start.stdout, /State requirements/);

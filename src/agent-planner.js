@@ -5,8 +5,10 @@ const crypto = require("node:crypto");
 const Ajv2020 = require("ajv/dist/2020");
 const { runProcess } = require("./process");
 const agentOutputSchema = require("../schemas/agent-planning-output.schema.json");
+const agentWireSchema = require("../schemas/agent-planning-wire.schema.json");
 
 const validateOutput = new Ajv2020({ allErrors: true, strict: false }).compile(agentOutputSchema);
+const validateWireOutput = new Ajv2020({ allErrors: true, strict: false }).compile(agentWireSchema);
 
 function digest(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
@@ -16,6 +18,20 @@ function validateAgentOutput(output) {
   if (validateOutput(output)) return output;
   const details = (validateOutput.errors || []).map((error) => `${error.instancePath || "/"} ${error.message}`).join("; ");
   throw new Error(`Agent planner output does not match the structured-output schema: ${details}`);
+}
+
+function normalizeProviderOutput(output) {
+  if (!validateWireOutput(output)) {
+    const details = (validateWireOutput.errors || []).map((error) => `${error.instancePath || "/"} ${error.message}`).join("; ");
+    throw new Error(`Agent planner output does not match the provider output schema: ${details}`);
+  }
+  const normalized = JSON.parse(JSON.stringify(output));
+  for (const recommendation of normalized.work) {
+    for (const field of ["mode", "requires", "priority", "humanGate"]) {
+      if (recommendation[field] === null) delete recommendation[field];
+    }
+  }
+  return validateAgentOutput(normalized);
 }
 
 async function trackedFiles(repoPath, runner) {
@@ -104,17 +120,24 @@ async function assembleAgentContext({ repoPath, repository, issues, manifest, de
 }
 
 function plannerPrompt(context) {
-  return `You are a bounded planning analyzer. Do not execute work or modify any repository or provider. Analyze only the supplied JSON context. Return exactly one JSON object, without Markdown, matching this contract:\n${JSON.stringify(agentOutputSchema)}\n\nPlanning context:\n${JSON.stringify(context)}`;
+  return `You are a bounded planning analyzer. Do not execute work or modify any repository or provider. Analyze only the supplied JSON context. Return exactly one JSON object, without Markdown, matching this provider contract:\n${JSON.stringify(agentWireSchema)}\n\nFor work recommendations, null means no recommendation for that field. Reasons and evidence strings must be nonempty. Capability names must be nonempty and unique within requires; issue IDs must be valid references; issue IDs within each suggested wave must be unique. Do not use null to recommend clearing or overwriting a value.\n\nPlanning context:\n${JSON.stringify(context)}`;
+}
+
+function isProviderSchemaRejection(result) {
+  const diagnostics = `${result.stderr || ""}\n${result.stdout || ""}`;
+  return /invalid_json_schema|invalid schema for response_format|text\.format\.schema/i.test(diagnostics);
 }
 
 async function invokeAgentPlanner({ contextBundle, runner = runProcess, command = "codex", timeoutMs = 120000, retries = 1, maxOutputBytes = 256 * 1024 }) {
   let lastError;
+  let attempts = 0;
   for (let attempt = 1; attempt <= retries + 1; attempt += 1) {
+    attempts = attempt;
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-agent-plan-"));
     const outputPath = path.join(tempDir, "output.json");
     const schemaPath = path.join(tempDir, "output-schema.json");
     try {
-      await fs.writeFile(schemaPath, JSON.stringify(agentOutputSchema), "utf8");
+      await fs.writeFile(schemaPath, JSON.stringify(agentWireSchema), "utf8");
       const result = await runner(command, [
         "exec", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules",
         "--config", "shell_environment_policy.inherit=none",
@@ -132,15 +155,22 @@ async function invokeAgentPlanner({ contextBundle, runner = runProcess, command 
       });
       if (result.timedOut) throw new Error(`Agent planner timed out after ${timeoutMs}ms.`);
       if (result.outputLimitExceeded) throw new Error(`Agent planner exceeded the ${maxOutputBytes}-byte process output limit.`);
-      if (result.code !== 0) throw new Error(`Agent planner command failed with exit ${result.code}: ${(result.stderr || result.stdout || "no diagnostics").trim().slice(-2000)}`);
+      if (result.code !== 0) {
+        if (isProviderSchemaRejection(result)) {
+          const error = new Error("Codex rejected Maestro's agent-planning output schema (invalid_json_schema). This is an agent-planning schema compatibility error, not an invalid repository manifest. Update Maestro or use deterministic `maestro draft --write` without `--agent`.");
+          error.retryable = false;
+          throw error;
+        }
+        throw new Error(`Agent planner command failed with exit ${result.code}: ${(result.stderr || result.stdout || "no diagnostics").trim().slice(-2000)}`);
+      }
       let raw;
       try { raw = await fs.readFile(outputPath, "utf8"); } catch { raw = result.stdout; }
       if (Buffer.byteLength(raw) > maxOutputBytes) throw new Error(`Agent planner response exceeded the ${maxOutputBytes}-byte structured-output limit.`);
       let output;
       try { output = JSON.parse(raw); } catch { throw new Error("Agent planner returned invalid JSON."); }
-      validateAgentOutput(output);
+      const normalizedOutput = normalizeProviderOutput(output);
       return {
-        output,
+        output: normalizedOutput,
         metadata: {
           analyzer: "agent",
           provider: path.basename(command),
@@ -153,11 +183,12 @@ async function invokeAgentPlanner({ contextBundle, runner = runProcess, command 
       };
     } catch (error) {
       lastError = error;
+      if (error.retryable === false) break;
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
     }
   }
-  throw new Error(`Agent-assisted planning failed after ${retries + 1} attempt(s) for context ${contextBundle.digest.slice(0, 12)}: ${lastError.message}`);
+  throw new Error(`Agent-assisted planning failed after ${attempts} attempt(s) for context ${contextBundle.digest.slice(0, 12)}: ${lastError.message}`);
 }
 
 function createAgentPlanner(options = {}) {
@@ -170,4 +201,4 @@ function createAgentPlanner(options = {}) {
   };
 }
 
-module.exports = { agentOutputSchema, validateAgentOutput, assembleAgentContext, invokeAgentPlanner, createAgentPlanner, plannerPrompt };
+module.exports = { agentOutputSchema, agentWireSchema, validateAgentOutput, normalizeProviderOutput, assembleAgentContext, invokeAgentPlanner, createAgentPlanner, plannerPrompt };

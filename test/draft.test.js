@@ -6,6 +6,7 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { proposeDraft, formatDraftSummary, formatDraftVerbose, formatDraftJson, writeManifest, detectExecutionDrift } = require("../src/draft");
 const { loadGitHubIssues } = require("../src/github");
+const { normalizeProviderOutput } = require("../src/agent-planner");
 
 function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "maestro-draft-test-"));
@@ -165,6 +166,29 @@ test("agent recommendations merge semantically while explicit manifest truth win
   assert.match(result.dependencySources.find((entry) => entry.issue === "2").source, /src\/core.js/);
   assert.deepEqual(result.planning.waves, [["1"], ["2"]]);
   assert.equal(result.writable, true);
+});
+
+test("nullable no-recommendation fields preserve curated manifest work", () => {
+  const normalized = normalizeProviderOutput({
+    version: 1,
+    dependencies: [], conflicts: [], waves: [], unresolved: [],
+    work: [{
+      issue: "1", confidence: "high", reason: "No metadata change recommended.", evidence: ["AGENTS.md"],
+      mode: null, requires: null, priority: null, humanGate: null
+    }]
+  });
+  const result = proposeDraft({
+    repository: "owner/repo",
+    existingConfig: { repository: "owner/repo", work: { "1": { status: "human_gate", mode: "execute", priority: 0, requires: ["node"], humanGate: "Owner review" } } },
+    issues: [issue(1)],
+    agentAnalysis: agentAnalysis(normalized)
+  });
+  assert.deepEqual({ ...result.manifest.work["1"], github: undefined }, {
+    status: "human_gate", mode: "execute", priority: 0, requires: ["node"], humanGate: "Owner review", github: undefined
+  });
+  assert.deepEqual(result.manifest.planning.agentAnalysis.recommendations.work[0], {
+    issue: "1", confidence: "high", reason: "No metadata change recommended.", evidence: ["AGENTS.md"]
+  });
 });
 
 test("low-confidence agent decisions remain unresolved instead of mutating hard truth", () => {
@@ -907,5 +931,37 @@ else process.exit(3);
   });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /Agent-assisted planning failed after 2 attempt/);
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), original);
+});
+
+test("draft --agent does not retry provider schema rejection or alter the manifest", () => {
+  const repoPath = tempDir();
+  const binPath = path.join(repoPath, "bin");
+  fs.mkdirSync(binPath);
+  assert.equal(spawnSync("git", ["init", "-q"], { cwd: repoPath }).status, 0);
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  const countPath = path.join(repoPath, "codex-count");
+  const original = '{\n  "repository": "owner/repo",\n  "work": { "1": { "status": "ready" } }\n}\n';
+  fs.writeFileSync(manifestPath, original);
+  fs.writeFileSync(path.join(binPath, "gh"), `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "repo") process.stdout.write('{"nameWithOwner":"owner/repo"}');
+else if (args[0] === "issue") process.stdout.write('[{"number":1,"state":"OPEN","title":"One","body":"","labels":[]}]');
+else process.exit(3);
+`, { mode: 0o755 });
+  fs.writeFileSync(path.join(binPath, "codex"), `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.appendFileSync(process.env.MAESTRO_TEST_COUNT, "1\\n");
+process.stderr.write('ERROR: {"error":{"code":"invalid_json_schema","message":"Invalid schema for response_format codex_output_schema"}}');
+process.exit(1);
+`, { mode: 0o755 });
+  const result = spawnSync(process.execPath, [path.resolve(__dirname, "../bin/maestro.js"), "draft", "--agent", "--write"], {
+    cwd: repoPath,
+    env: { ...process.env, PATH: `${binPath}${path.delimiter}${process.env.PATH}`, MAESTRO_TEST_COUNT: countPath },
+    encoding: "utf8"
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /failed after 1 attempt.*agent-planning schema compatibility error.*not an invalid repository manifest.*without `--agent`/);
+  assert.equal(fs.readFileSync(countPath, "utf8"), "1\n");
   assert.equal(fs.readFileSync(manifestPath, "utf8"), original);
 });

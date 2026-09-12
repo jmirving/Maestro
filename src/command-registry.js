@@ -19,7 +19,7 @@ const COMMANDS = [
     },
     prerequisites: "A Git checkout and readable GitHub repository. Writing requires a safe, schema-valid dependency graph.",
     effects: "Reads issues and builds a proposal; only --write changes the manifest.",
-    cautions: "Saving a draft does not launch work, expand delegated scope, grant human approval, or authorize integration. Lifecycle conflicts remain fail-closed; drafting never mutates GitHub.",
+    cautions: "Saving a draft does not launch work, expand delegated scope, grant human approval, or authorize integration. Lifecycle conflicts remain fail-closed; drafting never mutates GitHub. If Codex rejects the agent output schema, retry deterministically without --agent; that provider error does not mean the repository manifest is invalid.",
     next: ["maestro plan", "maestro start"],
     examples: [
       ["draft", "--agent", "--verbose"],
