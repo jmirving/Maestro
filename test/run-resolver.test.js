@@ -6,6 +6,7 @@ const path = require("node:path");
 const { saveRunState } = require("../src/run-store");
 const {
   evidenceForIssue,
+  effectiveIssueStates,
   currentIssueEvidenceFromStates,
   resolveFromStates,
   resolveLatestRun,
@@ -187,4 +188,28 @@ test("current issue state prefers a descendant even when same-second random run 
   const [current] = currentIssueEvidenceFromStates([parent, child], ["7"]);
   assert.equal(current.runId, child.runId);
   assert.equal(current.evidence.verdict, "approve");
+});
+
+test("effective issue state makes integration terminal across runs and diagnoses unsupported manifest completion", () => {
+  const historical = run("20260910010101-aaaaaa", "13", { disposition: "approve" });
+  const conflicted = effectiveIssueStates({ work: { "13": { status: "complete" } } }, [historical]).get("13");
+  assert.equal(conflicted.state, "consistency-conflict");
+  assert.equal(conflicted.terminal, false);
+  assert.match(conflicted.consistencyConflict, /complete in the manifest.*no integration record/i);
+
+  const reconciliation = run("20260910020202-bbbbbb", "13", { integrated: true });
+  reconciliation.parentRunId = historical.runId;
+  const completed = effectiveIssueStates({ work: { "13": { status: "complete" } } }, [historical, reconciliation]).get("13");
+  assert.equal(completed.state, "complete");
+  assert.equal(completed.terminal, true);
+  assert.equal(completed.integrationRunId, reconciliation.runId);
+});
+
+test("current issue resolution cannot resurrect work recorded after integration", () => {
+  const integrated = run("20260910010101-aaaaaa", "13", { integrated: true });
+  const stale = run("20260910020202-bbbbbb", "13", { disposition: "approve" });
+
+  const [current] = currentIssueEvidenceFromStates([integrated, stale], ["13"]);
+  assert.equal(current.runId, integrated.runId);
+  assert.equal(current.evidence.state, "integrated-pending-manifest");
 });

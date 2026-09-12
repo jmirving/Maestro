@@ -4,7 +4,7 @@ const { computePlan } = require("./planner");
 const { loadPersistedRunStates } = require("./run-store");
 const { reportRootForRepo } = require("./reporter");
 const { classifyRunIssue } = require("./run-lifecycle");
-const { currentIssueEvidenceFromStates } = require("./run-resolver");
+const { effectiveIssueStates } = require("./run-resolver");
 
 async function loadExecutionStates(repoPath) {
   const states = await loadPersistedRunStates(repoPath);
@@ -39,14 +39,25 @@ async function loadExecutionStates(repoPath) {
 
 function unresolvedWork(states, config = null) {
   const byIssue = new Map();
-  for (const { issue, runId, state, evidence } of currentIssueEvidenceFromStates(states)) {
+  for (const effective of effectiveIssueStates(config, states).values()) {
+    const { issue } = effective;
+    if (effective.integration) {
+      if (config?.work?.[issue]?.status !== "complete") {
+        byIssue.set(issue, {
+          issue,
+          runId: effective.integrationRunId,
+          mode: null,
+          state: "integrated-pending-manifest",
+          action: `maestro commit --run ${effective.integrationRunId}`
+        });
+      }
+      continue;
+    }
+    if (effective.consistencyConflict || !effective.current) continue;
+    const { runId, state, evidence } = effective.current;
     if (evidence.worker) {
       const worker = evidence.worker;
       const lifecycle = classifyRunIssue(state, worker);
-      if (lifecycle.state === "integrated-pending-manifest" && config?.work?.[issue]?.status === "complete") {
-        byIssue.delete(issue);
-        continue;
-      }
       if (lifecycle.state !== "discarded") {
         byIssue.set(issue, { issue, runId, mode: state.mode, ...lifecycle });
       }

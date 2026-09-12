@@ -14,12 +14,13 @@ function hasRecordedIntegration(states) {
 function buildRecommendations(items, readiness, selected, { states = [] } = {}) {
   const primary = [];
   const alternatives = [];
-  const exhaustedRework = items.filter((item) => item.autoReworkStatus === "retry-exhausted" && !item.humanReview);
-  const technicalConflicts = items.filter((item) => item.autoReworkStatus === "technical-conflict");
-  const currentRework = items.filter((item) => item.validator === "rework" && !item.humanReview && item.autoReworkStatus !== "retry-exhausted");
-  const reviewedRework = items.filter((item) => item.humanReview === "rework-original");
-  const approvals = items.filter((item) => item.validator === "approve" && !item.humanReview);
-  const humanGates = items.filter((item) => item.validator === "human_gate" && !item.humanReview);
+  const actionable = items.filter((item) => item.actionable !== false);
+  const exhaustedRework = actionable.filter((item) => item.autoReworkStatus === "retry-exhausted" && !item.humanReview);
+  const technicalConflicts = actionable.filter((item) => item.autoReworkStatus === "technical-conflict");
+  const currentRework = actionable.filter((item) => item.validator === "rework" && !item.humanReview && item.autoReworkStatus !== "retry-exhausted");
+  const reviewedRework = actionable.filter((item) => item.humanReview === "rework-original");
+  const approvals = actionable.filter((item) => item.validator === "approve" && !item.humanReview);
+  const humanGates = actionable.filter((item) => item.validator === "human_gate" && !item.humanReview);
 
   if (currentRework.length) {
     primary.push({ command: `maestro rework ${currentRework.map((item) => item.issue).join(" ")}` });
@@ -85,7 +86,7 @@ function buildRecommendations(items, readiness, selected, { states = [] } = {}) 
   }
 
   if (!primary.length) {
-    const stateActions = [...new Set(items.map((item) => item.action).filter(Boolean))];
+    const stateActions = [...new Set(actionable.map((item) => item.action).filter(Boolean))];
     if (stateActions.length) primary.push({ command: stateActions.shift() });
     alternatives.push(...stateActions.map((command) => ({ command })));
   }

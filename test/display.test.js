@@ -175,6 +175,94 @@ test("a child run does not hide the source disposition still required for siblin
   assert.match(text, /maestro review --run 20260910010101-aaaaaa --issue 7 --disposition rework-original/);
 });
 
+test("manifest completion without integration evidence is a reconciliation conflict, never a stale commit or review action", async () => {
+  const historical = mixedRun({ reviewed: true });
+  historical.workers = historical.workers.filter((entry) => entry.issue === "2");
+  historical.validations = historical.validations.filter((entry) => entry.issue === "2");
+  historical.plan.selected = historical.plan.selected.filter((entry) => entry.id === "2");
+  delete historical.reviews["7"];
+  const text = formatStatus(await statusSnapshot({
+    repository: "example/repo",
+    work: { "2": { status: "complete", title: "Passing change" } }
+  }, "/unused", [], { stateLoader: async () => [historical] }));
+
+  assert.match(text, /Issue #2 .*consistency conflict: manifest says complete, but execution history has no integration record/);
+  assert.match(text, /Commit: not ready — #2 needs manifest\/run reconciliation/);
+  assert.doesNotMatch(text, /Commit: ready/);
+  assert.doesNotMatch(text, /Recommended: `maestro (approve|rework|commit)/);
+});
+
+test("integration in a newer reconciliation run suppresses an older approved implementation and its actions", async () => {
+  const historical = mixedRun({ reviewed: true });
+  historical.workers = historical.workers.filter((entry) => entry.issue === "2");
+  historical.validations = historical.validations.filter((entry) => entry.issue === "2");
+  historical.plan.selected = historical.plan.selected.filter((entry) => entry.id === "2");
+  delete historical.reviews["7"];
+  const reconciliation = {
+    runId: "20260910020202-bbbbbb",
+    parentRunId: historical.runId,
+    mode: "reconcile",
+    status: "integrated",
+    plan: { selected: [{ id: "2" }] },
+    workers: [],
+    validations: [],
+    reviews: {},
+    integration: [{ issue: "2", integratedSha: "corrected-2" }]
+  };
+  const text = formatStatus(await statusSnapshot({
+    repository: "example/repo",
+    work: { "2": { status: "complete", title: "Passing change" } }
+  }, "/unused", [], { stateLoader: async () => [historical, reconciliation] }));
+
+  assert.match(text, /Issue #2 .*integrated\/complete/);
+  assert.doesNotMatch(text, /Commit:/);
+  assert.doesNotMatch(text, /Recommended:/);
+});
+
+test("a superseded source implementation is excluded while its current sibling remains commit-ready", async () => {
+  const source = mixedRun({ reviewed: true });
+  const child = {
+    runId: "20260910020202-bbbbbb",
+    parentRunId: source.runId,
+    mode: "rework",
+    status: "awaiting-review",
+    plan: { selected: [{ id: "7" }] },
+    workers: [{ issue: "7", exitCode: 0, headSha: "child-commit" }],
+    validations: [{ issue: "7", verdict: "rework" }],
+    reviews: {},
+    integration: []
+  };
+  const text = formatStatus(await statusSnapshot(config, "/unused", [], {
+    stateLoader: async () => [source, child]
+  }));
+
+  assert.match(text, /Commit: ready — integrates #2; skips #7 for rework/);
+  assert.doesNotMatch(text, /integrates #2, #7/);
+});
+
+test("settled source history creates no phantom blocker after all integration work is terminal", async () => {
+  const source = mixedRun({ reviewed: false });
+  source.reviews["2"] = { disposition: "approve" };
+  source.integration = [{ issue: "2", integratedSha: "integrated-2" }];
+  const child = {
+    runId: "20260910020202-bbbbbb",
+    parentRunId: source.runId,
+    mode: "rework",
+    status: "awaiting-review",
+    plan: { selected: [{ id: "7" }] },
+    workers: [{ issue: "7", exitCode: 0, headSha: "child-commit" }],
+    validations: [{ issue: "7", verdict: "rework" }],
+    reviews: { "7": { disposition: "rework-original" } },
+    integration: []
+  };
+  const text = formatStatus(await statusSnapshot({
+    ...config,
+    work: { ...config.work, "2": { status: "complete" } }
+  }, "/unused", [], { stateLoader: async () => [source, child] }));
+
+  assert.doesNotMatch(text, /Commit: not ready — #7/);
+});
+
 test("override-approved status remains visibly distinct from ordinary approval", async () => {
   const state = mixedRun();
   state.reviews["2"] = { disposition: "approve" };

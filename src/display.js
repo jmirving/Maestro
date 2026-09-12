@@ -1,5 +1,5 @@
 const { loadExecutionStates, reconcilePlan } = require("./work-state");
-const { currentIssueEvidenceFromStates } = require("./run-resolver");
+const { currentIssueEvidenceFromStates, effectiveIssueStates } = require("./run-resolver");
 const { assessRunItems } = require("./existing-run");
 const { buildRecommendations, formatRecommendations } = require("./recommendations");
 const { isValidValidatorOverride } = require("./reviews");
@@ -39,7 +39,7 @@ function discardedManifestState(issue, manifest, plan, selected) {
   return `implementation discarded; manifest state ${manifest?.status || "unknown"} is not eligible for a fresh run`;
 }
 
-function describeIssue(config, issue, evidence, plan) {
+function describeIssue(config, issue, evidence, plan, effective = null) {
   const manifest = config.work?.[issue] || null;
   const deferred = plan.deferred?.find((entry) => String(entry.id) === issue);
   const selected = plan.selected?.some((entry) => String(entry.id) === issue);
@@ -50,7 +50,10 @@ function describeIssue(config, issue, evidence, plan) {
   let integrationState = "not eligible";
   let action = null;
 
-  if (manifest?.status === "complete" || integration) {
+  if (effective?.consistencyConflict) {
+    state = "consistency conflict: manifest says complete, but execution history has no integration record";
+    integrationState = "blocked pending manifest/run reconciliation";
+  } else if (effective?.terminal || manifest?.status === "complete" || integration) {
     state = "integrated/complete";
     integrationState = "integrated";
   } else if (review?.disposition === "discard") {
@@ -138,11 +141,14 @@ function describeIssue(config, issue, evidence, plan) {
     autoReworkStatus: evidence?.autoRework?.status || null,
     correctionAttempt: evidence?.correction?.number || null,
     integrationState,
-    runId: evidence?.runId || null
+    runId: evidence?.runId || null,
+    terminal: Boolean(effective?.terminal),
+    consistencyConflict: effective?.consistencyConflict || null,
+    actionable: !effective?.terminal && !effective?.consistencyConflict
   };
 }
 
-function runReadiness(states, currentByIssue) {
+function runReadiness(states, currentByIssue, effectiveByIssue = null) {
   const latestRunId = [...states].map((state) => String(state.runId)).sort().at(-1) || null;
   const summaries = [];
 
@@ -150,9 +156,8 @@ function runReadiness(states, currentByIssue) {
     const issues = [...new Set((state.workers || []).map((worker) => String(worker.issue)))];
     if (!issues.length || !issues.some((issue) => currentByIssue.get(issue)?.runId === String(state.runId))) continue;
     if (["running", "failed"].includes(state.status)) continue;
-    const integrated = new Set((state.integration || []).map((entry) => String(entry.issue)));
-    const assessment = assessRunItems(state);
-    const integrate = assessment.integrable.map((entry) => entry.issue).filter((issue) => !integrated.has(issue));
+    const assessment = assessRunItems(state, { effectiveByIssue });
+    const integrate = assessment.integrable.map((entry) => entry.issue);
     const skip = assessment.rework.map((entry) => entry.issue);
     const discard = assessment.discarded.map((entry) => entry.issue);
     const missing = assessment.missing;
@@ -184,7 +189,8 @@ async function statusSnapshot(config, repoPath, requestedIssues = [], {
   const requested = [...new Set(requestedIssues.map(String))];
   const current = states.length ? currentIssueEvidenceFromStates(states) : [];
   const currentByIssue = new Map(current.map((entry) => [entry.issue, entry]));
-  const allIssues = [...new Set([...Object.keys(config.work || {}), ...currentByIssue.keys()])].sort(numericSort);
+  const effectiveByIssue = effectiveIssueStates(config, states);
+  const allIssues = [...effectiveByIssue.keys()].sort(numericSort);
   const issueIds = requested.length ? requested : allIssues;
   const missing = requested.filter((issue) => !allIssues.includes(issue));
   if (missing.length) throw new Error(`No Maestro workflow state for ${missing.map((issue) => `issue #${issue}`).join(", ")}.`);
@@ -192,9 +198,9 @@ async function statusSnapshot(config, repoPath, requestedIssues = [], {
   const items = issueIds.map((issue) => {
     const resolved = currentByIssue.get(issue);
     const evidence = resolved ? { ...resolved.evidence, runId: resolved.runId } : null;
-    return describeIssue(config, issue, evidence, plan);
+    return describeIssue(config, issue, evidence, plan, effectiveByIssue.get(issue));
   });
-  const readiness = runReadiness(states, currentByIssue);
+  const readiness = runReadiness(states, currentByIssue, effectiveByIssue);
   return {
     repository: config.repository,
     focused: requested.length > 0,

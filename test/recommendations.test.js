@@ -62,6 +62,13 @@ test("validator approval, human approval, and completed integration produce acce
   );
 });
 
+test("terminal and inconsistent items cannot produce stale review or rework recommendations", () => {
+  assert.deepEqual(buildRecommendations([
+    { issue: "13", validator: "approve", humanReview: null, terminal: true, actionable: false },
+    { issue: "14", validator: "rework", humanReview: null, consistencyConflict: "conflict", actionable: false }
+  ], [], []), { recommended: null, alternatives: [] });
+});
+
 test("the shareable artifact ends with the same compact issue summary and recommendation footer", () => {
   const snapshot = {
     items: [{ issue: "7", title: "Correction", state: "validator approved, awaiting human approval" }],

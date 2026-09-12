@@ -74,6 +74,29 @@ test("persisted integration evidence is resolved once the manifest records compl
   assert.deepEqual(completed.recommendations, []);
 });
 
+test("recorded integration remains terminal when a newer stale run exists", () => {
+  const integrated = {
+    runId: "20260910010101-aaaaaa",
+    mode: "execute",
+    workers: [worker(12)],
+    validations: [{ issue: "12", verdict: "approve" }],
+    reviews: { "12": { disposition: "approve" } },
+    integration: [{ issue: "12", integratedSha: "integrated" }]
+  };
+  const stale = {
+    runId: "20260910020202-bbbbbb",
+    mode: "execute",
+    workers: [worker(12)],
+    validations: [{ issue: "12", verdict: "approve" }],
+    reviews: { "12": { disposition: "approve" } },
+    integration: []
+  };
+
+  const plan = reconcilePlan(config({ "12": { status: "complete" } }), [integrated, stale]);
+  assert.deepEqual(plan.deferred, []);
+  assert.deepEqual(plan.recommendations, []);
+});
+
 test("an active rework child supersedes the source rework recommendation", () => {
   const manifest = config({ "7": { status: "ready" } });
   const plan = reconcilePlan(manifest, [

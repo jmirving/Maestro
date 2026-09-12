@@ -1,20 +1,55 @@
-const { loadRunState, saveRunState } = require("./run-store");
+const { loadPersistedRunStates, loadRunState, saveRunState } = require("./run-store");
+const { effectiveIssueStates } = require("./run-resolver");
 const { ensureFollowUp, isValidValidatorOverride } = require("./reviews");
 const { integrateApproved } = require("./integrator");
 const { captureBaseline } = require("./baseline");
 
-function assessRunItems(state) {
+function assessRunItems(state, { effectiveByIssue = null } = {}) {
   const validationByIssue = new Map((state.validations || []).map((entry) => [String(entry.issue), entry]));
   const integrable = [];
   const rework = [];
   const discarded = [];
+  const completed = [];
+  const superseded = [];
   const missing = [];
   const problems = [];
+
+  const hasCurrentIntegrationWork = (state.workers || []).some((worker) => {
+    const issue = String(worker.issue);
+    const effective = effectiveByIssue?.get(issue);
+    if (effective?.terminal || effective?.consistencyConflict) return false;
+    if (effective && effective.current?.runId !== String(state.runId)) return false;
+    const validation = validationByIssue.get(issue);
+    const review = state.reviews?.[issue];
+    return (validation?.verdict === "approve" && !["rework-original", "discard"].includes(review?.disposition)) ||
+      isValidValidatorOverride(review, validation);
+  });
 
   for (const worker of state.workers || []) {
     const issue = String(worker.issue);
     const validation = validationByIssue.get(issue);
     const review = state.reviews?.[issue];
+    const effective = effectiveByIssue?.get(issue);
+    const isCurrent = !effective || effective.current?.runId === String(state.runId);
+
+    if (effective?.consistencyConflict) {
+      problems.push({
+        issue,
+        kind: "manifest/run reconciliation",
+        message: effective.consistencyConflict
+      });
+      continue;
+    }
+
+    if (effective?.terminal) {
+      completed.push({ issue, worker, validation, review, integration: effective.integration });
+      continue;
+    }
+
+    if (!isCurrent && !hasCurrentIntegrationWork) {
+      superseded.push({ issue, worker, validation, review });
+      continue;
+    }
 
     if (!review) {
       missing.push({
@@ -63,16 +98,23 @@ function assessRunItems(state) {
       continue;
     }
 
-    integrable.push({ issue, worker, validation, review });
+    if (isCurrent) integrable.push({ issue, worker, validation, review });
+    else superseded.push({ issue, worker, validation, review });
   }
 
-  return { integrable, rework, discarded, missing, problems };
+  return { integrable, rework, discarded, completed, superseded, missing, problems };
 }
 
-function classifyRunItems(state) {
-  const assessment = assessRunItems(state);
+function classifyRunItems(state, options = {}) {
+  const assessment = assessRunItems(state, options);
   if (assessment.problems.length) throw new Error(assessment.problems[0].message);
-  return { integrable: assessment.integrable, rework: assessment.rework, discarded: assessment.discarded };
+  return {
+    integrable: assessment.integrable,
+    rework: assessment.rework,
+    discarded: assessment.discarded,
+    completed: assessment.completed,
+    superseded: assessment.superseded
+  };
 }
 
 async function integrateExistingRun(config, {
@@ -84,17 +126,9 @@ async function integrateExistingRun(config, {
   shellRunner
 }) {
   const state = await loadRunState(repoPath, runId);
-  const { integrable, rework, discarded } = classifyRunItems(state);
-
-  for (const entry of integrable) {
-    await ensureFollowUp({ config, repoPath, state, issue: entry.issue, runner });
-  }
-
-  if (!state.baseline) {
-    state.baseline = await captureBaseline(config, { cwd: repoPath, runner: shellRunner });
-    state.baselineRecapturedAt = new Date().toISOString();
-    await saveRunState(repoPath, runId, state);
-  }
+  const states = await loadPersistedRunStates(repoPath);
+  const effectiveByIssue = effectiveIssueStates(config, states);
+  const { integrable, rework, discarded, completed, superseded } = classifyRunItems(state, { effectiveByIssue });
 
   const alreadyIntegrated = new Set((state.integration || []).map((entry) => String(entry.issue)));
   const pendingEntries = integrable.filter((entry) => !alreadyIntegrated.has(entry.issue));
@@ -109,13 +143,25 @@ async function integrateExistingRun(config, {
     return {
       runId,
       reviews: state.reviews,
-      baseline: state.baseline,
+      baseline: state.baseline || null,
       integration: state.integration || [],
       rework: rework.map((entry) => ({ issue: entry.issue, verdict: entry.validation?.verdict || "missing" })),
       discarded: discarded.map((entry) => ({ issue: entry.issue, verdict: entry.validation?.verdict || "missing" })),
+      completed: completed.map((entry) => ({ issue: entry.issue })),
+      superseded: superseded.map((entry) => ({ issue: entry.issue })),
       resumed: true,
       nothingToDo: true
     };
+  }
+
+  for (const entry of integrable) {
+    await ensureFollowUp({ config, repoPath, state, issue: entry.issue, runner });
+  }
+
+  if (!state.baseline) {
+    state.baseline = await captureBaseline(config, { cwd: repoPath, runner: shellRunner });
+    state.baselineRecapturedAt = new Date().toISOString();
+    await saveRunState(repoPath, runId, state);
   }
 
   const integrationConfig = JSON.parse(JSON.stringify(config));
@@ -152,7 +198,9 @@ async function integrateExistingRun(config, {
     integration: state.integration,
     newlyIntegrated,
     rework: rework.map((entry) => ({ issue: entry.issue, verdict: entry.validation?.verdict || "missing" })),
-    discarded: discarded.map((entry) => ({ issue: entry.issue, verdict: entry.validation?.verdict || "missing" }))
+    discarded: discarded.map((entry) => ({ issue: entry.issue, verdict: entry.validation?.verdict || "missing" })),
+    completed: completed.map((entry) => ({ issue: entry.issue })),
+    superseded: superseded.map((entry) => ({ issue: entry.issue }))
   };
 }
 

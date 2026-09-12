@@ -148,10 +148,11 @@ function currentIssueEvidenceFromStates(states, issueIds = []) {
 
   for (const issue of issues) {
     const candidates = newestFirst(states).filter((state) => evidenceForIssue(state, issue));
+    const integrated = candidates.find((candidate) => evidenceForIssue(candidate, issue)?.integration);
     const leaves = candidates.filter((candidate) => !candidates.some((other) => (
       other !== candidate && descendsFrom(other, String(candidate.runId))
     )));
-    const state = leaves[0];
+    const state = integrated || leaves[0];
     if (state) {
       current.set(issue, {
         issue,
@@ -171,6 +172,49 @@ function currentIssueEvidenceFromStates(states, issueIds = []) {
   }
 
   return [...current.values()].sort((a, b) => a.issue.localeCompare(b.issue, undefined, { numeric: true }));
+}
+
+function effectiveIssueStates(config, states, issueIds = []) {
+  const requested = normalizeIssueIds(issueIds);
+  const current = new Map(currentIssueEvidenceFromStates(states)
+    .filter((entry) => !requested.length || requested.includes(entry.issue))
+    .map((entry) => [entry.issue, entry]));
+  const allIssues = requested.length
+    ? requested
+    : [...new Set([...Object.keys(config?.work || {}).map(String), ...states.flatMap(issueIdsForRun)])];
+  const ordered = newestFirst(states);
+
+  return new Map(allIssues.map((issue) => {
+    const manifest = config?.work?.[issue] || null;
+    const resolved = current.get(issue) || null;
+    const evidenceRuns = ordered.filter((state) => evidenceForIssue(state, issue));
+    const integratedRun = evidenceRuns.find((state) => (
+      (state.integration || []).some((entry) => String(entry.issue) === issue)
+    ));
+    const integration = integratedRun
+      ? evidenceForIssue(integratedRun, issue).integration
+      : null;
+    const manifestComplete = manifest?.status === "complete";
+    const consistencyConflict = manifestComplete && evidenceRuns.length > 0 && !integration
+      ? `Issue #${issue} is complete in the manifest, but persisted execution history has no integration record. Reconcile the manifest and run evidence before integration.`
+      : null;
+
+    return [issue, {
+      issue,
+      manifest,
+      current: resolved,
+      evidence: resolved?.evidence || null,
+      integration,
+      integrationRunId: integratedRun ? String(integratedRun.runId) : null,
+      terminal: Boolean(integration) || (manifestComplete && !consistencyConflict),
+      consistencyConflict,
+      state: consistencyConflict
+        ? "consistency-conflict"
+        : integration
+          ? manifestComplete ? "complete" : "integrated-pending-manifest"
+          : manifestComplete ? "complete" : resolved?.evidence?.state || manifest?.status || "unknown"
+    }];
+  }));
 }
 
 function resolveFromStates(states, { issueIds = [], filter = {}, explicitRunId = null } = {}) {
@@ -269,6 +313,7 @@ module.exports = {
   issueIdsForRun,
   evidenceForIssue,
   currentIssueEvidenceFromStates,
+  effectiveIssueStates,
   matchesFilter,
   resolveFromStates,
   resolveLatestRun,
