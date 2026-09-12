@@ -299,6 +299,37 @@ test("GitHub dependencies and configured label mappings reconcile reversibly wit
   assert.equal(second.manifest.work["3"].status, "ready");
 });
 
+test("legacy metadata retains manual provenance when it overlaps GitHub-owned values", () => {
+  const config = {
+    repository: "owner/repo",
+    github: { labelMappings: { requires: { database: ["postgres", "redis"] } } },
+    work: {
+      "1": { status: "complete" },
+      "2": { status: "complete" },
+      "3": { status: "ready", blockedBy: ["1"], requires: ["postgres"] }
+    }
+  };
+  const first = proposeDraft({
+    repository: "owner/repo",
+    existingConfig: config,
+    issues: [{ ...issue(3), body: "Blocked by #1 and #2", labels: [{ name: "database" }] }]
+  });
+  assert.deepEqual(first.manifest.work["3"].blockedBy, ["1", "2"]);
+  assert.deepEqual(first.manifest.work["3"].requires, ["postgres", "redis"]);
+  assert.deepEqual(first.manifest.work["3"].github.manual.blockedBy, ["1"]);
+  assert.deepEqual(first.manifest.work["3"].github.manual.requires, ["postgres"]);
+  assert.match(first.dependencySources.find((entry) => entry.dependency === "1").source, /existing manifest blockedBy; GitHub issue #3 body/);
+
+  const second = proposeDraft({ repository: "owner/repo", existingConfig: first.manifest, issues: [issue(3)] });
+  assert.deepEqual(second.manifest.work["3"].blockedBy, ["1"]);
+  assert.deepEqual(second.manifest.work["3"].requires, ["postgres"]);
+  assert.deepEqual(second.manifest.work["3"].github.manual.blockedBy, ["1"]);
+  assert.deepEqual(second.manifest.work["3"].github.manual.requires, ["postgres"]);
+
+  const third = proposeDraft({ repository: "owner/repo", existingConfig: second.manifest, issues: [issue(3)] });
+  assert.equal(third.changed, false);
+});
+
 test("material GitHub changes conflict with unresolved Maestro execution state", () => {
   const existing = proposeDraft({ repository: "owner/repo", issues: [issue(7)] }).manifest;
   const result = proposeDraft({

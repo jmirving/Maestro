@@ -156,6 +156,8 @@
                 "properties": {
                   "priority": { "type": "number" },
                   "mode": { "enum": ["execute", "research", "validate"] },
+                  "blockedBy": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+                  "requires": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
                   "humanGate": { "type": "string" }
                 },
                 "additionalProperties": false

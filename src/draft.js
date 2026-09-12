@@ -61,6 +61,14 @@ function manualMetadata(item, mapped) {
     if (priorMapped[field] == null && item[field] != null) manual[field] = item[field];
     else if (priorMapped[field] != null && item[field] !== priorMapped[field] && item[field] != null) manual[field] = item[field];
   }
+  for (const [field, priorOwned] of [["blockedBy", item.github?.blockedBy || []], ["requires", priorMapped.requires || []]]) {
+    const values = (item[field] || []).map(String);
+    const recorded = (item.github?.manual?.[field] || []).map(String).filter((entry) => values.includes(entry));
+    const inferred = values.filter((entry) => !priorOwned.map(String).includes(entry));
+    const entries = [...new Set([...recorded, ...inferred])];
+    if (entries.length) manual[field] = entries;
+    else delete manual[field];
+  }
   return manual;
 }
 
@@ -96,11 +104,8 @@ function applyMappedMetadata(item, priorGitHub = {}, mapped = {}, manual = {}) {
       else delete item[field];
     }
   }
-  if (mapped.requires) {
-    const manualRequirements = (item.requires || []).filter((entry) => !(priorMapped.requires || []).includes(entry));
-    item.requires = [...new Set([...manualRequirements, ...mapped.requires])];
-  } else if (priorMapped.requires) {
-    item.requires = (item.requires || []).filter((entry) => !priorMapped.requires.includes(entry));
+  if (mapped.requires || priorMapped.requires) {
+    item.requires = [...new Set([...(manual.requires || []), ...(mapped.requires || [])])];
     if (!item.requires.length) delete item.requires;
   }
   if (mapped.humanGate && item.status === "ready") item.status = "human_gate";
@@ -210,8 +215,7 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
     }
 
     const proposed = clone(original);
-    const priorGitHubDependencies = (original.github?.blockedBy || []).map(String);
-    const manualDependencies = (original.blockedBy || []).map(String).filter((dependency) => !priorGitHubDependencies.includes(dependency));
+    const manualDependencies = manual.blockedBy || [];
     const nextDependencies = [...new Set([...manualDependencies, ...dependencies.map((entry) => entry.id)])];
     if (nextDependencies.length) proposed.blockedBy = nextDependencies;
     else delete proposed.blockedBy;
@@ -253,7 +257,9 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
   for (const [id, item] of Object.entries(manifest.work)) {
     for (const dependency of item.blockedBy || []) {
       const githubOwned = (item.github?.blockedBy || []).includes(String(dependency));
-      dependencySources.push({ issue: id, dependency: String(dependency), source: githubOwned ? `GitHub issue #${id} body` : "existing manifest blockedBy", added: changedIssues.has(id) && githubOwned });
+      const manualOwned = (item.github?.manual?.blockedBy || []).includes(String(dependency));
+      const source = [manualOwned ? "existing manifest blockedBy" : null, githubOwned ? `GitHub issue #${id} body` : null].filter(Boolean).join("; ");
+      dependencySources.push({ issue: id, dependency: String(dependency), source: source || "existing manifest blockedBy", added: changedIssues.has(id) && githubOwned });
     }
   }
 
