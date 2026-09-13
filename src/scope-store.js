@@ -8,10 +8,15 @@ function scopePath(repoPath, name) {
 }
 
 async function loadScopeSnapshot(repoPath, name) {
+  return (await readScopeSnapshot(repoPath, name)).snapshot;
+}
+
+async function readScopeSnapshot(repoPath, name) {
   try {
-    return JSON.parse(await fs.readFile(scopePath(repoPath, name), "utf8"));
+    const contents = await fs.readFile(scopePath(repoPath, name), "utf8");
+    return { snapshot: JSON.parse(contents), contents };
   } catch (error) {
-    if (error.code === "ENOENT") return null;
+    if (error.code === "ENOENT") return { snapshot: null, contents: null };
     throw error;
   }
 }
@@ -25,4 +30,4 @@ async function saveScopeSnapshot(repoPath, name, snapshot) {
   return file;
 }
 
-module.exports = { scopePath, loadScopeSnapshot, saveScopeSnapshot };
+module.exports = { scopePath, loadScopeSnapshot, readScopeSnapshot, saveScopeSnapshot };

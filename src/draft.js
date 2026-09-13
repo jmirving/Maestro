@@ -408,15 +408,40 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
   }
 
   const activeAnalyzers = analyzers == null ? configuredAnalyzers(manifest) : analyzers;
-  const analyzerIssues = worksetProposal ? normalized.filter(({ id }) => selected.has(id)) : normalized;
+  const analyzerContext = new Map();
+  if (worksetProposal) {
+    for (const issue of issues) {
+      const id = issueId(issue);
+      if (id && manifest.work[id] && !analyzerContext.has(id)) analyzerContext.set(id, { id, issue });
+    }
+    for (const [id, item] of Object.entries(manifest.work)) {
+      if (analyzerContext.has(id) || !item.github) continue;
+      analyzerContext.set(id, {
+        id,
+        issue: {
+          number: Number(id),
+          state: item.github.state,
+          title: item.github.title,
+          body: "",
+          labels: item.github.labels || [],
+          updatedAt: item.github.updatedAt,
+          closedAt: item.github.closedAt
+        }
+      });
+    }
+  }
+  const analyzerIssues = worksetProposal
+    ? [...analyzerContext.values()].sort((a, b) => issueOrder(a.id, b.id))
+    : normalized;
   const inferredConflicts = [...runAdvisoryAnalyzers({ analyzers: activeAnalyzers, issues: analyzerIssues, manifest }), ...acceptedAgentConflicts];
   const existingConflicts = manifest.planning?.advisoryConflicts || [];
   const activeAnalyzerNames = new Set(activeAnalyzers.map((analyzer) => analyzer.name || "custom"));
   if (agentAnalysis) activeAnalyzerNames.add(analysisScope ? `agent:${analysisScope}` : "agent");
   const analyzedIssueIds = new Set(analyzerIssues.map(({ id }) => id));
   const retainedConflicts = existingConflicts.filter((conflict) => {
-    if (!activeAnalyzerNames.has(conflict.analyzer)) return true;
     if (analysisScope && conflict.analyzer === `agent:${analysisScope}`) return false;
+    if (!activeAnalyzerNames.has(conflict.analyzer)) return true;
+    if (worksetProposal) return false;
     if (!selected.size) return false;
     return !conflict.issues.every((id) => analyzedIssueIds.has(String(id)));
   });

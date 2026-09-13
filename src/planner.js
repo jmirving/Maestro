@@ -23,6 +23,13 @@ function computePlan(config, { issueIds = null, workset = null, scopeRevision = 
   const work = normalizeWork(config.work);
   const selectedScope = issueIds == null ? null : new Set(issueIds.map(String));
   if (workset && !selectedScope) throw new Error(`Planning workset '${workset}' requires a resolved issue scope.`);
+  if (workset) {
+    const configured = new Set(Object.keys(config.work || {}).map(String));
+    const missing = [...selectedScope].filter((id) => !configured.has(id)).sort((a, b) => Number(a) - Number(b) || a.localeCompare(b));
+    if (missing.length) {
+      throw new Error(`Workset '${workset}' cannot be planned because authorized ${missing.map((id) => `issue #${id}`).join(", ")} ${missing.length === 1 ? "is" : "are"} absent from the shared work graph. Refresh the workset draft before planning or launch.`);
+    }
+  }
   const complete = new Set(work.filter((item) => item.status === "complete").map((item) => item.id));
   const ready = [];
   const blocked = [];

@@ -26,7 +26,7 @@ const { proposeDraft, formatDraftSummary, formatDraftVerbose, formatDraftJson, r
 const { createAgentPlanner } = require("../src/agent-planner");
 const { runPlanningAnalyzer } = require("../src/planning-analysis");
 const { stableWorksetName, epicWorkset, issueWorkset, resolveWorksetScope, assertExecutableScope, validateWorksetName } = require("../src/worksets");
-const { loadScopeSnapshot } = require("../src/scope-store");
+const { loadScopeSnapshot, readScopeSnapshot } = require("../src/scope-store");
 const { persistScopedDraft } = require("../src/scoped-persistence");
 const {
   resolveRepoPath,
@@ -297,6 +297,7 @@ async function main() {
     let worksetProposal = null;
     let scope = null;
     let priorScope = null;
+    let priorScopeContents;
     if (epicNumber) {
       const name = validateWorksetName(requestedName || stableWorksetName(epicNumber));
       const definition = epicWorkset(repository, epicNumber);
@@ -322,7 +323,11 @@ async function main() {
       worksetProposal = { name, definition: prior || definition };
       scope = await resolveWorksetScope(name, worksetProposal.definition, { repository, repoPath });
     }
-    if (scope) priorScope = await loadScopeSnapshot(repoPath, scope.name);
+    if (scope) {
+      const prior = await readScopeSnapshot(repoPath, scope.name);
+      priorScope = prior.snapshot;
+      priorScopeContents = prior.contents;
+    }
     const worksetMemberships = {};
     for (const name of Object.keys(existingConfig?.worksets || {})) {
       if (name === scope?.name) continue;
@@ -330,7 +335,14 @@ async function main() {
       if (snapshot?.complete) worksetMemberships[name] = snapshot.issueIds;
     }
     const effectiveIssueIds = scope ? scope.issueIds : requestedIssues;
-    const issues = scope ? [...scope.issues, ...scope.supportingIssues] : await loadGitHubIssues(repository, requestedIssues, { repoPath });
+    let issues = scope ? [...scope.issues, ...scope.supportingIssues] : await loadGitHubIssues(repository, requestedIssues, { repoPath });
+    if (scope) {
+      const loaded = new Set(issues.map((issue) => String(issue.number)));
+      const repositoryContextIds = Object.keys(existingConfig?.work || {}).filter((id) => !loaded.has(String(id)));
+      if (repositoryContextIds.length) {
+        issues = [...issues, ...await loadGitHubIssues(repository, repositoryContextIds, { repoPath })];
+      }
+    }
     const executionStates = await loadExecutionStates(repoPath);
     const deterministicResult = proposeDraft({
       repository,
@@ -434,6 +446,7 @@ async function main() {
             manifest: result.manifest,
             persistManifest: result.changed,
             expectedManifestContents: manifestSnapshot.contents,
+            expectedSnapshotContents: priorScopeContents,
             name: scope.name,
             snapshot: scope
           }).manifestWritten

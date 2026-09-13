@@ -142,6 +142,13 @@ test("scoped planning selects only members, retains outside prerequisites, and e
   assert.deepEqual(plan.authorizedIssueIds, ["1", "2"]);
 });
 
+test("scoped planning fails closed when an authorized member is absent from the shared graph", () => {
+  assert.throws(() => computePlan({
+    repository: "owner/repo",
+    work: { "1": { status: "ready" } }
+  }, { issueIds: ["1", "2"], workset: "release", scopeRevision: "rev" }), /authorized issue #2 is absent from the shared work graph/);
+});
+
 test("workset draft reconciles an outside prerequisite into the shared graph without authorizing it", () => {
   const result = proposeDraft({
     repository: "owner/repo",
@@ -243,6 +250,33 @@ test("scoped agent changes are bounded to members and scoped conflict evidence h
   assert.equal(result.writable, false);
 });
 
+test("scoped configured analyzers add and remove cross-boundary conflicts using repository-wide context", () => {
+  const definition = issueWorkset("owner/repo", ["1"]);
+  const configured = {
+    repository: "owner/repo",
+    work: { "1": { status: "ready" }, "99": { status: "ready" } },
+    planning: { analyzers: [{ type: "shared-label", labels: ["area:api"] }] }
+  };
+  const withConflict = proposeDraft({
+    repository: "owner/repo",
+    existingConfig: configured,
+    issues: [{ ...issue(1), labels: ["area:api"] }, { ...issue(99), labels: ["area:api"] }],
+    selectedIssueIds: ["1"],
+    worksetProposal: { name: "release", definition }
+  });
+  assert.deepEqual(withConflict.manifest.planning.advisoryConflicts.map((entry) => entry.issues), [["1", "99"]]);
+
+  const withoutConflict = proposeDraft({
+    repository: "owner/repo",
+    existingConfig: withConflict.manifest,
+    issues: [{ ...issue(1), labels: ["area:api"] }, { ...issue(99), labels: [] }],
+    selectedIssueIds: ["1"],
+    worksetProposal: { name: "release", definition }
+  });
+  assert.equal(withoutConflict.manifest.planning.advisoryConflicts, undefined);
+  assert.deepEqual(withoutConflict.manifest.planning.analyzers, configured.planning.analyzers);
+});
+
 test("scope snapshots live outside the manifest and execution records explicit authorization", async (t) => {
   const repoPath = fs.mkdtempSync(path.join(os.tmpdir(), "maestro-workset-test-"));
   t.after(() => fs.rmSync(repoPath, { recursive: true, force: true }));
@@ -282,6 +316,7 @@ test("scoped draft persistence leaves both artifacts unchanged when either persi
       manifestPath,
       manifest: nextManifest,
       expectedManifestContents: originalManifest,
+      expectedSnapshotContents: originalScopeContents,
       name: "release",
       snapshot: nextScope
     }, {
@@ -291,6 +326,36 @@ test("scoped draft persistence leaves both artifacts unchanged when either persi
     assert.equal(fs.readFileSync(manifestPath, "utf8"), originalManifest, `${stage} failure changed the manifest`);
     assert.equal(fs.readFileSync(scopeFile, "utf8"), originalScopeContents, `${stage} failure changed the scope snapshot`);
   }
+});
+
+test("scoped draft persistence rejects a stale snapshot-only refresh under the manifest lock", async (t) => {
+  const repoPath = fs.mkdtempSync(path.join(os.tmpdir(), "maestro-scope-cas-test-"));
+  t.after(() => fs.rmSync(repoPath, { recursive: true, force: true }));
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  const manifest = { repository: "owner/repo", work: { "1": { status: "ready" } }, worksets: { release: issueWorkset("owner/repo", ["1"]) } };
+  const manifestText = `${JSON.stringify(manifest, null, 2)}\n`;
+  fs.writeFileSync(manifestPath, manifestText);
+  const original = { version: 1, name: "release", definition: manifest.worksets.release, issueIds: ["1"], membership: [{ repository: "owner/repo", number: "1" }], diagnostics: [], complete: true, revision: "old" };
+  await saveScopeSnapshot(repoPath, "release", original);
+  const scopeFile = path.join(reportRootForRepo(repoPath), "scope-release.json");
+  const expectedScope = fs.readFileSync(scopeFile, "utf8");
+
+  persistScopedDraft({
+    repoPath, manifestPath, manifest, persistManifest: false,
+    expectedManifestContents: manifestText,
+    expectedSnapshotContents: expectedScope,
+    name: "release", snapshot: { ...original, revision: "first" }
+  }, { now: () => new Date("2026-09-13T12:00:00Z") });
+  const firstWrite = fs.readFileSync(scopeFile, "utf8");
+
+  assert.throws(() => persistScopedDraft({
+    repoPath, manifestPath, manifest, persistManifest: false,
+    expectedManifestContents: manifestText,
+    expectedSnapshotContents: expectedScope,
+    name: "release", snapshot: { ...original, revision: "stale-second" }
+  }), /scope snapshot changed after reconciliation was proposed/);
+  assert.equal(fs.readFileSync(scopeFile, "utf8"), firstWrite);
+  assert.equal(fs.readFileSync(manifestPath, "utf8"), manifestText);
 });
 
 test("draft --epic writes a definition and snapshot while plan --workset excludes unrelated work", async (t) => {
@@ -355,7 +420,8 @@ else if (args[0] === "api" && endpoint.includes("sub_issues")) {
     "42": fact(42, { body: "Epic acceptance" }),
     "7": fact(7, { body: "Blocked by #10" }),
     "10": fact(10, { title: "Outside prerequisite" }),
-    "8": fact(8)
+    "8": fact(8),
+    "99": fact(99)
   };
   const cli = path.resolve(__dirname, "../bin/maestro.js");
   const baseEnv = {
@@ -379,4 +445,13 @@ else if (args[0] === "api" && endpoint.includes("sub_issues")) {
     const reportNames = fs.readdirSync(reportRootForRepo(repoPath));
     assert.equal(reportNames.some((name) => name.startsWith("run-")), false, `${description} drift created a run`);
   }
+
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  delete manifest.work["7"];
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+  const missingMember = spawnSync(process.execPath, [cli, "start", "--workset", "release"], { cwd: repoPath, env: baseEnv, encoding: "utf8" });
+  assert.equal(missingMember.status, 1, missingMember.stdout);
+  assert.match(missingMember.stderr, /authorized issue #7 is absent from the shared work graph/);
+  assert.equal(fs.readdirSync(reportRootForRepo(repoPath)).some((name) => name.startsWith("run-")), false, "missing member created a run");
 });

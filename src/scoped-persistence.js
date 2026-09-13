@@ -31,6 +31,7 @@ function persistScopedDraft({
   manifest,
   persistManifest = true,
   expectedManifestContents,
+  expectedSnapshotContents,
   name,
   snapshot
 }, {
@@ -38,6 +39,9 @@ function persistScopedDraft({
   beforeManifestPersist = () => {},
   beforeScopePersist = () => {}
 } = {}) {
+  if (expectedSnapshotContents === undefined) {
+    throw new Error("Scoped draft persistence requires the expected scope snapshot contents for conflict detection.");
+  }
   const nextManifestContents = manifestContents(manifest);
   const snapshotFile = scopePath(repoPath, name);
   const nextSnapshotContents = `${JSON.stringify({ ...snapshot, savedAt: now().toISOString() }, null, 2)}\n`;
@@ -55,6 +59,9 @@ function persistScopedDraft({
       throw new Error("The manifest changed after reconciliation was proposed; no changes were written. Draft again against the current file.");
     }
     const currentSnapshotContents = fs.existsSync(snapshotFile) ? fs.readFileSync(snapshotFile, "utf8") : null;
+    if (currentSnapshotContents !== expectedSnapshotContents) {
+      throw new Error("The workset scope snapshot changed after reconciliation was proposed; no changes were written. Draft again against the current scope.");
+    }
     const manifestChanged = persistManifest && currentManifestContents !== nextManifestContents;
 
     if (manifestChanged) fs.writeFileSync(manifestTemporary, nextManifestContents, "utf8");
