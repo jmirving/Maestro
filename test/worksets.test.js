@@ -11,6 +11,8 @@ const { reconcilePlan } = require("../src/work-state");
 const { executeRun } = require("../src/controller");
 const { epicWorkset, issueWorkset, resolveWorksetScope } = require("../src/worksets");
 const { saveScopeSnapshot, loadScopeSnapshot } = require("../src/scope-store");
+const { persistScopedDraft } = require("../src/scoped-persistence");
+const { reportRootForRepo } = require("../src/reporter");
 const { loadGitHubSubIssues } = require("../src/github");
 
 function issue(number, state = "OPEN", repository = "owner/repo") {
@@ -261,6 +263,36 @@ test("scope snapshots live outside the manifest and execution records explicit a
   assert.equal(saved[0].scope.source, "explicit-workset-launch");
 });
 
+test("scoped draft persistence leaves both artifacts unchanged when either persistence stage fails", async (t) => {
+  const repoPath = fs.mkdtempSync(path.join(os.tmpdir(), "maestro-scoped-persistence-test-"));
+  t.after(() => fs.rmSync(repoPath, { recursive: true, force: true }));
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  const originalManifest = `${JSON.stringify({ repository: "owner/repo", work: { "1": { status: "ready" } } }, null, 2)}\n`;
+  const originalScope = { version: 1, name: "release", definition: issueWorkset("owner/repo", ["1"]), issueIds: ["1"], membership: [{ repository: "owner/repo", number: "1" }], diagnostics: [], complete: true, revision: "old" };
+  fs.writeFileSync(manifestPath, originalManifest);
+  await saveScopeSnapshot(repoPath, "release", originalScope);
+  const scopeFile = path.join(reportRootForRepo(repoPath), "scope-release.json");
+  const originalScopeContents = fs.readFileSync(scopeFile, "utf8");
+  const nextManifest = { repository: "owner/repo", work: { "1": { status: "ready" }, "2": { status: "ready" } }, worksets: { release: issueWorkset("owner/repo", ["1", "2"]) } };
+  const nextScope = { ...originalScope, definition: nextManifest.worksets.release, issueIds: ["1", "2"], membership: [{ repository: "owner/repo", number: "1" }, { repository: "owner/repo", number: "2" }], revision: "new" };
+
+  for (const stage of ["manifest", "scope"]) {
+    assert.throws(() => persistScopedDraft({
+      repoPath,
+      manifestPath,
+      manifest: nextManifest,
+      expectedManifestContents: originalManifest,
+      name: "release",
+      snapshot: nextScope
+    }, {
+      beforeManifestPersist: stage === "manifest" ? () => { throw new Error("injected manifest failure"); } : undefined,
+      beforeScopePersist: stage === "scope" ? () => { throw new Error("injected scope failure"); } : undefined
+    }), new RegExp(`injected ${stage} failure`));
+    assert.equal(fs.readFileSync(manifestPath, "utf8"), originalManifest, `${stage} failure changed the manifest`);
+    assert.equal(fs.readFileSync(scopeFile, "utf8"), originalScopeContents, `${stage} failure changed the scope snapshot`);
+  }
+});
+
 test("draft --epic writes a definition and snapshot while plan --workset excludes unrelated work", async (t) => {
   const repoPath = fs.mkdtempSync(path.join(os.tmpdir(), "maestro-workset-cli-test-"));
   t.after(() => fs.rmSync(repoPath, { recursive: true, force: true }));
@@ -294,4 +326,57 @@ else if (args[0] === "issue" && args[1] === "view") {
   const planned = spawnSync(process.execPath, [cli, "plan", "--workset", "release"], { cwd: repoPath, env, encoding: "utf8" });
   assert.equal(planned.status, 0, planned.stderr);
   assert.deepEqual(JSON.parse(planned.stdout).selected.map((entry) => entry.id), ["7"]);
+});
+
+test("start --workset rejects membership, requirement, and outside-prerequisite drift without creating a run", async (t) => {
+  const repoPath = fs.mkdtempSync(path.join(os.tmpdir(), "maestro-workset-launch-test-"));
+  t.after(() => fs.rmSync(repoPath, { recursive: true, force: true }));
+  const binPath = path.join(repoPath, "bin");
+  fs.mkdirSync(binPath);
+  assert.equal(spawnSync("git", ["init", "-q"], { cwd: repoPath }).status, 0);
+  fs.writeFileSync(path.join(repoPath, ".maestro.json"), JSON.stringify({ repository: "owner/repo", work: { "99": { status: "ready" } } }));
+  fs.writeFileSync(path.join(binPath, "gh"), `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const endpoint = args.at(-1);
+const facts = JSON.parse(process.env.MAESTRO_TEST_FACTS);
+const children = JSON.parse(process.env.MAESTRO_TEST_CHILDREN);
+if (args[0] === "repo") process.stdout.write('{"nameWithOwner":"owner/repo"}');
+else if (args[0] === "issue" && args[1] === "view") process.stdout.write(JSON.stringify(facts[args[2]]));
+else if (args[0] === "api" && endpoint.includes("sub_issues")) {
+  const number = endpoint.match(/issues\\/(\\d+)\\/sub_issues/)[1];
+  process.stdout.write(JSON.stringify((children[number] || []).map((child) => ({number:child,repository_url:"https://api.github.com/repos/owner/repo"}))));
+} else if (args[0] === "api") {
+  const number = endpoint.split("/").at(-1);
+  process.stdout.write(JSON.stringify({number:Number(number),state_reason:null}));
+} else process.exit(3);
+`, { mode: 0o755 });
+  const fact = (number, overrides = {}) => ({ number, state: "OPEN", title: `Issue ${number}`, body: "", labels: [], updatedAt: "2026-09-12T00:00:00Z", ...overrides });
+  const baselineFacts = {
+    "42": fact(42, { body: "Epic acceptance" }),
+    "7": fact(7, { body: "Blocked by #10" }),
+    "10": fact(10, { title: "Outside prerequisite" }),
+    "8": fact(8)
+  };
+  const cli = path.resolve(__dirname, "../bin/maestro.js");
+  const baseEnv = {
+    ...process.env,
+    PATH: `${binPath}${path.delimiter}${process.env.PATH}`,
+    MAESTRO_TEST_FACTS: JSON.stringify(baselineFacts),
+    MAESTRO_TEST_CHILDREN: JSON.stringify({ "42": [7] })
+  };
+  const drafted = spawnSync(process.execPath, [cli, "draft", "--epic", "42", "--name", "release", "--write"], { cwd: repoPath, env: baseEnv, encoding: "utf8" });
+  assert.equal(drafted.status, 0, drafted.stderr);
+
+  const cases = [
+    ["membership", { MAESTRO_TEST_CHILDREN: JSON.stringify({ "42": [7, 8] }) }],
+    ["requirement", { MAESTRO_TEST_FACTS: JSON.stringify({ ...baselineFacts, "42": fact(42, { body: "Changed epic acceptance" }) }) }],
+    ["outside prerequisite", { MAESTRO_TEST_FACTS: JSON.stringify({ ...baselineFacts, "10": fact(10, { title: "Changed outside prerequisite" }) }) }]
+  ];
+  for (const [description, changes] of cases) {
+    const started = spawnSync(process.execPath, [cli, "start", "--workset", "release"], { cwd: repoPath, env: { ...baseEnv, ...changes }, encoding: "utf8" });
+    assert.equal(started.status, 1, `${description} drift unexpectedly launched:\n${started.stdout}\n${started.stderr}`);
+    assert.match(started.stderr, /changed since its saved scope revision/);
+    const reportNames = fs.readdirSync(reportRootForRepo(repoPath));
+    assert.equal(reportNames.some((name) => name.startsWith("run-")), false, `${description} drift created a run`);
+  }
 });

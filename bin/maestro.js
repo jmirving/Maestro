@@ -26,7 +26,8 @@ const { proposeDraft, formatDraftSummary, formatDraftVerbose, formatDraftJson, r
 const { createAgentPlanner } = require("../src/agent-planner");
 const { runPlanningAnalyzer } = require("../src/planning-analysis");
 const { stableWorksetName, epicWorkset, issueWorkset, resolveWorksetScope, assertExecutableScope, validateWorksetName } = require("../src/worksets");
-const { loadScopeSnapshot, saveScopeSnapshot } = require("../src/scope-store");
+const { loadScopeSnapshot } = require("../src/scope-store");
+const { persistScopedDraft } = require("../src/scoped-persistence");
 const {
   resolveRepoPath,
   resolveManifestPath,
@@ -425,14 +426,18 @@ async function main() {
       process.stdout.write(format({ requested: false, status: "preview" }));
       return;
     }
-    if (!result.changed) {
-      if (scope) await saveScopeSnapshot(repoPath, scope.name, scope);
-      process.stdout.write(format({ requested: true, status: scope && result.scopeChanged ? "scope-refreshed" : "no-op" }));
-      return;
-    }
     try {
-      const written = writeManifest(manifestPath, result.manifest, { expectedContents: manifestSnapshot.contents });
-      if (scope) await saveScopeSnapshot(repoPath, scope.name, scope);
+      const written = scope
+        ? persistScopedDraft({
+            repoPath,
+            manifestPath,
+            manifest: result.manifest,
+            persistManifest: result.changed,
+            expectedManifestContents: manifestSnapshot.contents,
+            name: scope.name,
+            snapshot: scope
+          }).manifestWritten
+        : result.changed && writeManifest(manifestPath, result.manifest, { expectedContents: manifestSnapshot.contents });
       process.stdout.write(format({ requested: true, status: written ? "written" : scope && result.scopeChanged ? "scope-refreshed" : "no-op" }));
     } catch (error) {
       process.stdout.write(format({ requested: true, status: "failed", error: error.message }));

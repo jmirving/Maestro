@@ -778,14 +778,18 @@ function readManifestSnapshot(manifestPath) {
   return { config: JSON.parse(contents), contents };
 }
 
-function writeManifest(manifestPath, manifest, { expectedContents } = {}) {
+function manifestContents(manifest) {
   validateRepositoryConfig(manifest);
   const diagnostics = [
     ...validateDependencyGraph(manifest.work),
     ...validateAdvisoryReferences(manifest.work, manifest.planning?.advisoryConflicts || [])
   ];
   if (diagnostics.length) throw new Error(`Cannot write unsafe Maestro manifest: ${diagnostics.map((entry) => entry.reason).join(" ")}`);
-  const contents = `${JSON.stringify(manifest, null, 2)}\n`;
+  return `${JSON.stringify(manifest, null, 2)}\n`;
+}
+
+function writeManifest(manifestPath, manifest, { expectedContents } = {}) {
+  const contents = manifestContents(manifest);
   const lockPath = `${manifestPath}.lock`;
   const temporaryPath = `${manifestPath}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
   let lock;
@@ -810,4 +814,4 @@ function writeManifest(manifestPath, manifest, { expectedContents } = {}) {
   return true;
 }
 
-module.exports = { proposeDraft, formatDraftSummary, formatDraftVerbose, formatDraftJson, readExistingManifest, readManifestSnapshot, writeManifest, explicitDependencies, detectExecutionDrift };
+module.exports = { proposeDraft, formatDraftSummary, formatDraftVerbose, formatDraftJson, readExistingManifest, readManifestSnapshot, manifestContents, writeManifest, explicitDependencies, detectExecutionDrift };
