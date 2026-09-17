@@ -513,7 +513,7 @@
       }
     },
     "24": {
-      "status": "ready",
+      "status": "complete",
       "priority": 20,
       "blockedBy": [
         "17"
@@ -669,6 +669,18 @@
         "closedAt": null,
         "updatedAt": "2026-09-12T16:53:21Z",
         "title": "Fix `draft --agent` failing with Codex `invalid_json_schema` / unsupported `uniqueItems`",
+        "labels": [],
+        "blockedBy": []
+      }
+    },
+    "32": {
+      "status": "ready",
+      "github": {
+        "state": "OPEN",
+        "stateReason": null,
+        "closedAt": null,
+        "updatedAt": "2026-09-13T00:38:35Z",
+        "title": "Make persisted run-state writes atomic under concurrent readers/writers",
         "labels": [],
         "blockedBy": []
       }
