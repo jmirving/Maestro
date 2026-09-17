@@ -292,7 +292,7 @@ async function executeReworkRun(config, {
     }
     reservedState = reservation.state;
   }
-  const result = reservedState ? { ...reservedState, correction: { attempts } } : initialState;
+  const result = reservedState ? { ...reservedState, parentRunId, correction: { attempts } } : initialState;
   if (!reservedState) await stateSaver(repoPath, runId, result);
 
   let currentStage = "preflight";

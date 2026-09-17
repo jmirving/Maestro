@@ -29,7 +29,7 @@ const { runPlanningAnalyzer } = require("../src/planning-analysis");
 const { stableWorksetName, epicWorkset, issueWorkset, resolveWorksetScope, assertExecutableScope, validateWorksetName } = require("../src/worksets");
 const { loadScopeSnapshot, readScopeSnapshot } = require("../src/scope-store");
 const { persistScopedDraft } = require("../src/scoped-persistence");
-const { reserveReadyWork, reserveExplicitWork, capacityBatches, runCapacityPool } = require("../src/scheduler");
+const { reserveReadyWork, reserveExplicitWork, runCapacityPool, runLifecycleBackfill } = require("../src/scheduler");
 const {
   resolveRepoPath,
   resolveManifestPath,
@@ -264,7 +264,27 @@ async function commitLatest({ config, repoPath, manifestPath, runId, closeIssues
       ].filter(Boolean).join("; ") || "nothing remaining";
   console.log(`Committed Maestro run ${resolvedRunId}: ${outcome}`);
   if (progress.changed.length) console.log(`Advanced ${manifestPath}: ${progress.changed.map((issue) => `#${issue}`).join(", ")}`);
-  return { ...result, manifestProgress: progress };
+  return { ...result, runId: resolvedRunId, manifestProgress: progress };
+}
+
+async function backfillAfterIntegration(config, repoPath, sourceState) {
+  const authorizedIssueIds = sourceState.scope?.authorizedIssueIds?.map(String) || Object.keys(config.work || {});
+  const scope = sourceState.scope || null;
+  return runLifecycleBackfill(config, {
+    repoPath,
+    authorizedIssueIds,
+    planOptions: { issueIds: authorizedIssueIds },
+    verifySelection: (issueIds) => verifyExecutionSelection(config, repoPath, issueIds),
+    runIdFactory: newRunId,
+    extraState: scope ? { scope } : {},
+    executeReserved: ({ runId, reservation }) => executeRun(config, {
+      repoPath,
+      runId,
+      plan: reservation.plan,
+      scope,
+      reservedState: reservation.state
+    })
+  });
 }
 
 async function main() {
@@ -630,14 +650,20 @@ async function main() {
   }
 
   if (command === "commit") {
-    await commitLatest({
+    const committed = await commitLatest({
       config,
       repoPath,
       manifestPath,
       runId: option(args, "--run"),
       closeIssues: args.includes("--close-issues")
     });
-    process.stdout.write(await workflowFooter(loadConfig(manifestPath, args), repoPath));
+    const advancedConfig = loadConfig(manifestPath, args);
+    if (committed.manifestProgress.changed.length) {
+      const sourceState = await loadRunState(repoPath, committed.runId);
+      const backfill = await backfillAfterIntegration(advancedConfig, repoPath, sourceState);
+      if (backfill.length) console.log(`Backfilled ${backfill.length} newly eligible worker run(s) after integration.`);
+    }
+    process.stdout.write(await workflowFooter(advancedConfig, repoPath));
     return;
   }
 
@@ -653,44 +679,55 @@ async function main() {
       sources = await resolveIssueReworkSources(repoPath, requestedIssues);
     }
     const correctionTasks = [];
+    const sourceStates = [];
     for (const source of sources) {
+      const sourceState = await loadRunState(repoPath, source.sourceRunId);
+      sourceStates.push(sourceState);
       let issueIds = source.issueIds;
       if (!issueIds) {
-        const state = await loadRunState(repoPath, source.sourceRunId);
-        const validationByIssue = new Map((state.validations || []).map((entry) => [String(entry.issue), entry]));
-        issueIds = (state.workers || [])
+        const validationByIssue = new Map((sourceState.validations || []).map((entry) => [String(entry.issue), entry]));
+        issueIds = (sourceState.workers || [])
           .map((worker) => String(worker.issue))
-          .filter((issue) => validationByIssue.get(issue)?.verdict === "rework" || state.reviews?.[issue]?.disposition === "rework-original");
+          .filter((issue) => validationByIssue.get(issue)?.verdict === "rework" || sourceState.reviews?.[issue]?.disposition === "rework-original");
       }
-      correctionTasks.push({ ...source, issueIds: issueIds.map(String) });
+      correctionTasks.push(...issueIds.map((issue) => ({ ...source, issueIds: [String(issue)] })));
     }
-    const backfillPlan = await computeEffectivePlan(config, repoPath);
-    if (correctionTasks.length && backfillPlan.availableConcurrency === 0) {
-      throw new Error("Cannot start rework because the repository worker capacity is exhausted.");
-    }
-    await verifyExecutionSelection(config, repoPath, backfillPlan.selected.map((item) => item.id));
-    const correctionBatches = correctionTasks.flatMap((source) => capacityBatches(
-      source.issueIds.map((id) => ({ id })),
-      Math.max(1, backfillPlan.availableConcurrency),
-      config.planning?.advisoryConflicts || []
-    ).map((batch) => ({ ...source, issueIds: batch.map((item) => item.id) })));
-    const tasks = [
-      ...correctionBatches.map((source) => ({ kind: "rework", source, weight: source.issueIds.length })),
-      ...backfillPlan.selected.map((item) => ({ kind: "execute", item }))
-    ];
-    const outcomes = await runCapacityPool(tasks, backfillPlan.availableConcurrency, async (task) => {
-      if (task.kind === "rework") {
-        return executeReworkRun(config, { repoPath, ...task.source, reserveCapacity: true });
-      }
-      const runId = newRunId();
-      const reservation = await reserveReadyWork(config, {
+    const inheritedScope = sourceStates.flatMap((state) => state.scope?.authorizedIssueIds || []);
+    const authorizedIssueIds = requestedIssues.length
+      ? requestedIssues.map(String)
+      : inheritedScope.length ? [...new Set(inheritedScope.map(String))] : Object.keys(config.work || {});
+    const planOptions = { issueIds: authorizedIssueIds };
+    const outcomes = await runLifecycleBackfill(config, {
+      repoPath,
+      authorizedIssueIds,
+      planOptions,
+      initialTasks: correctionTasks,
+      reserveInitial: async (source) => {
+        const runId = newRunId();
+        const items = source.issueIds.map((id) => ({ id, ...(config.work?.[id] || {}), mode: "rework" }));
+        const reservation = await reserveExplicitWork(config, {
+          repoPath,
+          runId,
+          mode: "rework",
+          items,
+          extraState: { parentRunId: source.parentRunId }
+        });
+        return { ...reservation, runId };
+      },
+      executeInitial: (source, prepared) => executeReworkRun(config, {
+        repoPath,
+        ...source,
+        runId: prepared.runId,
+        reservedState: prepared.state
+      }),
+      verifySelection: (issueIds) => verifyExecutionSelection(config, repoPath, issueIds),
+      runIdFactory: newRunId,
+      executeReserved: ({ runId, reservation }) => executeRun(config, {
         repoPath,
         runId,
-        mode: "backfill",
-        authorizedIssueIds: [task.item.id]
-      });
-      if (!reservation.reserved) return { mode: "backfill", issue: task.item.id, outcome: "not-reserved", capacity: reservation.capacity };
-      return executeRun(config, { repoPath, runId, plan: reservation.plan, reservedState: reservation.state });
+        plan: reservation.plan,
+        reservedState: reservation.state
+      })
     });
     const results = outcomes.filter((entry) => entry?.mode === "rework");
     const backfill = outcomes.filter((entry) => entry?.mode !== "rework");

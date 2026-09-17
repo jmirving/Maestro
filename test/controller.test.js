@@ -75,3 +75,33 @@ test("executeRun persists a failed lifecycle that requires an explicit retry", a
   assert.deepEqual(saved.map((entry) => entry.state.status), ["running", "failed"]);
   assert.match(saved[1].state.failure, /Required capability 'node' failed preflight/);
 });
+
+test("executeRun releases each persisted issue reservation when its validator settles", async () => {
+  const saved = [];
+  let releaseSecond;
+  const second = new Promise((resolve) => { releaseSecond = resolve; });
+  const run = executeRun(config, {
+    repoPath: "/target",
+    runId: "run-reserved",
+    plan: { selected: [{ id: "1", requires: ["node"] }, { id: "2", requires: ["node"] }] },
+    reservedState: {
+      runId: "run-reserved", mode: "execute", status: "running", repoPath: "/target",
+      plan: { selected: [{ id: "1" }, { id: "2" }] }, baseline: null, preflights: [], workers: [], validations: [], reviews: {},
+      capacity: { scope: "repository", limit: 2, issues: ["1", "2"] }
+    },
+    preflightRunner: async () => ({ code: 0, stdout: "ok", stderr: "" }),
+    baselineRunner: async () => ({ ok: true }),
+    worktreeFactory: async ({ item }) => ({ baseSha: "base", branch: `b-${item.id}`, worktreePath: `/wt/${item.id}` }),
+    workerExecutor: async ({ item, worktree }) => {
+      if (item.id === "2") await second;
+      return { issue: item.id, exitCode: 0, ...worktree, headSha: `head-${item.id}` };
+    },
+    validatorExecutor: async ({ worker }) => ({ issue: worker.issue, exitCode: 0, verdict: "approve" }),
+    stateSaver: async (repoPath, runId, state) => saved.push(structuredClone(state))
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(saved.some((state) => state.capacity.issues.length === 1 && state.capacity.issues[0] === "2"));
+  releaseSecond();
+  const result = await run;
+  assert.deepEqual(result.capacity.issues, []);
+});

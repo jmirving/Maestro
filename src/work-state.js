@@ -64,7 +64,9 @@ function unresolvedWork(states, config = null) {
       continue;
     }
 
-    if (evidence.selected && ["running", "failed"].includes(state.status)) {
+    const capacityIssues = state.capacity?.issues?.map(String);
+    const hasActiveReservation = !capacityIssues || capacityIssues.includes(issue);
+    if (evidence.selected && ((state.status === "running" && hasActiveReservation) || state.status === "failed")) {
       byIssue.set(issue, {
         issue,
         runId,

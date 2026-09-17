@@ -43,7 +43,8 @@ async function executeRun(config, {
   baselineRunner,
   stateSaver = saveRunState,
   scope = null,
-  reservedState = null
+  reservedState = null,
+  onIssueSettled = async () => {}
 } = {}) {
   if (!plan.selected.length) {
     const empty = { runId, mode: "execute", status: "no-ready-work", plan, baseline: null, preflights: [], workers: [], validations: [], reviews: {}, ...(scope ? { scope } : {}) };
@@ -76,29 +77,40 @@ async function executeRun(config, {
     result.baseline = await captureBaseline(config, { cwd: repoPath, runner: baselineRunner });
     console.error(`[Maestro] run ${runId}: preparing ${plan.selected.length} worker(s)`);
 
-    const prepared = [];
-    for (const item of plan.selected) {
-      prepared.push({
-        item,
-        worktree: await worktreeFactory({ repoPath, item, runId, defaultBranch: config.defaultBranch || "main" })
-      });
-    }
-
     console.error(`[Maestro] run ${runId}: workers running`);
-    result.workers = await Promise.all(prepared.map(({ item, worktree }) => workerExecutor({
-      repository: config.repository,
-      item,
-      worktree,
-      runId
-    })));
-
-    console.error(`[Maestro] run ${runId}: validating changed branches`);
-    result.validations = await Promise.all(result.workers
-      .filter((worker) => worker.exitCode === 0 && worker.headSha !== worker.baseSha)
-      .map((worker) => validatorExecutor({ repository: config.repository, worker, baseline: result.baseline, runId })));
+    let persistence = Promise.resolve();
+    const persist = () => {
+      persistence = persistence.then(() => stateSaver(repoPath, runId, result));
+      return persistence;
+    };
+    const settled = await Promise.allSettled(plan.selected.map(async (item) => {
+      const issue = String(item.id);
+      try {
+        const worktree = await worktreeFactory({ repoPath, item, runId, defaultBranch: config.defaultBranch || "main" });
+        const worker = await workerExecutor({ repository: config.repository, item, worktree, runId });
+        result.workers.push(worker);
+        if (worker.exitCode === 0 && worker.headSha !== worker.baseSha) {
+          console.error(`[Maestro] run ${runId}: validating changed branch for #${issue}`);
+          result.validations.push(await validatorExecutor({ repository: config.repository, worker, baseline: result.baseline, runId }));
+        }
+      } catch (error) {
+        if (!result.workers.some((worker) => String(worker.issue) === issue)) {
+          result.workers.push({ issue, exitCode: 1, report: error.message, infrastructureFailure: true });
+        }
+        throw error;
+      } finally {
+        if (result.capacity?.issues) {
+          result.capacity.issues = result.capacity.issues.filter((id) => String(id) !== issue);
+          await persist();
+        }
+        await onIssueSettled({ issue, result });
+      }
+    }));
+    const rejected = settled.find((entry) => entry.status === "rejected");
+    if (rejected) throw rejected.reason;
 
     result.status = "awaiting-review";
-    await stateSaver(repoPath, runId, result);
+    await persist();
     console.error(`[Maestro] run ${runId}: complete`);
     return result;
   } catch (error) {

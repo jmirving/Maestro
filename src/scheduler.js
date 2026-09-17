@@ -269,6 +269,88 @@ async function runCapacityPool(tasks, capacity, executor) {
   return results;
 }
 
+// Drive a workflow from effective repository state, rather than from a list
+// captured before any work starts. Reservations remain the authority for both
+// issue ownership and aggregate capacity; this loop only decides what the
+// current caller is allowed to ask for next.
+async function runLifecycleBackfill(config, {
+  repoPath,
+  authorizedIssueIds,
+  planOptions = {},
+  initialTasks = [],
+  reserveInitial = null,
+  executeInitial,
+  executeReserved,
+  verifySelection = async () => {},
+  runIdFactory,
+  extraState = {}
+} = {}) {
+  const authorized = [...new Set((authorizedIssueIds || Object.keys(config.work || {})).map(String))];
+  const scopedPlanOptions = { ...planOptions, issueIds: authorized };
+  const pending = [...initialTasks];
+  const running = new Set();
+  const outcomes = [];
+  let firstError = null;
+
+  const launch = (promise) => {
+    let tracked;
+    tracked = Promise.resolve(promise).then((result) => {
+      outcomes.push(result);
+    }, (error) => {
+      firstError ||= error;
+    }).finally(() => running.delete(tracked));
+    running.add(tracked);
+  };
+
+  for (;;) {
+    let launched = false;
+    while (!firstError) {
+      const states = await loadExecutionStates(repoPath);
+      const capacity = capacitySnapshot(config, states, scopedPlanOptions);
+      if (capacity.available === 0) break;
+
+      if (pending.length) {
+        const task = pending[0];
+        const prepared = reserveInitial ? await reserveInitial(task) : null;
+        if (prepared && !prepared.reserved) break;
+        pending.shift();
+        launch(executeInitial(task, prepared));
+        launched = true;
+        continue;
+      }
+
+      const candidate = capacity.plan.selected[0];
+      if (!candidate) break;
+      await verifySelection([candidate.id]);
+      const runId = runIdFactory();
+      const reservation = await reserveReadyWork(config, {
+        repoPath,
+        runId,
+        mode: "backfill",
+        authorizedIssueIds: [candidate.id],
+        planOptions: scopedPlanOptions,
+        extraState
+      });
+      if (!reservation.reserved) continue;
+      launch(executeReserved({ candidate, runId, reservation }));
+      launched = true;
+    }
+
+    if (running.size) {
+      await Promise.race(running);
+      continue;
+    }
+    if (firstError) throw firstError;
+    if (pending.length) {
+      const error = new Error("Cannot start authorized work because the repository worker capacity is exhausted.");
+      error.code = "CAPACITY_UNAVAILABLE";
+      throw error;
+    }
+    if (!launched) break;
+  }
+  return outcomes;
+}
+
 module.exports = {
   withCapacityLock,
   aggregateLimit,
@@ -277,5 +359,6 @@ module.exports = {
   reserveReadyWork,
   reserveExplicitWork,
   capacityBatches,
-  runCapacityPool
+  runCapacityPool,
+  runLifecycleBackfill
 };

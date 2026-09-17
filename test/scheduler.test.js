@@ -11,7 +11,8 @@ const {
   reserveReadyWork,
   reserveExplicitWork,
   capacityBatches,
-  runCapacityPool
+  runCapacityPool,
+  runLifecycleBackfill
 } = require("../src/scheduler");
 
 function config(work, concurrency = 2, conflicts = []) {
@@ -105,6 +106,26 @@ test("an active rework consumes one shared slot and leaves an independent item s
   assert.deepEqual(snapshot.plan.selected.map((item) => item.id), ["2"]);
 });
 
+test("a multi-item run counts only issue reservations that have not settled", () => {
+  const manifest = config({
+    "1": { status: "ready" },
+    "2": { status: "ready" },
+    "3": { status: "ready" }
+  }, 2);
+  const states = [{
+    runId: "20260912010101-aaaaaa", mode: "execute", status: "running",
+    plan: { selected: [{ id: "1" }, { id: "2" }] },
+    workers: [{ issue: "1", exitCode: 0, baseSha: "base", headSha: "head" }],
+    validations: [{ issue: "1", exitCode: 0, verdict: "approve" }],
+    reviews: {},
+    capacity: { limit: 2, sessionId: "session-a", issues: ["2"] }
+  }];
+  const snapshot = capacitySnapshot(manifest, states);
+  assert.equal(snapshot.used, 1);
+  assert.deepEqual(snapshot.active.map((item) => item.issue), ["2"]);
+  assert.deepEqual(snapshot.plan.selected.map((item) => item.id), ["3"]);
+});
+
 test("integration completion exposes newly unblocked work to backfill", () => {
   const manifest = config({
     "1": { status: "complete" },
@@ -172,4 +193,53 @@ test("the lifecycle pool backfills a slot as soon as one task settles", async ()
   assert.deepEqual(started, ["rework", "fresh-a", "fresh-b"]);
   releaseLong();
   assert.deepEqual(await running, ["rework", "fresh-a", "fresh-b"]);
+});
+
+test("lifecycle backfill re-queries eligibility after each settled transition", async (t) => {
+  const { repoPath } = await tempRepo(t);
+  const manifest = config({
+    "1": { status: "ready", priority: 1 },
+    "2": { status: "ready", blockedBy: ["1"], priority: 2 },
+    "3": { status: "ready", priority: 3 }
+  }, 1);
+  const started = [];
+  let sequence = 0;
+  const outcomes = await runLifecycleBackfill(manifest, {
+    repoPath,
+    authorizedIssueIds: ["1", "2"],
+    runIdFactory: () => `2026091202020${++sequence}-aaaaaa`,
+    executeReserved: async ({ candidate, runId, reservation }) => {
+      started.push(candidate.id);
+      manifest.work[candidate.id].status = "complete";
+      reservation.state.status = "awaiting-review";
+      reservation.state.capacity.issues = [];
+      await saveRunState(repoPath, runId, reservation.state);
+      return candidate.id;
+    }
+  });
+  assert.deepEqual(started, ["1", "2"]);
+  assert.deepEqual(outcomes, ["1", "2"]);
+  assert.equal(started.includes("3"), false);
+});
+
+test("explicit authorization is applied before ready backfill selection", async (t) => {
+  const { repoPath } = await tempRepo(t);
+  const manifest = config({
+    "1": { status: "ready", priority: 1 },
+    "2": { status: "ready", priority: 2 }
+  }, 1);
+  const started = [];
+  await runLifecycleBackfill(manifest, {
+    repoPath,
+    authorizedIssueIds: ["2"],
+    runIdFactory: () => "20260912030303-aaaaaa",
+    executeReserved: async ({ candidate, runId, reservation }) => {
+      started.push(candidate.id);
+      manifest.work[candidate.id].status = "complete";
+      reservation.state.status = "awaiting-review";
+      reservation.state.capacity.issues = [];
+      await saveRunState(repoPath, runId, reservation.state);
+    }
+  });
+  assert.deepEqual(started, ["2"]);
 });

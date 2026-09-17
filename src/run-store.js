@@ -38,7 +38,9 @@ async function loadPersistedRunStates(repoPath) {
 async function saveRunState(repoPath, runId, state) {
   const file = statePath(repoPath, runId);
   await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.writeFile(file, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  const temporary = `${file}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
+  await fs.writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  await fs.rename(temporary, file);
   return file;
 }
 

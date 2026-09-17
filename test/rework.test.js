@@ -329,8 +329,8 @@ if (index >= 0) fs.writeFileSync(process.argv[index + 1], process.argv.includes(
 
   assert.equal(result.status, 0, result.stderr);
   const rework = parseLeadingJson(result.stdout);
-  assert.equal(rework.parentRunId, sourceRunId);
-  assert.deepEqual(rework.plan.selected.map((entry) => entry.id), ["7", "13"]);
+  assert.deepEqual(rework.map((entry) => entry.parentRunId), [sourceRunId, sourceRunId]);
+  assert.deepEqual(rework.map((entry) => entry.plan.selected[0].id).sort(), ["13", "7"]);
 
   const invalid = spawnSync(process.execPath, [
     cli, "rework", "not-an-issue", manifestPath, "--repo-path", repoPath

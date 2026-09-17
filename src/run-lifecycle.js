@@ -15,7 +15,8 @@ function classifyRunIssue(state, worker) {
   const integrated = (state.integration || []).some((entry) => String(entry.issue) === issue);
 
   if (integrated) return { state: "integrated-pending-manifest", action: `maestro commit --run ${state.runId}` };
-  if (state.status === "running") {
+  const capacityIssues = state.capacity?.issues?.map(String);
+  if (state.status === "running" && (!capacityIssues || capacityIssues.includes(issue))) {
     return {
       state: state.mode === "rework" ? "rework-running" : "running",
       action: "maestro status"
