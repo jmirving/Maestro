@@ -2,9 +2,10 @@ const { isValidValidatorOverride } = require("./reviews");
 
 function isRecoverableValidatorRework(evidence) {
   const reviewDisposition = evidence?.review?.disposition;
+  const humanRequestedRework = reviewDisposition === "rework-original";
+  const validatorRequestedRework = evidence?.verdict === "rework" && !evidence?.review;
   return ["awaiting-rework", "rework-exhausted"].includes(evidence?.state) &&
-    evidence.verdict === "rework" &&
-    (!evidence.review || reviewDisposition === "rework-original");
+    (humanRequestedRework || validatorRequestedRework);
 }
 
 function classifyRunIssue(state, worker) {

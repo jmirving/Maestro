@@ -12,12 +12,12 @@ test("validator rework remains recoverable after rework-original human dispositi
   assert.equal(isRecoverableValidatorRework(evidence), true);
 });
 
-test("rework-original classification and rework eligibility agree", () => {
+test("human-gated issue becomes recoverable after rework-original disposition", () => {
   const state = {
     runId: "20260917155803-6fcd79",
     status: "awaiting-review",
     workers: [{ issue: "19", exitCode: 0 }],
-    validations: [{ issue: "19", verdict: "rework" }],
+    validations: [{ issue: "19", verdict: "human_gate" }],
     reviews: { "19": { disposition: "rework-original" } },
     integration: []
   };
@@ -26,8 +26,16 @@ test("rework-original classification and rework eligibility agree", () => {
   assert.deepEqual(lifecycle, { state: "awaiting-rework", action: "maestro rework 19" });
   assert.equal(isRecoverableValidatorRework({
     state: lifecycle.state,
-    verdict: "rework",
+    verdict: "human_gate",
     review: state.reviews["19"]
+  }), true);
+});
+
+test("unreviewed validator rework remains recoverable", () => {
+  assert.equal(isRecoverableValidatorRework({
+    state: "awaiting-rework",
+    verdict: "rework",
+    review: null
   }), true);
 });
 
