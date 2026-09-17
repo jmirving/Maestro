@@ -48,6 +48,7 @@ function describeIssue(config, issue, evidence, plan, effective = null) {
   const validation = evidence?.validation || null;
   const review = evidence?.review || null;
   const integration = evidence?.integration || null;
+  const conflict = evidence?.conflict || evidence?.correction?.conflict || null;
   let state;
   let integrationState = "not eligible";
   let action = null;
@@ -59,6 +60,10 @@ function describeIssue(config, issue, evidence, plan, effective = null) {
     const external = effective?.completion?.source === "external";
     state = external ? "complete (external)" : "integrated/complete";
     integrationState = external ? "external completion adopted during reconciliation" : "integrated";
+  } else if (conflict && !evidence?.correction?.conflict && !["completed", "resolved", "manually-resolved"].includes(conflict.operationState)) {
+    state = `Git ${conflict.operation} content conflict during ${conflict.interruptedStage} (${conflict.operationState}); preserved at ${conflict.worktreePath}`;
+    integrationState = "not eligible; conflict recovery and fresh evidence are required";
+    action = conflict.continuationAction || `maestro details ${issue}`;
   } else if (review?.disposition === "discard") {
     state = discardedManifestState(issue, manifest, plan, selected);
     integrationState = "discarded; branch/worktree preserved and excluded from integration";
@@ -144,6 +149,7 @@ function describeIssue(config, issue, evidence, plan, effective = null) {
     validator: validation?.verdict || null,
     humanReview: review?.disposition || null,
     autoReworkStatus: evidence?.autoRework?.status || null,
+    technicalConflict: !effective?.terminal && !effective?.consistencyConflict && conflict && !["completed", "resolved", "manually-resolved"].includes(conflict.operationState) ? conflict : null,
     correctionAttempt: evidence?.correction?.number || null,
     integrationState,
     completionSource: effective?.completion?.source || null,

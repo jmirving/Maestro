@@ -27,6 +27,15 @@ function assessRunItems(state, { effectiveByIssue = null } = {}) {
 
   for (const worker of state.workers || []) {
     const issue = String(worker.issue);
+    const conflict = state.conflicts?.[issue];
+    if (conflict && !["completed", "manually-resolved", "resolved"].includes(conflict.operationState)) {
+      problems.push({
+        issue,
+        kind: "Git conflict recovery",
+        message: `Issue #${issue} has a preserved Git ${conflict.operation} conflict from ${conflict.interruptedStage}. Continue with ${conflict.continuationAction}.`
+      });
+      continue;
+    }
     const validation = validationByIssue.get(issue);
     const review = state.reviews?.[issue];
     const effective = effectiveByIssue?.get(issue);
@@ -182,6 +191,14 @@ async function integrateExistingRun(config, {
     baseline: state.baseline || null,
     runner,
     shellRunner,
+    sourceRunId: runId,
+    onConflict: async (conflict) => {
+      state.conflicts = state.conflicts || {};
+      state.conflicts[String(conflict.issue)] = conflict;
+      state.status = "technical-conflict";
+      state.failure = conflict.failure;
+      await saveRunState(repoPath, runId, state);
+    },
     onIntegrated: async (integrated) => {
       state.integration.push(integrated);
       state.lastIntegratedAt = new Date().toISOString();

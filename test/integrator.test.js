@@ -255,3 +255,44 @@ test("integrates an audited validator override while excluding unreviewed REWORK
   assert.deepEqual(calls.filter((call) => call.args[0] === "merge").map((call) => call.args.at(-1)), ["worker/7"]);
   assert.equal(calls.some((call) => call.args.includes("worker/8")), false);
 });
+
+test("integration refresh persists the shared conflict contract before aborting", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "maestro-integration-conflict-"));
+  const originPath = path.join(root, "origin.git");
+  const repoPath = path.join(root, "target");
+  const workerPath = path.join(root, "worker");
+  fs.mkdirSync(repoPath);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  git(root, "init", "--bare", "-q", originPath);
+  git(repoPath, "init", "-q", "-b", "main");
+  git(repoPath, "config", "user.name", "Maestro Test");
+  git(repoPath, "config", "user.email", "maestro@example.test");
+  fs.writeFileSync(path.join(repoPath, "shared.txt"), "base\n");
+  git(repoPath, "add", "shared.txt");
+  git(repoPath, "commit", "-qm", "base");
+  const baseSha = git(repoPath, "rev-parse", "HEAD");
+  git(repoPath, "remote", "add", "origin", originPath);
+  git(repoPath, "push", "-q", "-u", "origin", "main");
+  git(repoPath, "worktree", "add", "-q", "-b", "worker/19", workerPath);
+  fs.writeFileSync(path.join(workerPath, "shared.txt"), "worker\n");
+  git(workerPath, "commit", "-qam", "worker change");
+  fs.writeFileSync(path.join(repoPath, "shared.txt"), "main\n");
+  git(repoPath, "commit", "-qam", "main change");
+  git(repoPath, "push", "-q", "origin", "main");
+
+  let persisted = null;
+  await assert.rejects(integrateApproved({
+    config: { repository: "example/repo", defaultBranch: "main", integration: { enabled: true } },
+    repoPath,
+    workers: [{ issue: "19", branch: "worker/19", worktreePath: workerPath, baseSha, exitCode: 0 }],
+    validations: [{ issue: "19", verdict: "approve" }],
+    sourceRunId: "run-source",
+    onConflict: async (conflict) => { persisted = JSON.parse(JSON.stringify(conflict)); }
+  }), (error) => error.code === "GIT_CONTENT_CONFLICT");
+
+  assert.equal(persisted.operationState, "aborted");
+  assert.equal(persisted.interruptedStage, "integration-refresh");
+  assert.deepEqual(persisted.conflictedFiles, ["shared.txt"]);
+  assert.equal(persisted.continuationAction, "maestro reconcile --run run-source --issue 19");
+  assert.equal(git(workerPath, "status", "--porcelain"), "");
+});

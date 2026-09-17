@@ -55,6 +55,16 @@ function unresolvedWork(states, config = null) {
     }
     if (effective.consistencyConflict || !effective.current) continue;
     const { runId, state, evidence } = effective.current;
+    if (evidence.state === "technical-conflict" && evidence.conflict) {
+      byIssue.set(issue, {
+        issue,
+        runId,
+        mode: state.mode,
+        state: "technical-conflict",
+        action: evidence.conflict.continuationAction || `maestro details ${issue}`
+      });
+      continue;
+    }
     if (evidence.worker) {
       const worker = evidence.worker;
       const lifecycle = classifyRunIssue(state, worker);

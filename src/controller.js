@@ -181,7 +181,15 @@ async function executeAndIntegrate(config, options = {}) {
     config,
     repoPath: options.repoPath,
     workers: result.workers,
-    validations: result.validations
+    validations: result.validations,
+    sourceRunId: result.runId,
+    onConflict: async (conflict) => {
+      result.conflicts = result.conflicts || {};
+      result.conflicts[String(conflict.issue)] = conflict;
+      result.status = "technical-conflict";
+      result.failure = conflict.failure;
+      await (options.stateSaver || saveRunState)(options.repoPath, result.runId, result);
+    }
   });
   return { ...result, integration };
 }

@@ -13,8 +13,12 @@ function classifyRunIssue(state, worker) {
   const validation = (state.validations || []).find((entry) => String(entry.issue) === issue);
   const review = state.reviews?.[issue];
   const integrated = (state.integration || []).some((entry) => String(entry.issue) === issue);
+  const conflict = state.conflicts?.[issue] || state.correction?.attempts?.[issue]?.conflict;
 
   if (integrated) return { state: "integrated-pending-manifest", action: `maestro commit --run ${state.runId}` };
+  if (conflict && !["completed", "resolved", "manually-resolved"].includes(conflict.operationState)) {
+    return { state: "technical-conflict", action: conflict.continuationAction || `maestro details ${issue}` };
+  }
   const capacityIssues = state.capacity?.issues?.map(String);
   if (state.status === "running" && (!capacityIssues || capacityIssues.includes(issue))) {
     return {

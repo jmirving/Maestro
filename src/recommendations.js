@@ -15,13 +15,14 @@ function buildRecommendations(items, readiness, selected, { states = [] } = {}) 
   const primary = [];
   const alternatives = [];
   const actionable = items.filter((item) => item.actionable !== false);
-  const exhaustedRework = actionable.filter((item) => item.autoReworkStatus === "retry-exhausted" && !item.humanReview);
-  const technicalConflicts = actionable.filter((item) => item.autoReworkStatus === "technical-conflict");
-  const humanRequiredConflicts = actionable.filter((item) => item.autoReworkStatus === "human-required");
-  const currentRework = actionable.filter((item) => item.validator === "rework" && !item.humanReview && item.autoReworkStatus !== "retry-exhausted");
-  const reviewedRework = actionable.filter((item) => item.humanReview === "rework-original");
-  const approvals = actionable.filter((item) => item.validator === "approve" && !item.humanReview);
-  const humanGates = actionable.filter((item) => item.validator === "human_gate" && !item.humanReview);
+  const technicalConflicts = actionable.filter((item) => item.autoReworkStatus === "technical-conflict" || item.technicalConflict);
+  const available = actionable.filter((item) => !technicalConflicts.includes(item));
+  const exhaustedRework = available.filter((item) => item.autoReworkStatus === "retry-exhausted" && !item.humanReview);
+  const humanRequiredConflicts = available.filter((item) => item.autoReworkStatus === "human-required");
+  const currentRework = available.filter((item) => item.validator === "rework" && !item.humanReview && item.autoReworkStatus !== "retry-exhausted");
+  const reviewedRework = available.filter((item) => item.humanReview === "rework-original");
+  const approvals = available.filter((item) => item.validator === "approve" && !item.humanReview);
+  const humanGates = available.filter((item) => item.validator === "human_gate" && !item.humanReview);
 
   if (currentRework.length) {
     primary.push({ command: `maestro rework ${currentRework.map((item) => item.issue).join(" ")}` });

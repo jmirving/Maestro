@@ -916,6 +916,18 @@ if (process.argv.includes("read-only")) {
   const preservedConflict = await loadRunState(repoPath, result.issues[0].finalRunId);
   assert.equal(preservedConflict.correction.attempts["7"].outcome, "human-required");
   assert.equal(preservedConflict.autoRework["7"].attemptsUsed, 1);
+
+  const runCountAfterRecovery = (await loadPersistedRunStates(repoPath)).length;
+  const replay = spawnSync(process.execPath, [
+    path.resolve(__dirname, "../bin/maestro.js"), ...displayedArgs
+  ], {
+    cwd: repoPath,
+    encoding: "utf8",
+    env: { ...process.env, PATH: `${binPath}${path.delimiter}${process.env.PATH}` }
+  });
+  assert.equal(replay.status, 1);
+  assert.match(replay.stderr, /Cannot rework superseded implementation evidence/);
+  assert.equal((await loadPersistedRunStates(repoPath)).length, runCountAfterRecovery);
 });
 
 test("issue-local automatic rework lets an independent sibling approve after another gates", async (t) => {

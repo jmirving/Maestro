@@ -1,6 +1,55 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { buildReconcilePrompt } = require("../src/reconcile");
+const fs = require("node:fs/promises");
+const os = require("node:os");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+const { buildReconcilePrompt, executeReconcileRun } = require("../src/reconcile");
+const { saveRunState, loadRunState, loadPersistedRunStates } = require("../src/run-store");
+
+function git(cwd, ...args) {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  assert.equal(result.status, 0, `git ${args.join(" ")} failed:\n${result.stderr}`);
+  return result.stdout.trim();
+}
+
+async function conflictFixture(t) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-reconcile-conflict-"));
+  const originPath = path.join(root, "origin.git");
+  const repoPath = path.join(root, "target");
+  const workerPath = path.join(root, "worker");
+  const sourceRunId = "20260910010101-aaaaaa";
+  await fs.mkdir(repoPath);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  git(root, "init", "--bare", "-q", originPath);
+  git(repoPath, "init", "-q", "-b", "main");
+  git(repoPath, "config", "user.name", "Maestro Test");
+  git(repoPath, "config", "user.email", "maestro@example.test");
+  await fs.writeFile(path.join(repoPath, "shared.txt"), "base\n");
+  git(repoPath, "add", "shared.txt");
+  git(repoPath, "commit", "-qm", "base");
+  const baseSha = git(repoPath, "rev-parse", "HEAD");
+  git(repoPath, "remote", "add", "origin", originPath);
+  git(repoPath, "push", "-q", "-u", "origin", "main");
+  git(repoPath, "worktree", "add", "-q", "-b", "worker/19", workerPath);
+  await fs.writeFile(path.join(workerPath, "shared.txt"), "worker\n");
+  git(workerPath, "commit", "-qam", "worker change");
+  const originalHead = git(workerPath, "rev-parse", "HEAD");
+  await fs.writeFile(path.join(repoPath, "shared.txt"), "main\n");
+  git(repoPath, "commit", "-qam", "main change");
+  git(repoPath, "push", "-q", "origin", "main");
+
+  const conflict = { contractVersion: 1, issue: "19", sourceRunId, operation: "rebase", operationState: "aborted" };
+  await saveRunState(repoPath, sourceRunId, {
+    runId: sourceRunId,
+    status: "technical-conflict",
+    workers: [{ issue: "19", branch: "worker/19", worktreePath: workerPath, baseSha, headSha: originalHead, exitCode: 0 }],
+    validations: [{ issue: "19", verdict: "approve", exitCode: 0 }],
+    reviews: { "19": { disposition: "approve" } },
+    conflicts: { "19": conflict }
+  });
+  return { root, repoPath, workerPath, sourceRunId, baseSha, originalHead };
+}
 
 test("reconcile prompt bounds the agent to approved integration-conflict repair", () => {
   const prompt = buildReconcilePrompt({
@@ -18,4 +67,109 @@ test("reconcile prompt bounds the agent to approved integration-conflict repair"
   assert.match(prompt, /Do not push/);
   assert.match(prompt, /approved evidence/);
   assert.match(prompt, /approved worker behavior/);
+});
+
+test("reconcile verifies a manually completed operation and creates fresh review evidence", async (t) => {
+  const { repoPath, workerPath, sourceRunId } = await conflictFixture(t);
+  const childRunId = "20260910020202-bbbbbb";
+
+  const attempted = spawnSync("git", ["rebase", "origin/main"], { cwd: workerPath, encoding: "utf8" });
+  assert.notEqual(attempted.status, 0);
+  await fs.writeFile(path.join(workerPath, "shared.txt"), "main and worker\n");
+  git(workerPath, "add", "shared.txt");
+  git(workerPath, "-c", "core.editor=true", "rebase", "--continue");
+  await fs.writeFile(path.join(repoPath, "later.txt"), "second target movement\n");
+  git(repoPath, "add", "later.txt");
+  git(repoPath, "commit", "-qm", "move target again");
+  git(repoPath, "push", "-q", "origin", "main");
+  const targetSha = git(repoPath, "rev-parse", "HEAD");
+
+  const result = await executeReconcileRun({
+    repository: "example/repo",
+    defaultBranch: "main",
+    work: { "19": { status: "ready" } }
+  }, {
+    repoPath,
+    sourceRunId,
+    issueIds: ["19"],
+    runId: childRunId,
+    validatorExecutor: async ({ worker }) => ({ issue: worker.issue, verdict: "approve", exitCode: 0, report: "fresh" })
+  });
+
+  assert.equal(result.status, "awaiting-review");
+  assert.equal(result.workers[0].headSha, git(workerPath, "rev-parse", "HEAD"));
+  assert.equal(result.workers[0].baseSha, targetSha);
+  assert.equal(result.validations[0].verdict, "approve");
+  assert.deepEqual(result.reviews, {});
+  assert.equal(result.conflicts["19"].operationState, "completed");
+  assert.equal(result.conflicts["19"].resolvedBy, "reconciliation-refresh");
+  assert.equal(result.conflicts["19"].resolutionVerifiedAgainstSha, targetSha);
+  assert.equal((await loadRunState(repoPath, childRunId)).status, "awaiting-review");
+
+  const runCountAfterRecovery = (await loadPersistedRunStates(repoPath)).length;
+  await assert.rejects(
+    executeReconcileRun({
+      repository: "example/repo",
+      defaultBranch: "main",
+      work: { "19": { status: "ready" } }
+    }, {
+      repoPath,
+      sourceRunId,
+      issueIds: ["19"],
+      validatorExecutor: async () => { throw new Error("validator must not restart"); }
+    }),
+    /Cannot reconcile superseded implementation evidence/
+  );
+  assert.equal((await loadPersistedRunStates(repoPath)).length, runCountAfterRecovery);
+});
+
+test("reconcile rejects manual recovery that resets away the implementation", async (t) => {
+  const { repoPath, workerPath, sourceRunId } = await conflictFixture(t);
+  git(workerPath, "reset", "--hard", "origin/main");
+  let validatorCalls = 0;
+
+  await assert.rejects(
+    executeReconcileRun({ repository: "example/repo", defaultBranch: "main", work: { "19": { status: "ready" } } }, {
+      repoPath,
+      sourceRunId,
+      issueIds: ["19"],
+      runId: "20260910020202-bbbbbb",
+      validatorExecutor: async () => { validatorCalls += 1; }
+    }),
+    /discarded the source implementation/
+  );
+  assert.equal(validatorCalls, 0);
+  const state = await loadRunState(repoPath, "20260910020202-bbbbbb");
+  assert.equal(state.status, "failed");
+  assert.match(state.failure, /discarded the source implementation/);
+});
+
+test("a reconciliation-created conflict persists the shared recoverable contract", async (t) => {
+  const { repoPath, workerPath, sourceRunId, originalHead } = await conflictFixture(t);
+  const runId = "20260910020202-bbbbbb";
+
+  await assert.rejects(
+    executeReconcileRun({ repository: "example/repo", defaultBranch: "main", work: { "19": { status: "ready" } } }, {
+      repoPath,
+      sourceRunId,
+      issueIds: ["19"],
+      runId,
+      processRunner: async () => ({ code: 1 })
+    }),
+    (error) => error.code === "GIT_CONTENT_CONFLICT"
+  );
+
+  const state = await loadRunState(repoPath, runId);
+  const conflict = state.conflicts["19"];
+  assert.equal(state.status, "technical-conflict");
+  assert.equal(conflict.contractVersion, 1);
+  assert.equal(conflict.interruptedStage, "reconciliation-refresh");
+  assert.equal(conflict.operation, "rebase");
+  assert.equal(conflict.operationOwner, "maestro");
+  assert.equal(conflict.operationState, "aborted");
+  assert.deepEqual(conflict.conflictedFiles, ["shared.txt"]);
+  assert.equal(conflict.sourceSha, originalHead);
+  assert.equal(conflict.continuationAction, `maestro reconcile --run ${sourceRunId} --issue 19`);
+  assert.equal(git(workerPath, "rev-parse", "HEAD"), originalHead);
+  assert.equal(git(workerPath, "status", "--porcelain"), "");
 });

@@ -1,6 +1,7 @@
 const path = require("node:path");
 const { runChecked, runShell } = require("./process");
 const { isValidValidatorOverride } = require("./reviews");
+const { inspectGitOperation, captureConflict, safelyAbortConflict, contentConflictError } = require("./git-conflict");
 
 async function ensureClean(repoPath, runner = runChecked) {
   const status = (await runner("git", ["status", "--porcelain"], { cwd: repoPath })).stdout.trim();
@@ -168,7 +169,9 @@ async function integrateApproved({
   baseline = null,
   runner = runChecked,
   shellRunner = runShell,
-  onIntegrated = null
+  onIntegrated = null,
+  sourceRunId = null,
+  onConflict = null
 }) {
   const integration = config.integration || {};
   if (integration.enabled !== true) throw new Error("Manifest does not enable integration.");
@@ -187,10 +190,45 @@ async function integrateApproved({
   return withPreservedManifest({ repoPath, manifestPath, runner }, async () => {
     for (const worker of approved) {
       console.error(`[Maestro] integrating #${worker.issue}`);
+      const beforeOperation = await inspectGitOperation(worker.worktreePath, { runner });
+      if (beforeOperation.operationActive || beforeOperation.conflictedFiles.length) {
+        const conflict = await captureConflict({
+          repository: config.repository, issue: worker.issue, sourceRunId,
+          stage: "integration-refresh", interruptedAction: "serialized integration refresh",
+          worktreePath: worker.worktreePath, branch: worker.branch || null,
+          originalBaseSha: worker.baseSha || null, targetBranch: defaultBranch,
+          startedByMaestro: false, runner
+        });
+        if (onConflict) await onConflict(conflict);
+        throw contentConflictError(conflict);
+      }
+      if (beforeOperation.status) {
+        throw new Error(`Integration branch for issue #${worker.issue} is not clean:\n${beforeOperation.status}`);
+      }
       await runner("git", ["fetch", "origin", defaultBranch], { cwd: worker.worktreePath });
+      const targetSha = (await runner("git", ["rev-parse", `origin/${defaultBranch}`], { cwd: worker.worktreePath })).stdout.trim();
+      const sourceSha = (await runner("git", ["rev-parse", "HEAD"], { cwd: worker.worktreePath })).stdout.trim();
       await runner("git", ["rebase", `origin/${defaultBranch}`], { cwd: worker.worktreePath }).catch(async (error) => {
-        try { await runner("git", ["rebase", "--abort"], { cwd: worker.worktreePath }); } catch {}
-        throw error;
+        const conflict = await captureConflict({
+          repository: config.repository,
+          issue: worker.issue,
+          sourceRunId,
+          stage: "integration-refresh",
+          interruptedAction: "serialized integration refresh",
+          worktreePath: worker.worktreePath,
+          branch: worker.branch || null,
+          originalBaseSha: worker.baseSha || null,
+          sourceSha,
+          targetBranch: defaultBranch,
+          targetSha,
+          failure: error,
+          runner
+        });
+        if (!conflict) throw error;
+        if (onConflict) await onConflict(conflict);
+        await safelyAbortConflict(conflict, { runner });
+        if (onConflict) await onConflict(conflict);
+        throw contentConflictError(conflict, error);
       });
 
       const relativeManifest = repositoryRelativeManifest(repoPath, manifestPath);

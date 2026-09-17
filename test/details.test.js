@@ -165,8 +165,16 @@ test("details renders technical conflict evidence and exact continuation", async
       operation: "rebase",
       operationState: "aborted",
       interruptedStage: "rework-refresh",
+      worktreePath: "/tmp/7",
       conflictedFiles: ["src/shared.js"],
+      sourceSha: "source-implementation-sha",
+      targetBranch: "main",
       targetRef: "origin/main",
+      targetSha: "target-main-sha",
+      operationOriginalHeadSha: "source-implementation-sha",
+      operationCurrentHeadSha: "target-main-sha",
+      operationHeadSha: "source-commit-being-replayed",
+      operationOntoSha: "target-main-sha",
       continuationAction: "maestro rework 7 --run 20260910010101-aaaaaa",
       stderr: "CONFLICT (content): Merge conflict in src/shared.js"
     }
@@ -177,7 +185,14 @@ test("details renders technical conflict evidence and exact continuation", async
   assert.match(text, /Outcome: technical-conflict/);
   assert.match(text, /Operation state: aborted/);
   assert.match(text, /Conflicted files: src\/shared\.js/);
+  assert.match(text, /Source SHA: source-implementation-sha/);
+  assert.match(text, /Target SHA: target-main-sha/);
+  assert.match(text, /Operation original HEAD: source-implementation-sha/);
+  assert.match(text, /Operation current HEAD: target-main-sha/);
+  assert.match(text, /Operation head: source-commit-being-replayed/);
+  assert.match(text, /Rebase onto SHA: target-main-sha/);
   assert.match(text, /Continuation action: maestro rework 7 --run 20260910010101-aaaaaa/);
+  assert.match(text, /Manual recovery .*:\n      cd \/tmp\/7\n      git fetch origin main\n      git rebase origin\/main\n      git add -A -- src\/shared\.js\n      GIT_EDITOR=true git rebase --continue\n      maestro rework 7 --run 20260910010101-aaaaaa/);
 });
 
 test("multiple issues resolve independently and explicit runs inspect history", async (t) => {

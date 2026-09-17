@@ -21,11 +21,13 @@ function issueIdsForRun(state) {
     ...(state.workers || []).map((entry) => String(entry.issue)),
     ...(state.validations || []).map((entry) => String(entry.issue)),
     ...Object.keys(state.reviews || {}).map(String),
-    ...(state.integration || []).map((entry) => String(entry.issue))
+    ...(state.integration || []).map((entry) => String(entry.issue)),
+    ...Object.keys(state.conflicts || {}).map(String)
   ])];
 }
 
-function lifecycleState(state, { worker, validation, review, integration, selected }) {
+function lifecycleState(state, { worker, validation, review, integration, selected, conflict }) {
+  if (conflict && !["completed", "resolved", "manually-resolved"].includes(conflict.operationState)) return "technical-conflict";
   if (worker) return classifyRunIssue(state, worker).state;
   if (integration) return "integrated-pending-manifest";
   if (review?.disposition === "discard") return "discarded";
@@ -47,9 +49,10 @@ function evidenceForIssue(state, issueId) {
   const integration = (state.integration || []).find((entry) => String(entry.issue) === issue) || null;
   const autoRework = state.autoRework?.[issue] || null;
   const correction = state.correction?.attempts?.[issue] || null;
+  const conflict = state.conflicts?.[issue] || correction?.conflict || null;
   const selected = (state.plan?.selected || []).find((entry) => String(entry.id) === issue) || null;
-  if (!worker && !validation && !review && !integration && !selected) return null;
-  const evidence = { issue, worker, validation, review, integration, selected, autoRework, correction, runFailure: state.failure || null };
+  if (!worker && !validation && !review && !integration && !selected && !conflict) return null;
+  const evidence = { issue, worker, validation, review, integration, selected, autoRework, correction, conflict, runFailure: state.failure || null };
   return {
     ...evidence,
     state: lifecycleState(state, evidence),
@@ -316,6 +319,19 @@ async function resolveCurrentIssueStates(repoPath, issueIds = []) {
   return currentIssueEvidenceFromStates(states, issueIds);
 }
 
+async function runDescendsFrom(repoPath, state, ancestorRunId, stateLoader = loadRunState) {
+  const ancestor = String(ancestorRunId);
+  const seen = new Set();
+  let parentRunId = state?.parentRunId ? String(state.parentRunId) : null;
+  while (parentRunId && !seen.has(parentRunId)) {
+    if (parentRunId === ancestor) return true;
+    seen.add(parentRunId);
+    const parent = await stateLoader(repoPath, parentRunId);
+    parentRunId = parent.parentRunId ? String(parent.parentRunId) : null;
+  }
+  return false;
+}
+
 module.exports = {
   issueIdsForRun,
   evidenceForIssue,
@@ -325,5 +341,6 @@ module.exports = {
   resolveFromStates,
   resolveLatestRun,
   resolveRunsForIssues,
-  resolveCurrentIssueStates
+  resolveCurrentIssueStates,
+  runDescendsFrom
 };

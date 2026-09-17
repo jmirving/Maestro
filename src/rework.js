@@ -8,7 +8,7 @@ const { executeWorker } = require("./worker");
 const { validateWorker } = require("./validator");
 const { runChecked } = require("./process");
 const { newRunId } = require("./controller");
-const { resolveCurrentIssueStates } = require("./run-resolver");
+const { resolveCurrentIssueStates, runDescendsFrom } = require("./run-resolver");
 const { isRecoverableValidatorRework } = require("./run-lifecycle");
 const { reserveExplicitWork } = require("./scheduler");
 const { commitLifecycleTransition } = require("./lifecycle-coordination");
@@ -116,12 +116,21 @@ async function resolveReworkParentRunId(repoPath, sourceRunId, issueIds) {
   if (issues.length !== 1) return sourceRunId;
   const [current] = await resolveCurrentIssueStates(repoPath, issues);
   const correction = current?.evidence?.correction;
+  const descendsFromSource = String(current?.runId) === String(sourceRunId) ||
+    await runDescendsFrom(repoPath, current?.state, sourceRunId);
   if (
+    descendsFromSource &&
     current?.state?.status === "failed" &&
     ["technical-conflict", "human-required"].includes(correction?.outcome) &&
     String(correction.sourceRunId) === String(sourceRunId)
   ) {
     return current.runId;
+  }
+  if (String(current?.runId) !== String(sourceRunId)) {
+    throw new Error(
+      `Cannot rework superseded implementation evidence from run ${sourceRunId}: ` +
+      `#${current.issue} is current in ${current.runId} (${current.evidence?.state || "unknown"}).`
+    );
   }
   return sourceRunId;
 }
@@ -317,10 +326,18 @@ async function refreshWorker(worker, {
       : `maestro rework ${worker.issue}`;
     const targetDiff = await captureOptionalGitOutput(runner, ["diff", "--binary", originalBaseSha, targetSha, "--", ...conflictedFiles], options);
     const conflict = {
+      contractVersion: 1,
       type: "content",
+      repository,
+      issue: String(worker.issue),
+      sourceRunId: sourceRunId == null ? null : String(sourceRunId),
       operation: "rebase",
+      operationOwner: "maestro",
       operationState: "active",
+      resolutionState: "resolving-in-place",
+      requiresSemanticHumanDecision: false,
       interruptedStage: "rework-refresh",
+      interruptedAction: "validator correction refresh",
       conflictedFiles,
       worktreePath: worker.worktreePath,
       branch: worker.branch || null,
@@ -342,6 +359,16 @@ async function refreshWorker(worker, {
     const beforeResolver = await captureRebaseOperationState(worker, conflict, { runner, deadlineAt });
     conflict.rebaseHeadSha = beforeResolver.rebaseHeadSha;
     conflict.gitStatus = beforeResolver.gitStatus;
+    conflict.statusEvidence = beforeResolver.gitStatus;
+    conflict.operationOriginalHeadSha = beforeResolver.originalHeadSha;
+    conflict.operationCurrentHeadSha = beforeResolver.currentHeadSha;
+    conflict.operationHeadSha = beforeResolver.rebaseHeadSha;
+    conflict.operationOntoSha = beforeResolver.ontoSha;
+    conflict.preservation = {
+      existingUserEditsPreserved: false,
+      partialResolutionsPreserved: false,
+      recoveryArtifacts: []
+    };
     conflict.operationEvidence = { beforeResolver };
     await onConflictEvidence(conflict);
     let resolution;
@@ -379,6 +406,8 @@ async function refreshWorker(worker, {
       try {
         conflict.resolution.verification = await verifyResolvedRebase(worker, conflict, { runner, deadlineAt });
         conflict.operationState = "completed";
+        conflict.resolutionState = "verified-awaiting-fresh-validation";
+        conflict.resolutionVerifiedAgainstSha = conflict.targetSha;
         await onConflictEvidence(conflict);
         return;
       } catch (verificationError) {
@@ -391,6 +420,10 @@ async function refreshWorker(worker, {
     conflict.operationEvidence.afterResolver = afterResolver;
     conflict.operationEvidence.verification = operationVerification;
     conflict.operationState = operationVerification.state;
+    conflict.requiresSemanticHumanDecision = resolution.status === "human-required";
+    conflict.resolutionState = resolution.status === "human-required"
+      ? "requires-semantic-human-decision"
+      : "awaiting-technical-resolution";
     await onConflictEvidence(conflict);
     throw resolutionFailure(worker, conflict, conflict.resolution, sourceRunId);
   });
