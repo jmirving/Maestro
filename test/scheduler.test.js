@@ -56,6 +56,24 @@ test("atomic repository reservations cannot duplicate work or oversubscribe capa
   assert.equal(snapshot.idle.kind, "exhausted");
 });
 
+test("reserveReadyWork applies authorization before capacity selection", async (t) => {
+  const { repoPath } = await tempRepo(t);
+  const manifest = config({
+    "1": { status: "ready", priority: 1 },
+    "2": { status: "ready", priority: 2 }
+  }, 1);
+
+  const reservation = await reserveReadyWork(manifest, {
+    repoPath,
+    runId: "20260912010103-cccccc",
+    authorizedIssueIds: ["2"]
+  });
+
+  assert.equal(reservation.reserved, true);
+  assert.deepEqual(reservation.plan.selected.map((item) => item.id), ["2"]);
+  assert.deepEqual(reservation.state.capacity.issues, ["2"]);
+});
+
 test("the first active invocation owns the aggregate limit until its session drains", () => {
   const states = [{
     runId: "20260912010101-aaaaaa",
@@ -242,4 +260,66 @@ test("explicit authorization is applied before ready backfill selection", async 
     }
   });
   assert.deepEqual(started, ["2"]);
+});
+
+test("lifecycle scheduling serializes conflicting corrections and fills the spare slot", async (t) => {
+  const { repoPath } = await tempRepo(t);
+  const manifest = config({
+    "1": { status: "ready" },
+    "2": { status: "ready" },
+    "3": { status: "ready", priority: 1 }
+  }, 2, [{ issues: ["1", "2"], reason: "shared files", source: "test", confidence: "high" }]);
+  const started = [];
+  let running = 0;
+  let peak = 0;
+  let sequence = 0;
+  let independentStarted;
+  const independent = new Promise((resolve) => { independentStarted = resolve; });
+
+  async function settle(runId, state, issue = null) {
+    state.status = "awaiting-review";
+    state.capacity.issues = [];
+    if (issue) {
+      state.workers = [{ issue, exitCode: 0, baseSha: "base", headSha: "head" }];
+      state.validations = [{ issue, exitCode: 0, verdict: "approve" }];
+    }
+    await saveRunState(repoPath, runId, state);
+  }
+
+  const outcomes = await runLifecycleBackfill(manifest, {
+    repoPath,
+    authorizedIssueIds: ["1", "2", "3"],
+    initialTasks: [{ issue: "1" }, { issue: "2" }],
+    reserveInitial: async (task) => {
+      const runId = `2026091204040${++sequence}-aaaaaa`;
+      const reservation = await reserveExplicitWork(manifest, {
+        repoPath, runId, mode: "rework", items: [{ id: task.issue, mode: "rework" }]
+      });
+      return { ...reservation, runId };
+    },
+    executeInitial: async (task, prepared) => {
+      started.push(`correction-${task.issue}`);
+      running += 1;
+      peak = Math.max(peak, running);
+      if (task.issue === "1") await independent;
+      await settle(prepared.runId, prepared.state, task.issue);
+      running -= 1;
+      return `correction-${task.issue}`;
+    },
+    runIdFactory: () => `2026091204040${++sequence}-bbbbbb`,
+    executeReserved: async ({ candidate, runId, reservation }) => {
+      started.push(`ready-${candidate.id}`);
+      running += 1;
+      peak = Math.max(peak, running);
+      independentStarted();
+      manifest.work[candidate.id].status = "complete";
+      await settle(runId, reservation.state);
+      running -= 1;
+      return `ready-${candidate.id}`;
+    }
+  });
+
+  assert.deepEqual(started, ["correction-1", "ready-3", "correction-2"]);
+  assert.equal(peak, 2);
+  assert.deepEqual(new Set(outcomes), new Set(["correction-1", "correction-2", "ready-3"]));
 });

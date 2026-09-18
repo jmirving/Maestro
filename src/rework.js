@@ -412,11 +412,15 @@ async function autoReworkIssue(config, {
   recordOutcome,
   reworkExecutor,
   reworkOptions,
+  initialReservation,
   now
 }) {
   const runs = [];
+  let prepared = initialReservation || null;
   for (;;) {
-    const [resolved] = await resolver(repoPath, [String(issue)]);
+    const [resolved] = prepared?.resolved
+      ? [prepared.resolved]
+      : await resolver(repoPath, [String(issue)]);
     const evidence = resolved.evidence;
     const worker = evidence.worker;
     const validation = evidence.validation;
@@ -496,7 +500,7 @@ async function autoReworkIssue(config, {
       };
     }
 
-    const runId = newRunId();
+    const runId = prepared?.runId || newRunId();
     try {
       const result = await reworkExecutor(config, {
         repoPath,
@@ -507,8 +511,10 @@ async function autoReworkIssue(config, {
         stateSaver,
         automatic: true,
         retryLimit,
+        ...(prepared?.reservedState ? { reservedState: prepared.reservedState } : {}),
         ...reworkOptions
       });
+      prepared = null;
       runs.push(result);
       const outcome = resultOutcome(result, issue);
       if (["worker-failure", "validator-failure", "timeout", "no-progress"].includes(outcome.status)) {
@@ -567,6 +573,7 @@ async function autoRework(config, {
   stateSaver = saveRunState,
   reworkExecutor = executeReworkRun,
   reworkOptions = {},
+  initialReservations = {},
   timeoutMs = DEFAULT_AUTO_REWORK_TIMEOUT_MS,
   now = Date.now
 } = {}) {
@@ -621,6 +628,7 @@ async function autoRework(config, {
         recordOutcome,
         reworkExecutor,
         reworkOptions: { ...reworkOptions, deadlineAt },
+        initialReservation: initialReservations[String(issues[index])] || null,
         now
       });
     }

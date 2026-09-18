@@ -267,7 +267,7 @@ test("repeated maestro next invocations do not execute a persisted item again", 
   assert.equal(repeated.status, 0, repeated.stderr);
   assert.deepEqual(parseLeadingJson(first.stdout).plan.selected, []);
   assert.deepEqual(parseLeadingJson(repeated.stdout).plan.selected, []);
-  assert.match(first.stdout, /maestro approve 2 --run 20260910060606-ffffff/);
+  assert.match(first.stdout, /Recommended: `maestro approve 2`/);
 });
 
 test("legacy reports defer work after their disposable worktree is removed", async (t) => {

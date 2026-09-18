@@ -138,11 +138,16 @@ async function reserveReadyWork(config, {
 } = {}) {
   return withCapacityLock(repoPath, async () => {
     const states = await stateLoader(repoPath);
-    const capacity = capacitySnapshot(config, states, planOptions);
     const authorized = authorizedIssueIds && new Set(authorizedIssueIds.map(String));
-    const selected = capacity.plan.selected.filter((item) => !authorized || authorized.has(String(item.id)));
-    const plan = { ...capacity.plan, selected };
-    if (!selected.length) return { reserved: false, capacity, plan, state: null };
+    const scopedIssueIds = authorized
+      ? planOptions.issueIds
+        ? planOptions.issueIds.map(String).filter((id) => authorized.has(id))
+        : [...authorized]
+      : planOptions.issueIds;
+    const scopedPlanOptions = scopedIssueIds ? { ...planOptions, issueIds: scopedIssueIds } : planOptions;
+    const capacity = capacitySnapshot(config, states, scopedPlanOptions);
+    const plan = capacity.plan;
+    if (!plan.selected.length) return { reserved: false, capacity, plan, state: null };
     const state = reservedRunState({ repoPath, runId, mode, plan, capacity, extraState });
     await stateSaver(repoPath, runId, state);
     return { reserved: true, capacity, plan, state };
@@ -310,13 +315,18 @@ async function runLifecycleBackfill(config, {
       if (capacity.available === 0) break;
 
       if (pending.length) {
-        const task = pending[0];
-        const prepared = reserveInitial ? await reserveInitial(task) : null;
-        if (prepared && !prepared.reserved) break;
-        pending.shift();
-        launch(executeInitial(task, prepared));
-        launched = true;
-        continue;
+        let admitted = false;
+        for (let index = 0; index < pending.length; index += 1) {
+          const task = pending[index];
+          const prepared = reserveInitial ? await reserveInitial(task) : null;
+          if (prepared && !prepared.reserved) continue;
+          pending.splice(index, 1);
+          launch(executeInitial(task, prepared));
+          launched = true;
+          admitted = true;
+          break;
+        }
+        if (admitted) continue;
       }
 
       const candidate = capacity.plan.selected[0];

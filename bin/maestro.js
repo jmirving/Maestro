@@ -29,7 +29,7 @@ const { runPlanningAnalyzer } = require("../src/planning-analysis");
 const { stableWorksetName, epicWorkset, issueWorkset, resolveWorksetScope, assertExecutableScope, validateWorksetName } = require("../src/worksets");
 const { loadScopeSnapshot, readScopeSnapshot } = require("../src/scope-store");
 const { persistScopedDraft } = require("../src/scoped-persistence");
-const { reserveReadyWork, reserveExplicitWork, runCapacityPool, runLifecycleBackfill } = require("../src/scheduler");
+const { reserveReadyWork, reserveExplicitWork, runLifecycleBackfill } = require("../src/scheduler");
 const {
   resolveRepoPath,
   resolveManifestPath,
@@ -581,40 +581,49 @@ async function main() {
       const correctionIssues = currentStates
         .filter((entry) => entry.evidence?.verdict === "rework" && !entry.evidence?.review)
         .map((entry) => entry.issue);
-      const backfillPlan = await computeEffectivePlan(config, repoPath, planOptions);
-      const readyItems = backfillPlan.selected;
-      await verifyExecutionSelection(config, repoPath, readyItems.map((item) => item.id));
-      const tasks = [
-        ...correctionIssues.map((issue) => ({ kind: "rework", issue })),
-        ...readyItems.map((item) => ({ kind: "execute", item }))
-      ];
-      const outcomes = await runCapacityPool(tasks, backfillPlan.availableConcurrency, async (task) => {
-        if (task.kind === "rework") {
-          return autoRework(config, {
+      const authorizedIssueIds = scope?.issueIds?.map(String) || Object.keys(config.work || {});
+      const outcomes = await runLifecycleBackfill(config, {
+        repoPath,
+        authorizedIssueIds,
+        planOptions,
+        initialTasks: correctionIssues.map((issue) => ({ issue: String(issue) })),
+        reserveInitial: async (task) => {
+          const [resolved] = await resolveCurrentIssueStates(repoPath, [task.issue]);
+          const runId = newRunId();
+          const reservation = await reserveExplicitWork(config, {
             repoPath,
-            issueIds: [task.issue],
-            capacity: 1,
-            reworkOptions: { reserveCapacity: true }
+            runId,
+            mode: "rework",
+            items: [{ id: task.issue, ...(config.work?.[task.issue] || {}), mode: "rework" }]
           });
-        }
-        const runId = newRunId();
-        const reservation = await reserveReadyWork(config, {
+          return { ...reservation, runId, resolved };
+        },
+        executeInitial: (task, prepared) => autoRework(config, {
+          repoPath,
+          issueIds: [task.issue],
+          capacity: 1,
+          initialReservations: {
+            [task.issue]: { runId: prepared.runId, reservedState: prepared.state, resolved: prepared.resolved }
+          },
+          reworkOptions: { reserveCapacity: true }
+        }),
+        verifySelection: (issueIds) => verifyExecutionSelection(config, repoPath, issueIds),
+        runIdFactory: newRunId,
+        extraState: authorization ? { scope: authorization } : {},
+        executeReserved: ({ runId, reservation }) => executeRun(config, {
           repoPath,
           runId,
-          mode: "backfill",
-          authorizedIssueIds: [task.item.id],
-          planOptions,
-          extraState: authorization ? { scope: authorization } : {}
-        });
-        if (!reservation.reserved) return { mode: "backfill", issue: task.item.id, outcome: "not-reserved", capacity: reservation.capacity };
-        return executeRun(config, { repoPath, runId, plan: reservation.plan, scope: authorization, reservedState: reservation.state });
+          plan: reservation.plan,
+          scope: authorization,
+          reservedState: reservation.state
+        })
       });
       const corrections = outcomes.filter((entry) => entry?.mode === "auto-rework");
       backfill = outcomes.filter((entry) => entry?.mode !== "auto-rework");
       automatic = {
         mode: "auto-rework",
         retryLimit: corrections[0]?.retryLimit || 3,
-        capacity: backfillPlan.limit || config.defaultConcurrency || 2,
+        capacity: config.defaultConcurrency || 2,
         timeoutMs: corrections[0]?.timeoutMs || 30 * 60 * 1000,
         issues: corrections.flatMap((entry) => entry.issues || [])
       };
