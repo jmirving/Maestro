@@ -66,6 +66,7 @@ async function executeRun(config, {
   };
   if (scope) result.scope = scope;
   if (!reservedState || scope) await stateSaver(repoPath, runId, result);
+  let sourceSettled = false;
 
   try {
     // Fail fast on missing runtime capabilities before spending minutes on the
@@ -79,6 +80,7 @@ async function executeRun(config, {
 
     console.error(`[Maestro] run ${runId}: workers running`);
     let persistence = Promise.resolve();
+    const settlementErrors = [];
     const persist = () => {
       persistence = persistence.then(() => stateSaver(repoPath, runId, result));
       return persistence;
@@ -103,7 +105,11 @@ async function executeRun(config, {
           result.capacity.issues = result.capacity.issues.filter((id) => String(id) !== issue);
           await persist();
         }
-        await onIssueSettled({ issue, result });
+        try {
+          await onIssueSettled({ issue, result });
+        } catch (error) {
+          settlementErrors.push(error);
+        }
       }
     }));
     const rejected = settled.find((entry) => entry.status === "rejected");
@@ -111,9 +117,15 @@ async function executeRun(config, {
 
     result.status = "awaiting-review";
     await persist();
+    sourceSettled = true;
     console.error(`[Maestro] run ${runId}: complete`);
+    if (settlementErrors.length === 1) throw settlementErrors[0];
+    if (settlementErrors.length > 1) {
+      throw new AggregateError(settlementErrors, `${settlementErrors.length} lifecycle backfill operations failed.`);
+    }
     return result;
   } catch (error) {
+    if (sourceSettled) throw error;
     result.status = "failed";
     result.failure = error.message;
     await stateSaver(repoPath, runId, result);

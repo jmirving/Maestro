@@ -105,3 +105,45 @@ test("executeRun releases each persisted issue reservation when its validator se
   const result = await run;
   assert.deepEqual(result.capacity.issues, []);
 });
+
+test("a failed lifecycle backfill does not invalidate successful source evidence", async () => {
+  const saved = new Map();
+  const stateSaver = async (repoPath, runId, state) => saved.set(runId, structuredClone(state));
+  const executionOptions = {
+    repoPath: "/target",
+    preflightRunner: async () => ({ code: 0, stdout: "ok", stderr: "" }),
+    baselineRunner: async () => ({ ok: true }),
+    worktreeFactory: async ({ item }) => ({ baseSha: "base", branch: `b-${item.id}`, worktreePath: `/wt/${item.id}` }),
+    validatorExecutor: async ({ worker }) => ({ issue: worker.issue, exitCode: 0, verdict: "approve" }),
+    stateSaver
+  };
+
+  await assert.rejects(executeRun(config, {
+    ...executionOptions,
+    runId: "source-run",
+    plan: { selected: [{ id: "1", requires: ["node"] }] },
+    workerExecutor: async ({ item, worktree }) => ({
+      issue: item.id,
+      exitCode: 0,
+      ...worktree,
+      headSha: "source-head",
+      report: "source complete"
+    }),
+    onIssueSettled: async () => executeRun(config, {
+      ...executionOptions,
+      runId: "backfill-run",
+      plan: { selected: [{ id: "2", requires: ["node"] }] },
+      workerExecutor: async () => { throw new Error("backfill failed"); }
+    })
+  }), /backfill failed/);
+
+  const source = saved.get("source-run");
+  assert.equal(source.status, "awaiting-review");
+  assert.equal(source.failure, undefined);
+  assert.equal(source.workers[0].report, "source complete");
+  assert.equal(source.validations[0].verdict, "approve");
+
+  const backfill = saved.get("backfill-run");
+  assert.equal(backfill.status, "failed");
+  assert.equal(backfill.failure, "backfill failed");
+});
