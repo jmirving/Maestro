@@ -33,6 +33,7 @@ const { persistScopedDraft } = require("../src/scoped-persistence");
 const { reserveReadyWork, reserveExplicitWork, runLifecycleBackfill } = require("../src/scheduler");
 const { resolveConcurrency } = require("../src/concurrency");
 const { runConfigCommand } = require("../src/config-command");
+const { createDelegatedAuthorization, saveAuthorization, loadAuthorization, revokeAuthorization } = require("../src/authorization");
 const {
   resolveRepoPath,
   resolveManifestPath,
@@ -69,12 +70,12 @@ function issuePositionals(rest) {
   const issues = [];
   for (let index = start; index < rest.length; index += 1) {
     const value = rest[index];
-    if (["--repo-path", "--run", "-j", "--concurrency"].includes(value)) {
+    if (["--repo-path", "--run", "--renew", "--workset", "-j", "--concurrency"].includes(value)) {
       if (!rest[index + 1] || rest[index + 1].startsWith("--")) throw new Error(`${value} requires a value.`);
       index += 1;
       continue;
     }
-    if (value === "--override") continue;
+    if (["--override", "--delegate", "--preview", "--auto-rework", "--rerun"].includes(value)) continue;
     if (value.startsWith("--")) throw new Error(`Unknown review option: ${value}`);
     if (!/^[1-9]\d*$/.test(value)) throw new Error(`Invalid issue number: ${value}`);
     issues.push(value);
@@ -304,6 +305,13 @@ async function main() {
   const invocation = parseInvocation(args);
   const command = invocation.command;
   const rest = args.slice(1);
+
+  if (command === "revoke") {
+    const repoPath = resolveRepoPath(option(args, "--repo-path"));
+    const authorization = await revokeAuthorization(repoPath, invocation.positionals[0]);
+    process.stdout.write(`${JSON.stringify({ authorizationId: authorization.id, status: authorization.status, revokedAt: authorization.revokedAt }, null, 2)}\n`);
+    return;
+  }
 
   if (command === "config") {
     const repoPath = resolveRepoPath(invocation.options["--repo-path"]);
@@ -555,9 +563,16 @@ async function main() {
   }
 
   if (command === "start" || command === "next") {
+    const delegated = args.includes("--delegate");
+    const delegatedIssues = command === "start" ? issuePositionals(rest) : [];
+    if (delegatedIssues.length && !delegated) throw new Error("Explicit issue selection on maestro start requires --delegate; ordinary start remains supervised.");
+    if (option(args, "--renew") && !delegated) throw new Error("--renew requires --delegate and a newly resolved scope.");
+    if (args.includes("--preview") && !delegated) throw new Error("--preview requires --delegate.");
     const worksetName = option(args, "--workset");
+    if (delegated && !delegatedIssues.length && !worksetName) throw new Error("--delegate requires explicit issue numbers or --workset so authorization scope is bounded.");
     const scope = worksetName ? await resolveSavedWorkset(config, repoPath, worksetName, { refresh: true }) : null;
-    const planOptions = { ...scopedPlanOptions(scope), concurrency };
+    if (delegatedIssues.length && worksetName) throw new Error("Delegated start accepts either explicit issues or --workset, not both.");
+    const planOptions = { ...(delegatedIssues.length ? { issueIds: delegatedIssues } : scopedPlanOptions(scope)), concurrency };
     const candidatePlan = args.includes("--rerun") ? computePlan(config, planOptions) : await computeEffectivePlan(config, repoPath, planOptions);
     const selectedIssueIds = candidatePlan.selected.map((item) => item.id);
     await verifyExecutionSelection(config, repoPath, selectedIssueIds);
@@ -570,6 +585,26 @@ async function main() {
       source: "explicit-workset-launch"
     } : null;
     const requestedRunId = newRunId();
+    let delegatedAuthorization = null;
+    if (delegated) {
+      const authorizedScopeIds = delegatedIssues.length ? delegatedIssues : scope?.issueIds || candidatePlan.selected.map((item) => String(item.id));
+      const renewalId = option(args, "--renew");
+      if (renewalId) await loadAuthorization(repoPath, renewalId);
+      delegatedAuthorization = createDelegatedAuthorization({
+        config, repoPath, runId: requestedRunId, issueIds: authorizedScopeIds,
+        scope: scope ? { workset: scope.name, revision: scope.revision } : null,
+        renews: renewalId
+      });
+      if (args.includes("--preview")) {
+        process.stdout.write(`${JSON.stringify({ preview: true, persisted: false, authorization: delegatedAuthorization }, null, 2)}\n`);
+        return;
+      }
+      await saveAuthorization(repoPath, delegatedAuthorization);
+    }
+    const authorizationState = {
+      ...(authorization ? { scope: authorization } : {}),
+      ...(delegatedAuthorization ? { authorization: delegatedAuthorization } : {})
+    };
     const reservation = args.includes("--rerun")
       ? await reserveExplicitWork(config, {
           repoPath,
@@ -577,7 +612,7 @@ async function main() {
           mode: "rerun",
           items: candidatePlan.selected,
           planOptions,
-          extraState: authorization ? { scope: authorization } : {}
+          extraState: authorizationState
         })
       : await reserveReadyWork(config, {
           repoPath,
@@ -585,13 +620,13 @@ async function main() {
           mode: "execute",
           authorizedIssueIds: selectedIssueIds,
           planOptions,
-          extraState: authorization ? { scope: authorization } : {}
+          extraState: authorizationState
         });
     if (args.includes("--rerun") && !reservation.reserved && selectedIssueIds.length) {
       throw new Error(`Cannot reserve worker capacity for rerun: ${reservation.reason}.`);
     }
     const plan = reservation.plan || { ...candidatePlan, selected: [] };
-    const authorizedIssueIds = scope?.issueIds?.map(String) || Object.keys(config.work || {});
+    const authorizedIssueIds = delegatedIssues.length ? delegatedIssues : scope?.issueIds?.map(String) || Object.keys(config.work || {});
     const lifecycleOutcomes = [];
     const automaticRework = args.includes("--auto-rework");
     const automaticTimeoutMs = 30 * 60 * 1000;
@@ -633,7 +668,8 @@ async function main() {
                 current.evidence?.state === "awaiting-rework" &&
                 isRecoverableValidatorRework(current.evidence)
               ),
-              planOptions
+              planOptions,
+              extraState: authorizationState
             });
             return {
               ...correctionReservation,
@@ -656,7 +692,7 @@ async function main() {
         } : {}),
         verifySelection: (issueIds) => verifyExecutionSelection(config, repoPath, issueIds),
         runIdFactory: newRunId,
-        extraState: authorization ? { scope: authorization } : {},
+        extraState: authorizationState,
         executeReserved: ({ runId, reservation: backfillReservation }) => executeRun(config, {
           repoPath,
           runId,
@@ -703,7 +739,25 @@ async function main() {
     const output = automatic
       ? { ...result, autoRework: automatic, backfill }
       : backfill.length ? { ...result, backfill } : result;
-    process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+    let delegatedIntegration = [];
+    if (delegatedAuthorization) {
+      const runIds = [...new Set([
+        requestedRunId,
+        ...lifecycleOutcomes.map((entry) => entry?.runId).filter(Boolean),
+        ...lifecycleOutcomes.flatMap((entry) => (entry?.issues || []).flatMap((issue) => [issue.finalRunId, ...(issue.runs || [])])).filter(Boolean)
+      ])];
+      for (const delegatedRunId of runIds) {
+        const integrated = await integrateExistingRun(config, { repoPath, manifestPath, runId: delegatedRunId });
+        delegatedIntegration.push({
+          runId: delegatedRunId,
+          integration: integrated.newlyIntegrated || [],
+          rework: integrated.rework || [],
+          gated: integrated.gated || [],
+          failed: integrated.failed || []
+        });
+      }
+    }
+    process.stdout.write(`${JSON.stringify({ ...output, ...(delegatedAuthorization ? { delegatedAuthorization, delegatedIntegration } : {}) }, null, 2)}\n`);
     process.stdout.write(await workflowFooter(config, repoPath, { concurrency }));
     if (automatic) setAutoReworkExitCode(automatic);
     else setResultExitCode(result);
@@ -774,7 +828,7 @@ async function main() {
           .map((worker) => String(worker.issue))
           .filter((issue) => validationByIssue.get(issue)?.verdict === "rework" || sourceState.reviews?.[issue]?.disposition === "rework-original");
       }
-      correctionTasks.push(...issueIds.map((issue) => ({ ...source, issueIds: [String(issue)] })));
+      correctionTasks.push(...issueIds.map((issue) => ({ ...source, issueIds: [String(issue)], authorization: sourceState.authorization || null })));
     }
     const inheritedScope = sourceStates.flatMap((state) => state.scope?.authorizedIssueIds || []);
     const authorizedIssueIds = requestedIssues.length
@@ -798,7 +852,12 @@ async function main() {
           planOptions,
           expectedCurrent: source.resumeRunId ? [{ issue: source.issueIds[0], runId: source.resumeRunId }] : [],
           existingState: resumeState,
-          extraState: resumeState ? { ...resumeState, status: "running" } : { parentRunId: source.parentRunId }
+          extraState: resumeState
+            ? { ...resumeState, status: "running" }
+            : {
+                parentRunId: source.parentRunId,
+                ...(source.authorization?.allowedActions?.correct === true ? { authorization: source.authorization } : {})
+              }
         });
         return { ...reservation, runId };
       },
@@ -874,8 +933,8 @@ async function main() {
   }
 
   let result;
-  if (args.includes("--continuous")) result = await continuousRun(config, { repoPath, concurrency });
-  else if (args.includes("--integrate")) result = await executeAndIntegrate(config, { repoPath, concurrency });
+  if (args.includes("--continuous")) result = await continuousRun(config, { repoPath, concurrency, delegate: args.includes("--delegate") });
+  else if (args.includes("--integrate")) result = await executeAndIntegrate(config, { repoPath, manifestPath, concurrency, delegate: args.includes("--delegate") });
   else if (args.includes("--execute")) result = await executeRun(config, { repoPath, concurrency });
   else result = await dryRun(config, { repoPath, concurrency });
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

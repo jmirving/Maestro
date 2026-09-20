@@ -11,6 +11,7 @@ const { reserveExplicitWork } = require("./scheduler");
 const { commitLifecycleTransition } = require("./lifecycle-coordination");
 const { resolveCurrentIssueStates, runDescendsFrom } = require("./run-resolver");
 const { inspectGitOperation, captureConflict, contentConflictError, isAncestor } = require("./git-conflict");
+const { bindValidation } = require("./authorization");
 
 async function resolveReconcileSource(repoPath, issue, explicitRunId = null) {
   if (explicitRunId) return { sourceRunId: String(explicitRunId), issueIds: issue ? [String(issue)] : null };
@@ -123,7 +124,12 @@ async function executeReconcileRun(config, {
       mode: "reconcile",
       items,
       existingState: resumeState,
-      extraState: resuming ? { ...resumeState, status: "running" } : { parentRunId: sourceRunId }
+      extraState: resuming
+        ? { ...resumeState, status: "running" }
+        : {
+            parentRunId: sourceRunId,
+            ...(source.authorization?.allowedActions?.correct === true ? { authorization: source.authorization } : {})
+          }
     });
     if (!reservation.reserved) {
       throw new Error(`Cannot reserve worker capacity for conflict resolution: ${reservation.reason}.`);
@@ -269,7 +275,7 @@ async function executeReconcileRun(config, {
 
   result.validations = await Promise.all(result.workers
     .filter((worker) => worker.exitCode === 0 && worker.headSha !== worker.baseSha)
-    .map((worker) => validatorExecutor({ repository: config.repository, worker, baseline: result.baseline, runId })));
+    .map(async (worker) => bindValidation(config, worker, await validatorExecutor({ repository: config.repository, worker, baseline: result.baseline, runId }))));
 
   result.status = "awaiting-review";
   if (stateSaver === saveRunState) {

@@ -81,21 +81,24 @@ const COMMANDS = [
     category: "Execution",
     summary: "Execute the current ready wave in isolated workers and fresh validators.",
     when: "Use after planning when status shows ready work and required capabilities are available.",
-    usages: ["maestro start [manifest.json] [--repo-path <path>] [--workset <name>] [-j <count>] [--rerun] [--auto-rework]"],
-    positionals: "Optional manifest path; defaults to .maestro.json in the target repository.",
+    usages: ["maestro start [manifest.json] [issue ...|--workset <name>] [-j <count>] [--delegate [--renew <authorization-id>]] [--auto-rework]"],
+    positionals: "Optional manifest path. Issue numbers are accepted only with --delegate and create a bounded one-shot scope.",
     options: {
       "--repo-path": COMMON_REPO_OPTION,
       ...CONCURRENCY_OPTIONS,
       "--workset": { value: "<name>", description: "Execute only a previously drafted scope after checking it for drift." },
       "--rerun": { description: "Intentionally bypass persisted lifecycle deferrals and retry manifest-ready work." },
-      "--auto-rework": { description: "Automatically correct and revalidate REWORK results, up to three attempts within a 30-minute session." }
+      "--auto-rework": { description: "Automatically correct and revalidate REWORK results, up to three attempts within a 30-minute session." },
+      "--delegate": { description: "Explicitly authorize this resolved scope/session to integrate passing current results without per-issue human review." },
+      "--preview": { description: "Resolve and print the exact delegated authorization without persisting it or starting work." },
+      "--renew": { value: "<authorization-id>", description: "Create a new authorization after explicitly resolving scope and policy again; the prior record is retained." }
     },
     prerequisites: "Ready reconciled work, a clean usable repository, current GitHub issue facts, and every capability required by the selected items.",
-    effects: "Atomically reserves repository worker slots, persists a run, creates isolated branches/worktrees, validates changed branches, and backfills authorized ready work as original workers settle. --auto-rework also shares freed slots with bounded corrections.",
-    cautions: "GitHub or saved-workset scope drift blocks launch. Does not approve, integrate, push the default branch, or close issues. Successful automatic rework still requires human review. --rerun is an explicit retry, not normal resume behavior or a drift bypass, and cannot be combined with --workset.",
+    effects: "Atomically reserves repository worker slots, persists a run, creates isolated branches/worktrees, validates changed branches, and backfills authorized ready work. With --delegate, eligible passing results are integrated serially under a durable scoped authorization.",
+    cautions: "Without --delegate: Does not approve, integrate, push the default branch, or close issues. Delegation does not override human gates, validation failures, drift, checks, closure policy, or unrelated/live operations. --rerun cannot be combined with --workset.",
     next: ["maestro status", "maestro details <issue>", "maestro output"],
-    examples: [["start"], ["start", "--auto-rework"]],
-    positionalKind: "optional-manifest",
+    examples: [["start"], ["start", "57", "63", "--delegate"]],
+    positionalKind: "manifest-issues",
     conflicts: [["--workset", "--rerun"]],
     exclusive: [["-j", "--concurrency"]]
   },
@@ -112,16 +115,34 @@ const COMMANDS = [
       ...CONCURRENCY_OPTIONS,
       "--workset": { value: "<name>", description: "Continue only the authorized members of a previously drafted workset." },
       "--rerun": { description: "Intentionally retry manifest-ready work despite prior lifecycle evidence." },
-      "--auto-rework": { description: "Automatically correct and revalidate REWORK results, up to three attempts within a 30-minute session." }
+      "--auto-rework": { description: "Automatically correct and revalidate REWORK results, up to three attempts within a 30-minute session." },
+      "--delegate": { description: "Begin a new explicit delegated session for the resolved scope; existing next semantics remain supervised without it." },
+      "--preview": { description: "Resolve and print the exact delegated authorization without persisting it or starting work." },
+      "--renew": { value: "<authorization-id>", description: "Renew a prior authorization only after re-resolving the current scope and protected policy." }
     },
     prerequisites: "The same requirements as start. Existing running, review, rework, and integration states remain deferred.",
     effects: "Runs workers and validators for newly eligible work and backfills freed original-worker slots from the authorized manifest scope; --auto-rework may also resume corrections. It does not integrate work.",
     cautions: "No ready work is not proof that all repository or workset work is complete; inspect status for outside prerequisites, gates, and deferred items. Automatic correction never satisfies human review or integration gates. --rerun cannot be combined with --workset.",
     next: ["maestro status", "maestro output"],
-    examples: [["next"], ["next", "--auto-rework"]],
+    examples: [["next"], ["next", "--workset", "release", "--delegate"]],
     positionalKind: "optional-manifest",
     conflicts: [["--workset", "--rerun"]],
     exclusive: [["-j", "--concurrency"]]
+  },
+  {
+    name: "revoke",
+    category: "Integration",
+    summary: "Revoke a delegated authorization so it cannot integrate further work.",
+    when: "Use to pause a delegated session before any additional integration.",
+    usages: ["maestro revoke <authorization-id> [--repo-path <path>]"],
+    positionals: "The exact authorization id printed and persisted by a delegated start/next invocation.",
+    options: { "--repo-path": COMMON_REPO_OPTION },
+    prerequisites: "The authorization must exist in this coordinated repository session.",
+    effects: "Atomically marks the authorization revoked. Existing run and validation evidence remains auditable but non-integrable.",
+    cautions: "Revocation does not undo commits already integrated. Resume requires an explicit new --delegate invocation, optionally with --renew.",
+    next: ["maestro status", "maestro start 57 --delegate --renew <authorization-id>"],
+    examples: [["revoke", "delegation-20260910010101-aaaaaa-deadbeef1234"]],
+    positionalKind: "authorization-id"
   },
   {
     name: "status",
@@ -247,10 +268,10 @@ const COMMANDS = [
     when: "Use for explicit low-level control or compatibility; prefer start/status/approve/commit/next for supervised work.",
     usages: ["maestro run [manifest.json] [-j <count>] [--execute|--integrate|--continuous] [--allow-failing-baseline]"],
     positionals: "Optional manifest path; defaults to .maestro.json in the target repository.",
-    options: { "--repo-path": COMMON_REPO_OPTION, ...CONCURRENCY_OPTIONS, "--execute": { description: "Execute and validate one wave without integration." }, "--integrate": { description: "Execute, validate, and integrate one wave when manifest policy enables it." }, "--continuous": { description: "Repeat the legacy execute-and-integrate loop until a stop condition." }, "--allow-failing-baseline": { description: "Explicitly continue despite a failing configured baseline." } },
+    options: { "--repo-path": COMMON_REPO_OPTION, ...CONCURRENCY_OPTIONS, "--execute": { description: "Execute and validate one wave without integration." }, "--integrate": { description: "Execute, validate, and integrate one wave when manifest policy enables it." }, "--continuous": { description: "Repeat the execute-and-integrate loop until a stop condition." }, "--delegate": { description: "Explicitly grant a bounded delegated authorization for --integrate or --continuous." }, "--allow-failing-baseline": { description: "Explicitly continue despite a failing configured baseline." } },
     prerequisites: "Mode-specific capabilities and gates. Integration modes require repository authorization in the manifest.",
     effects: "With no mode flag, prints a dry run. Other modes can create workers or integrate according to the explicit flag.",
-    cautions: "--continuous is the existing advanced compatibility path, not the supervised persisted-review workflow and not proof of epic completion.",
+    cautions: "--integrate and --continuous fail closed without --delegate. Delegation remains scoped to each resolved wave and is not proof of epic completion.",
     next: ["maestro report", "maestro status"],
     examples: [["run"], ["run", "--execute"]],
     positionalKind: "optional-manifest",
@@ -349,7 +370,10 @@ Boundaries
   Named worksets select from one shared repository graph; they do not copy lifecycle.
   Epic membership uses recursive GitHub sub-issues, not body mentions or checklists.
   start/next --workset recheck the saved scope revision before recording authorization.
-  Validator approval, human approval, and integration are separate gates.
+  Validator approval, human approval, delegated eligibility, and integration are separate evidence.
+  Selected issues: maestro start 57 63 --delegate --preview, then omit --preview to authorize.
+  Workset: maestro start --workset release --delegate. Revoke with maestro revoke <authorization-id>.
+  draft --agent --write saves planning evidence only; it never grants delegation.
   Automatic and manual rework create new evidence; neither grants human approval.
   Worker capacity is repository-wide across runs, manifests, and linked worktrees.
   Rework shares spare slots with safe in-scope backfill; capacity never expands scope.

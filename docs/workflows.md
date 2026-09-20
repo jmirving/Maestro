@@ -112,6 +112,20 @@ maestro status
 
 `reconcile` is a narrow Git conflict-recovery path for an approved, unintegrated implementation. It resolves the current conflict by issue, rebases the retained worktree, delegates conflict-only repair when necessary, and runs a fresh validator. A conflict interrupted inside reconciliation resumes that same persisted reconciliation run. `maestro reconcile --run <id> --issue <issue>` remains available only for deliberate historical selection. Git conflict recovery is not GitHub/manifest reconciliation, and a resolved conflict is not automatically human-approved, completed, or integrated.
 
+## Delegated bounded execution
+
+Supervision remains the default. Opt in for an exact selected-issue scope or a previously drafted workset:
+
+```bash
+maestro start 57 63 --delegate
+maestro start 57 63 --delegate --preview
+maestro start --workset release --delegate --auto-rework
+```
+
+The authorization is persisted separately from validator, human-review, override, and integration evidence. Passing current siblings may integrate while a REWORK sibling remains recorded and non-integrable. A `HUMAN_GATE`, invalid validator, policy/scope drift, stale implementation SHA, changed rebase, missing checks, superseded run, or mismatched repository/session fails closed.
+
+Pause and renew explicitly with `maestro revoke <authorization-id>` and `maestro start 57 63 --delegate --renew <authorization-id>`. Renewal is a new authorization after current resolution, not reactivation of historical evidence. Ordinary `start`, `next`, `approve`, and `draft --agent --write` retain their supervised/planning meanings.
+
 ## Advanced explicit runner
 
 The run-ID-oriented commands exist for low-level control, history, and recovery. Normal examples intentionally avoid run IDs.
@@ -119,12 +133,12 @@ The run-ID-oriented commands exist for low-level control, history, and recovery.
 ```bash
 maestro run                            # dry-run only
 maestro run --execute                  # one worker/validator wave
-maestro run --integrate                # explicit one-wave integration mode
-maestro run --continuous               # existing compatibility loop
+maestro run --integrate --delegate     # explicit delegated one-wave integration
+maestro run --continuous --delegate    # delegated compatibility loop
 maestro report --copy
 maestro integrate-run --run 20260910010101-aaaaaa
 ```
 
-`run --continuous` is the existing explicit execute-and-integrate compatibility path. It is not the supervised persisted-review loop, and its `no-ready-work` stop reason is not proof of broader epic or repository completion. Prefer `start`, `status`, `approve`, `commit`, and `next` for ordinary supervised operation.
+`run --integrate` and `run --continuous` fail closed without `--delegate`; they use the same persisted authorization and integration guard as the ordinary delegated path. A `no-ready-work` stop reason is not proof of broader epic or repository completion. Prefer `start`, `status`, `approve`, `commit`, and `next` for ordinary supervised operation.
 
 `integrate-run` integrates a specifically selected reviewed run but, unlike `commit`, does not advance and commit `.maestro.json` completion. `review` is the low-level command for explicit historical and human-gate dispositions; use the everyday `approve`, `rework`, and `discard` commands when they cover the current state.

@@ -216,6 +216,7 @@ test("rejects worker branches that change the manifest before merging", async ()
     manifestPath: "/target/.maestro.json",
     workers: [{ issue: "13", branch: "worker/13", worktreePath: "/worker", exitCode: 0 }],
     validations: [{ issue: "13", verdict: "approve" }],
+    reviewAuthorizations: [{ issue: "13", review: { disposition: "approve" } }],
     runner
   }), /Worker branch worker\/13 changes the Maestro manifest/);
 
@@ -228,6 +229,7 @@ test("integrates an audited validator override while excluding unreviewed REWORK
   const runner = async (command, args, options) => {
     calls.push({ command, args, cwd: options.cwd });
     if (args[0] === "status") return { code: 0, stdout: "", stderr: "" };
+    if (args[0] === "rev-parse" && options.cwd === "/worker/7") return { code: 0, stdout: "worker-head\n", stderr: "" };
     if (args[0] === "rev-parse") return { code: 0, stdout: `sha-${revision += 1}\n`, stderr: "" };
     return { code: 0, stdout: "", stderr: "" };
   };
@@ -286,6 +288,7 @@ test("integration refresh persists the shared conflict contract before aborting"
     repoPath,
     workers: [{ issue: "19", branch: "worker/19", worktreePath: workerPath, baseSha, exitCode: 0 }],
     validations: [{ issue: "19", verdict: "approve" }],
+    reviewAuthorizations: [{ issue: "19", review: { disposition: "approve" } }],
     sourceRunId: "run-source",
     onConflict: async (conflict) => { persisted = JSON.parse(JSON.stringify(conflict)); }
   }), (error) => error.code === "GIT_CONTENT_CONFLICT");

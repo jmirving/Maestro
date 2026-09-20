@@ -3,11 +3,14 @@ const { effectiveIssueStates } = require("./run-resolver");
 const { ensureFollowUp, isValidValidatorOverride } = require("./reviews");
 const { integrateApproved } = require("./integrator");
 const { captureBaseline } = require("./baseline");
+const { loadAuthorization, assessDelegatedAuthorization } = require("./authorization");
 
-function assessRunItems(state, { effectiveByIssue = null } = {}) {
+function assessRunItems(state, { effectiveByIssue = null, delegatedByIssue = new Map() } = {}) {
   const validationByIssue = new Map((state.validations || []).map((entry) => [String(entry.issue), entry]));
   const integrable = [];
   const rework = [];
+  const gated = [];
+  const failed = [];
   const discarded = [];
   const completed = [];
   const superseded = [];
@@ -40,6 +43,7 @@ function assessRunItems(state, { effectiveByIssue = null } = {}) {
     const review = state.reviews?.[issue];
     const effective = effectiveByIssue?.get(issue);
     const isCurrent = !effective || effective.current?.runId === String(state.runId);
+    const delegated = delegatedByIssue.get(issue);
 
     if (effective?.consistencyConflict) {
       problems.push({
@@ -61,9 +65,27 @@ function assessRunItems(state, { effectiveByIssue = null } = {}) {
     }
 
     if (!review) {
+      if (delegated?.eligible && isCurrent) {
+        integrable.push({ issue, worker, validation, review: null, delegated });
+        continue;
+      }
+      if (state.authorization?.kind === "delegated" && validation?.verdict === "rework") {
+        rework.push({ issue, worker, validation, review: null, delegated: delegated || null });
+        continue;
+      }
+      if (state.authorization?.kind === "delegated" && validation?.verdict === "human_gate") {
+        gated.push({ issue, worker, validation, review: null, delegated: delegated || null });
+        continue;
+      }
+      if (state.authorization?.kind === "delegated") {
+        failed.push({ issue, worker, validation, review: null, delegated: delegated || null });
+        continue;
+      }
       missing.push({
         issue,
-        kind: validation?.verdict === "approve"
+        kind: validation?.verdict === "approve" && state.authorization?.kind === "delegated"
+          ? `valid delegated authorization (${delegated?.reason || "unknown authorization evidence"})`
+          : validation?.verdict === "approve"
           ? "human approval"
           : ["rework", "human_gate"].includes(validation?.verdict) ? "human rework disposition" : "validator result"
       });
@@ -111,7 +133,7 @@ function assessRunItems(state, { effectiveByIssue = null } = {}) {
     else superseded.push({ issue, worker, validation, review });
   }
 
-  return { integrable, rework, discarded, completed, superseded, missing, problems };
+  return { integrable, rework, gated, failed, discarded, completed, superseded, missing, problems };
 }
 
 function classifyRunItems(state, options = {}) {
@@ -120,6 +142,8 @@ function classifyRunItems(state, options = {}) {
   return {
     integrable: assessment.integrable,
     rework: assessment.rework,
+    gated: assessment.gated,
+    failed: assessment.failed,
     discarded: assessment.discarded,
     completed: assessment.completed,
     superseded: assessment.superseded
@@ -137,7 +161,20 @@ async function integrateExistingRun(config, {
   const state = await loadRunState(repoPath, runId);
   const states = await loadPersistedRunStates(repoPath);
   const effectiveByIssue = effectiveIssueStates(config, states);
-  const { integrable, rework, discarded, completed, superseded } = classifyRunItems(state, { effectiveByIssue });
+  let persistedAuthorization = null;
+  if (state.authorization?.id) persistedAuthorization = await loadAuthorization(repoPath, state.authorization.id);
+  const statesById = new Map(states.map((entry) => [String(entry.runId), entry]));
+  const delegatedByIssue = new Map((state.workers || []).map((worker) => {
+    const issue = String(worker.issue);
+    const validation = (state.validations || []).find((entry) => String(entry.issue) === issue);
+    return [issue, assessDelegatedAuthorization({
+      config, repoPath, state, issue, worker, validation,
+      authorization: state.authorization,
+      persistedAuthorization,
+      statesById
+    })];
+  }));
+  const { integrable, rework, gated, failed, discarded, completed, superseded } = classifyRunItems(state, { effectiveByIssue, delegatedByIssue });
 
   const alreadyIntegrated = new Set((state.integration || []).map((entry) => String(entry.issue)));
   const pendingEntries = integrable.filter((entry) => !alreadyIntegrated.has(entry.issue));
@@ -145,7 +182,8 @@ async function integrateExistingRun(config, {
   const pendingValidations = pendingEntries.map((entry) => entry.validation);
   const pendingReviewAuthorizations = pendingEntries.map((entry) => ({
     issue: entry.issue,
-    review: entry.review
+    review: entry.review,
+    delegated: entry.delegated || null
   }));
 
   if (!pendingWorkers.length) {
@@ -155,6 +193,8 @@ async function integrateExistingRun(config, {
       baseline: state.baseline || null,
       integration: state.integration || [],
       rework: rework.map((entry) => ({ issue: entry.issue, verdict: entry.validation?.verdict || "missing" })),
+      gated: gated.map((entry) => ({ issue: entry.issue, verdict: entry.validation?.verdict || "missing" })),
+      failed: failed.map((entry) => ({ issue: entry.issue, verdict: entry.validation?.verdict || "missing" })),
       discarded: discarded.map((entry) => ({ issue: entry.issue, verdict: entry.validation?.verdict || "missing" })),
       completed: completed.map((entry) => ({ issue: entry.issue })),
       superseded: superseded.map((entry) => ({ issue: entry.issue })),
@@ -215,6 +255,8 @@ async function integrateExistingRun(config, {
     integration: state.integration,
     newlyIntegrated,
     rework: rework.map((entry) => ({ issue: entry.issue, verdict: entry.validation?.verdict || "missing" })),
+    gated: gated.map((entry) => ({ issue: entry.issue, verdict: entry.validation?.verdict || "missing" })),
+    failed: failed.map((entry) => ({ issue: entry.issue, verdict: entry.validation?.verdict || "missing" })),
     discarded: discarded.map((entry) => ({ issue: entry.issue, verdict: entry.validation?.verdict || "missing" })),
     completed: completed.map((entry) => ({ issue: entry.issue })),
     superseded: superseded.map((entry) => ({ issue: entry.issue }))

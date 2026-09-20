@@ -2,6 +2,7 @@ const path = require("node:path");
 const { runChecked, runShell } = require("./process");
 const { isValidValidatorOverride } = require("./reviews");
 const { inspectGitOperation, captureConflict, safelyAbortConflict, contentConflictError } = require("./git-conflict");
+const { digest, validationContext } = require("./authorization");
 
 async function ensureClean(repoPath, runner = runChecked) {
   const status = (await runner("git", ["status", "--porcelain"], { cwd: repoPath })).stdout.trim();
@@ -177,19 +178,40 @@ async function integrateApproved({
   if (integration.enabled !== true) throw new Error("Manifest does not enable integration.");
   const defaultBranch = config.defaultBranch || "main";
   const validationByIssue = new Map(validations.map((entry) => [String(entry.issue), entry]));
-  const authorizationByIssue = new Map(reviewAuthorizations.map((entry) => [String(entry.issue), entry.review]));
+  const authorizationByIssue = new Map(reviewAuthorizations.map((entry) => [String(entry.issue), entry]));
   const approved = workers.filter((worker) => {
     if (worker.exitCode !== 0) return false;
     const issue = String(worker.issue);
     const validation = validationByIssue.get(issue);
-    return validation?.verdict === "approve" ||
-      isValidValidatorOverride(authorizationByIssue.get(issue), validation);
+    const authorization = authorizationByIssue.get(issue) || {};
+    const humanApproved = validation?.verdict === "approve" &&
+      ["approve", "approve-with-follow-up"].includes(authorization.review?.disposition);
+    const overridden = isValidValidatorOverride(authorization.review, validation);
+    return humanApproved || overridden || authorization.delegated?.eligible === true;
   });
+  const unauthorized = workers.filter((worker) => {
+    const validation = validationByIssue.get(String(worker.issue));
+    return worker.exitCode === 0 && validation?.verdict === "approve" && !approved.includes(worker);
+  });
+  if (unauthorized.length) {
+    throw new Error(`Integration authorization is missing for ${unauthorized.map((worker) => `issue #${worker.issue}`).join(", ")}. Validator approval alone is not human review or delegated integration authority.`);
+  }
   const results = [];
 
   return withPreservedManifest({ repoPath, manifestPath, runner }, async () => {
     for (const worker of approved) {
       console.error(`[Maestro] integrating #${worker.issue}`);
+      const validation = validationByIssue.get(String(worker.issue));
+      const currentHead = (await runner("git", ["rev-parse", "HEAD"], { cwd: worker.worktreePath })).stdout.trim();
+      if (worker.headSha && currentHead !== worker.headSha) {
+        throw new Error(`Implementation for issue #${worker.issue} changed after validation (${worker.headSha} -> ${currentHead}); fresh independent validation is required.`);
+      }
+      if (validation?.evidence?.implementationSha && validation.evidence.implementationSha !== currentHead) {
+        throw new Error(`Validation for issue #${worker.issue} is stale for the current implementation; fresh independent validation is required.`);
+      }
+      if (validation?.evidence && digest(validation.evidence) !== digest(validationContext(config, worker, worker.issue))) {
+        throw new Error(`Validation for issue #${worker.issue} was produced under a different acceptance, check, capability, or baseline context; fresh independent validation is required.`);
+      }
       const beforeOperation = await inspectGitOperation(worker.worktreePath, { runner });
       if (beforeOperation.operationActive || beforeOperation.conflictedFiles.length) {
         const conflict = await captureConflict({
@@ -207,7 +229,8 @@ async function integrateApproved({
       }
       await runner("git", ["fetch", "origin", defaultBranch], { cwd: worker.worktreePath });
       const targetSha = (await runner("git", ["rev-parse", `origin/${defaultBranch}`], { cwd: worker.worktreePath })).stdout.trim();
-      const sourceSha = (await runner("git", ["rev-parse", "HEAD"], { cwd: worker.worktreePath })).stdout.trim();
+      const sourceSha = currentHead;
+      const beforeRebase = currentHead;
       await runner("git", ["rebase", `origin/${defaultBranch}`], { cwd: worker.worktreePath }).catch(async (error) => {
         const conflict = await captureConflict({
           repository: config.repository,
@@ -230,6 +253,10 @@ async function integrateApproved({
         if (onConflict) await onConflict(conflict);
         throw contentConflictError(conflict, error);
       });
+      const afterRebase = (await runner("git", ["rev-parse", "HEAD"], { cwd: worker.worktreePath })).stdout.trim();
+      if (afterRebase !== beforeRebase) {
+        throw new Error(`Rebase changed issue #${worker.issue} from ${beforeRebase} to ${afterRebase}; delegated or human approval evidence is stale and fresh independent validation is required.`);
+      }
 
       const relativeManifest = repositoryRelativeManifest(repoPath, manifestPath);
       if (relativeManifest) {
@@ -262,10 +289,20 @@ async function integrateApproved({
       }
 
       const integratedSha = (await runner("git", ["rev-parse", "HEAD"], { cwd: repoPath })).stdout.trim();
-      if (integration.closeIssues === true) {
+      const permission = authorizationByIssue.get(String(worker.issue)) || {};
+      const closureAuthorized = permission.review != null || permission.delegated?.allowedActions?.closeIssue === true;
+      if (integration.closeIssues === true && closureAuthorized) {
         await runner("gh", ["issue", "close", String(worker.issue), "--repo", config.repository, "--reason", "completed", "--comment", `Integrated by Maestro at ${integratedSha}.`], { cwd: repoPath });
       }
-      const integrated = { issue: worker.issue, branch: worker.branch, integratedSha, validationResults };
+      const integrated = {
+        issue: worker.issue,
+        branch: worker.branch,
+        integratedSha,
+        validationResults,
+        authorization: permission.delegated?.eligible
+          ? { kind: "delegated", id: permission.delegated.authorizationId }
+          : { kind: permission.review?.disposition === "approve-override" ? "human-override" : "human-review", recordedAt: permission.review?.recordedAt || null }
+      };
       results.push(integrated);
       if (onIntegrated) await onIntegrated(integrated);
       console.error(`[Maestro] integrated #${worker.issue} at ${integratedSha}`);

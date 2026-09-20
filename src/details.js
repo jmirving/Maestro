@@ -83,6 +83,14 @@ function appendEvidence(lines, state, evidence, { heading = null } = {}) {
   lines.push(`Mode: ${valueOrNone(state.mode)}`);
   lines.push(`Run status: ${valueOrNone(state.status)}`);
   if (state.failure) lines.push(`Run failure: ${state.failure}`);
+  if (state.authorization) {
+    lines.push("Delegated authorization:");
+    lines.push(`  Id: ${valueOrNone(state.authorization.id)}`);
+    lines.push(`  Status at run time: ${valueOrNone(state.authorization.status)}`);
+    lines.push(`  Scope: ${(state.authorization.scope?.issueIds || []).map((issue) => `#${issue}`).join(", ") || "none"}`);
+    lines.push(`  Target branch: ${valueOrNone(state.authorization.targetBranch)}`);
+    lines.push(`  Policy version: ${valueOrNone(state.authorization.policyVersion)}`);
+  }
 
   if (!evidence) {
     lines.push("Issue evidence: not recorded in this parent run");
@@ -142,6 +150,11 @@ function appendEvidence(lines, state, evidence, { heading = null } = {}) {
   if (evidence.validation) {
     lines.push(`  Verdict: ${valueOrNone(evidence.validation.verdict)}`);
     lines.push(`  Exit code: ${valueOrNone(evidence.validation.exitCode)}`);
+    if (evidence.validation.evidence) {
+      lines.push(`  Examined implementation: ${valueOrNone(evidence.validation.evidence.implementationSha)}`);
+      lines.push(`  Examined base: ${valueOrNone(evidence.validation.evidence.baseSha)}`);
+      lines.push(`  Acceptance context: ${valueOrNone(evidence.validation.evidence.acceptanceDigest)}`);
+    }
     appendReport(lines, "Report", evidence.validation.report);
   } else {
     lines.push("  (not recorded)");
@@ -170,6 +183,7 @@ function appendEvidence(lines, state, evidence, { heading = null } = {}) {
     lines.push("  State: integrated");
     lines.push(`  Commit: ${valueOrNone(evidence.integration.integratedSha)}`);
     lines.push(`  Branch: ${valueOrNone(evidence.integration.branch)}`);
+    if (evidence.integration.authorization) lines.push(`  Authorization: ${evidence.integration.authorization.kind}${evidence.integration.authorization.id ? ` (${evidence.integration.authorization.id})` : ""}`);
   } else {
     lines.push("  State: not integrated");
   }

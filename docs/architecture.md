@@ -68,4 +68,8 @@ Every concurrent worker must use a separate Git branch and worktree from a recor
 
 ## Initial trust boundary
 
-Milestone 1 stops before automatic default-branch integration. The first product proves configuration parsing, dependency planning, capability classification, and dry-run output.
+Integration eligibility is one shared contract across persisted, historical, delegated, and advanced continuous entrypoints. A current implementation needs valid independent validation plus either matching human review/override or an active scoped delegated authorization. Delegation is durable evidence, never a synthesized review, and is rechecked against repository identity, target branch, scope, lineage, policy version, checks, capabilities, baseline policy, and revocation state immediately before integration.
+
+Validator evidence records the implementation SHA, base SHA, and acceptance/policy digest. Manual edits and any rebase that changes the examined implementation invalidate that evidence and require fresh independent validation.
+
+The original planning milestone stopped before automatic default-branch integration. Current integration remains serialized and is available only through explicit human review/override or the bounded delegated authorization described above.

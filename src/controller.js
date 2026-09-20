@@ -5,9 +5,10 @@ const { captureBaseline } = require("./baseline");
 const { prepareWorktree } = require("./worktrees");
 const { executeWorker } = require("./worker");
 const { validateWorker } = require("./validator");
-const { integrateApproved } = require("./integrator");
 const { saveRunState } = require("./run-store");
 const { commitLifecycleTransition } = require("./lifecycle-coordination");
+const { bindValidation, createDelegatedAuthorization, saveAuthorization } = require("./authorization");
+const { integrateExistingRun } = require("./existing-run");
 
 function newRunId(now = new Date()) {
   const stamp = now.toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
@@ -107,7 +108,8 @@ async function executeRun(config, {
         result.workers.push(worker);
         if (worker.exitCode === 0 && worker.headSha !== worker.baseSha) {
           console.error(`[Maestro] run ${runId}: validating changed branch for #${issue}`);
-          result.validations.push(await validatorExecutor({ repository: config.repository, worker, baseline: result.baseline, runId }));
+          const validation = await validatorExecutor({ repository: config.repository, worker, baseline: result.baseline, runId });
+          result.validations.push(bindValidation(config, worker, validation));
         }
       } catch (error) {
         if (!result.workers.some((worker) => String(worker.issue) === issue)) {
@@ -173,28 +175,31 @@ async function executeRun(config, {
 }
 
 async function executeAndIntegrate(config, options = {}) {
-  const result = await executeRun(config, options);
-  const blockedValidation = result.validations.find((entry) => entry.verdict !== "approve");
-  if (blockedValidation) return { ...result, integration: [], stopped: `validation-${blockedValidation.verdict}` };
-  if (result.workers.some((worker) => worker.exitCode !== 0)) return { ...result, integration: [], stopped: "worker-failure" };
-  const integration = await integrateApproved({
+  if (options.delegate !== true) {
+    throw new Error("Execute-and-integrate requires explicit delegated authorization. Use --delegate; validator approval alone is not integration authority.");
+  }
+  const runId = options.runId || newRunId();
+  const plan = options.plan || computePlan(config, { concurrency: options.concurrency });
+  if (!plan.selected.length) return executeRun(config, { ...options, runId, plan });
+  const authorization = createDelegatedAuthorization({
     config,
     repoPath: options.repoPath,
-    workers: result.workers,
-    validations: result.validations,
-    sourceRunId: result.runId,
-    onConflict: async (conflict) => {
-      result.conflicts = result.conflicts || {};
-      result.conflicts[String(conflict.issue)] = conflict;
-      result.status = "technical-conflict";
-      result.failure = conflict.failure;
-      await (options.stateSaver || saveRunState)(options.repoPath, result.runId, result);
-    }
+    runId,
+    issueIds: plan.selected.map((item) => String(item.id))
   });
-  return { ...result, integration };
+  await saveAuthorization(options.repoPath, authorization);
+  const result = await executeRun(config, { ...options, runId, plan, scope: options.scope || null, reservedState: options.reservedState ? { ...options.reservedState, authorization } : null });
+  if (!options.reservedState) {
+    result.authorization = authorization;
+    await (options.stateSaver || saveRunState)(options.repoPath, runId, result);
+  }
+  if (result.workers.some((worker) => worker.exitCode !== 0)) return { ...result, integration: [], stopped: "worker-failure" };
+  const integrated = await integrateExistingRun(config, { repoPath: options.repoPath, manifestPath: options.manifestPath || null, runId });
+  const blockedValidation = result.validations.find((entry) => entry.verdict !== "approve");
+  return { ...result, integration: integrated.integration || [], ...(blockedValidation ? { stopped: `validation-${blockedValidation.verdict}` } : {}) };
 }
 
-async function continuousRun(config, { repoPath, maxCycles = 20, concurrency } = {}) {
+async function continuousRun(config, { repoPath, maxCycles = 20, concurrency, delegate = false } = {}) {
   const runtime = cloneConfig(config);
   const cycles = [];
   for (let cycle = 0; cycle < maxCycles; cycle += 1) {
@@ -202,7 +207,7 @@ async function continuousRun(config, { repoPath, maxCycles = 20, concurrency } =
     if (!plan.selected.length) {
       return { mode: "continuous", cycles, finalPlan: plan, stopped: plan.humanGates.length ? "human-gate" : "no-ready-work" };
     }
-    const result = await executeAndIntegrate(runtime, { repoPath, concurrency });
+    const result = await executeAndIntegrate(runtime, { repoPath, concurrency, delegate });
     cycles.push(result);
     if (result.stopped) return { mode: "continuous", cycles, finalPlan: computePlan(runtime, { concurrency }), stopped: result.stopped };
     if (!result.integration.length) return { mode: "continuous", cycles, finalPlan: computePlan(runtime, { concurrency }), stopped: "nothing-integrated" };

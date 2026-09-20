@@ -31,8 +31,9 @@ ${group.commands.map((command) => `  ${label(command).padEnd(23)} ${command.summ
 Normal workflow
   draft → plan → start → status/details → rework or approve → commit → next
 
-Workers and validators run in isolated worktrees. Normal start/next never integrate;
-validator approval, human approval, and serialized integration are separate gates.
+Workers and validators run in isolated worktrees. Without explicit --delegate,
+start/next never integrate; validator approval, human approval, delegated eligibility,
+and serialized integration remain distinct evidence.
 Run maestro status between actions for state-derived next commands.
 
 ${sections}
@@ -117,6 +118,9 @@ function parsePositionals(command, positionals) {
     }
   }
   if (kind === "none" && positionals.length) throw cliError(`maestro ${command.name} does not accept positional arguments.`);
+  if (kind === "authorization-id" && (positionals.length !== 1 || !/^delegation-[A-Za-z0-9._-]+$/.test(positionals[0]))) {
+    throw cliError(`maestro ${command.name} requires one valid delegated authorization id.`);
+  }
   if (kind === "optional-manifest") {
     if (positionals.length > 1 || (positionals.length === 1 && !isManifest(positionals[0]))) {
       throw cliError(`maestro ${command.name} accepts at most one manifest path.`);

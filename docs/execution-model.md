@@ -86,6 +86,8 @@ A failing target-repository baseline blocks execution by default. A repository o
 
 ## Stop conditions
 
+Delegated execution additionally stops or excludes an item when authorization is missing or revoked, scope/repository/session identity differs, protected policy changes, validation is invalid or stale, a rebase changes the examined commit, a human gate is present, or the implementation is no longer authoritative. Direct, historical, and continuous integration paths use the same guard.
+
 Continuous execution pauses when:
 
 - a human gate is reached;

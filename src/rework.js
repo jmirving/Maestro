@@ -15,6 +15,7 @@ const { commitLifecycleTransition } = require("./lifecycle-coordination");
 const { selectReady } = require("./planner");
 const { loadExecutionStates, unresolvedWork } = require("./work-state");
 const { boundedText, executeConflictResolver } = require("./conflict-resolver");
+const { bindValidation } = require("./authorization");
 
 const DEFAULT_AUTO_REWORK_LIMIT = 3;
 const DEFAULT_AUTO_REWORK_TIMEOUT_MS = 30 * 60 * 1000;
@@ -596,7 +597,8 @@ async function executeReworkRun(config, {
     workers: [],
     validations: [],
     reviews: {},
-    correction: { attempts }
+    correction: { attempts },
+    ...(source.authorization?.allowedActions?.correct === true ? { authorization: source.authorization } : {})
   };
   if (reserveCapacity && !reservedState) {
     const reservation = await capacityReserver(config, {
@@ -607,7 +609,11 @@ async function executeReworkRun(config, {
       planOptions: { concurrency: concurrencySetting },
       stateLoader: async () => require("./work-state").loadExecutionStates(repoPath),
       stateSaver,
-      extraState: { parentRunId, correction: { attempts } }
+      extraState: {
+        parentRunId,
+        correction: { attempts },
+        ...(source.authorization?.allowedActions?.correct === true ? { authorization: source.authorization } : {})
+      }
     });
     if (!reservation.reserved) {
       const error = new Error(`Cannot reserve worker capacity for rework: ${reservation.reason}.`);
@@ -758,13 +764,13 @@ async function executeReworkRun(config, {
     currentStage = "validator";
     result.validations = await Promise.all(result.workers
       .filter((worker) => worker.exitCode === 0 && worker.headSha !== worker.baseSha)
-      .map((worker) => validatorExecutor({
+      .map(async (worker) => bindValidation(config, worker, await validatorExecutor({
         repository: config.repository,
         worker,
         baseline: result.baseline,
         runId,
         timeoutMs: remainingTime(deadlineAt)
-      })));
+      }))));
 
     const outcomes = candidates.map((worker) => ({
       issue: String(worker.issue),

@@ -5,6 +5,7 @@ const { buildRecommendations, formatRecommendations } = require("./recommendatio
 const { isValidValidatorOverride } = require("./reviews");
 const { capacitySnapshot } = require("./scheduler");
 const { formatConcurrency } = require("./concurrency");
+const { loadAuthorization, assessDelegatedAuthorization } = require("./authorization");
 
 function numericSort(left, right) {
   return String(left).localeCompare(String(right), undefined, { numeric: true });
@@ -41,7 +42,7 @@ function discardedManifestState(issue, manifest, plan, selected) {
   return `implementation discarded; manifest state ${manifest?.status || "unknown"} is not eligible for a fresh run`;
 }
 
-function describeIssue(config, issue, evidence, plan, effective = null) {
+function describeIssue(config, issue, evidence, plan, effective = null, delegated = null) {
   const manifest = config.work?.[issue] || null;
   const deferred = plan.deferred?.find((entry) => String(entry.id) === issue);
   const selected = plan.selected?.some((entry) => String(entry.id) === issue);
@@ -81,6 +82,9 @@ function describeIssue(config, issue, evidence, plan, effective = null) {
     state = `automatic rework exhausted after ${attempts} of ${limit} correction attempts; human review required`;
     integrationState = "not eligible; inspect the correction lineage and decide whether to rework manually, override, or discard";
     action = `maestro details ${issue}`;
+  } else if (delegated?.eligible && validation?.verdict === "approve") {
+    state = "validator approved, eligible under delegated policy";
+    integrationState = `eligible under delegated authorization ${delegated.authorizationId}`;
   } else if (review && validation?.verdict === "approve") {
     state = "human approved, ready to integrate";
     integrationState = "eligible when every item in its run has a human disposition";
@@ -160,7 +164,7 @@ function describeIssue(config, issue, evidence, plan, effective = null) {
   };
 }
 
-function runReadiness(states, currentByIssue, effectiveByIssue = null) {
+function runReadiness(states, currentByIssue, effectiveByIssue = null, delegatedByRun = new Map()) {
   const latestRunId = [...states].map((state) => String(state.runId)).sort().at(-1) || null;
   const summaries = [];
 
@@ -168,9 +172,9 @@ function runReadiness(states, currentByIssue, effectiveByIssue = null) {
     const issues = [...new Set((state.workers || []).map((worker) => String(worker.issue)))];
     if (!issues.length || !issues.some((issue) => currentByIssue.get(issue)?.runId === String(state.runId))) continue;
     if (["running", "failed"].includes(state.status)) continue;
-    const assessment = assessRunItems(state, { effectiveByIssue });
+    const assessment = assessRunItems(state, { effectiveByIssue, delegatedByIssue: delegatedByRun.get(String(state.runId)) || new Map() });
     const integrate = assessment.integrable.map((entry) => entry.issue);
-    const skip = assessment.rework.map((entry) => entry.issue);
+    const skip = [...assessment.rework, ...assessment.gated, ...assessment.failed].map((entry) => entry.issue);
     const discard = assessment.discarded.map((entry) => entry.issue);
     const missing = assessment.missing;
     const blocked = assessment.problems
@@ -204,6 +208,18 @@ async function statusSnapshot(config, repoPath, requestedIssues = [], {
   const current = states.length ? currentIssueEvidenceFromStates(states) : [];
   const currentByIssue = new Map(current.map((entry) => [entry.issue, entry]));
   const effectiveByIssue = effectiveIssueStates(config, states);
+  const statesById = new Map(states.map((state) => [String(state.runId), state]));
+  const delegatedByRun = new Map();
+  for (const state of states) {
+    if (!state.authorization?.id) continue;
+    let persisted = null;
+    try { persisted = await loadAuthorization(repoPath, state.authorization.id); } catch {}
+    delegatedByRun.set(String(state.runId), new Map((state.workers || []).map((worker) => {
+      const issue = String(worker.issue);
+      const validation = (state.validations || []).find((entry) => String(entry.issue) === issue);
+      return [issue, assessDelegatedAuthorization({ config, repoPath, state, issue, worker, validation, authorization: state.authorization, persistedAuthorization: persisted, statesById })];
+    })));
+  }
   const allIssues = [...effectiveByIssue.keys()].sort(numericSort);
   const issueIds = requested.length ? requested : allIssues;
   const missing = requested.filter((issue) => !allIssues.includes(issue));
@@ -212,9 +228,10 @@ async function statusSnapshot(config, repoPath, requestedIssues = [], {
   const items = issueIds.map((issue) => {
     const resolved = currentByIssue.get(issue);
     const evidence = resolved ? { ...resolved.evidence, runId: resolved.runId } : null;
-    return describeIssue(config, issue, evidence, plan, effectiveByIssue.get(issue));
+    const delegated = resolved ? delegatedByRun.get(String(resolved.runId))?.get(issue) : null;
+    return describeIssue(config, issue, evidence, plan, effectiveByIssue.get(issue), delegated);
   });
-  const readiness = runReadiness(states, currentByIssue, effectiveByIssue);
+  const readiness = runReadiness(states, currentByIssue, effectiveByIssue, delegatedByRun);
   return {
     repository: config.repository,
     concurrency: {

@@ -119,6 +119,9 @@ test("aliases and important documented flags are accepted by the shared registry
   assert.equal(parseInvocation(["draft", "--json", "--agent", "57"]).options["--json"], true);
   assert.equal(parseInvocation(["draft", "--epic", "42", "--name", "release", "--agent"]).options["--epic"], "42");
   assert.equal(parseInvocation(["start", "--workset", "release"]).options["--workset"], "release");
+  assert.equal(parseInvocation(["start", "57", "63", "--delegate", "--preview"]).options["--delegate"], true);
+  assert.equal(parseInvocation(["next", "--workset", "release", "--delegate", "--renew", "delegation-old"]).options["--renew"], "delegation-old");
+  assert.equal(parseInvocation(["revoke", "delegation-run-deadbeef"]).command, "revoke");
   assert.throws(() => parseInvocation(["draft", "57", "--epic", "42"]), /either issue numbers or --epic/);
   assert.throws(() => parseInvocation(["draft", "--epic", "42", "--workset", "release"]), /cannot combine/);
   assert.throws(() => parseInvocation(["start", "--workset", "release", "--rerun"]), /cannot combine/);
