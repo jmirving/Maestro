@@ -559,7 +559,9 @@ async function executeReworkRun(config, {
     }
     reservedState = reservation.state;
   }
-  const result = reservedState ? { ...reservedState, parentRunId, correction: { attempts } } : initialState;
+  const result = reservedState
+    ? Object.assign(reservedState, { parentRunId, correction: { attempts } })
+    : initialState;
   if (!reservedState) await stateSaver(repoPath, runId, result);
 
   async function persistTerminalState() {

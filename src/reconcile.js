@@ -154,8 +154,7 @@ async function executeReconcileRun(config, {
     .filter((worker) => worker.exitCode === 0 && worker.headSha !== worker.baseSha)
     .map((worker) => validatorExecutor({ repository: config.repository, worker, baseline, runId })));
 
-  const result = {
-    ...(reservation?.state || {}),
+  const result = Object.assign(reservation?.state || {}, {
     runId,
     parentRunId: sourceRunId,
     mode: "reconcile",
@@ -167,7 +166,7 @@ async function executeReconcileRun(config, {
     validations,
     reviews: {},
     status: "awaiting-review"
-  };
+  });
   if (stateSaver === saveRunState) {
     await commitLifecycleTransition({
       repoPath,
