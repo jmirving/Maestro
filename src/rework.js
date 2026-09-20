@@ -1,3 +1,5 @@
+const fs = require("node:fs/promises");
+const path = require("node:path");
 const { loadRunState, saveRunState } = require("./run-store");
 const { resolveConcurrency } = require("./concurrency");
 const { runPreflights } = require("./preflight");
@@ -136,6 +138,90 @@ async function captureOptionalGitOutput(runner, args, options) {
   }
 }
 
+async function gitPathState(runner, worktreePath, relativePath, options) {
+  const gitPath = await captureOptionalGitOutput(runner, ["rev-parse", "--git-path", relativePath], options);
+  if (!gitPath) return { exists: false, value: null };
+  const resolvedPath = path.isAbsolute(gitPath) ? gitPath : path.resolve(worktreePath, gitPath);
+  try {
+    const stat = await fs.stat(resolvedPath);
+    if (stat.isDirectory()) return { exists: true, value: null };
+    return { exists: true, value: (await fs.readFile(resolvedPath, "utf8")).trim() || null };
+  } catch {
+    return { exists: false, value: null };
+  }
+}
+
+async function captureRebaseOperationState(worker, conflict, { runner, deadlineAt }) {
+  const options = { cwd: worker.worktreePath, timeoutMs: remainingTime(deadlineAt) };
+  const mergeState = await gitPathState(runner, worker.worktreePath, "rebase-merge", options);
+  const applyState = mergeState.exists
+    ? { exists: false }
+    : await gitPathState(runner, worker.worktreePath, "rebase-apply", options);
+  const kind = mergeState.exists ? "merge" : applyState.exists ? "apply" : null;
+  const statePath = kind ? `rebase-${kind}` : null;
+  const readState = async (name) => statePath
+    ? (await gitPathState(runner, worker.worktreePath, `${statePath}/${name}`, options)).value
+    : null;
+  const gitStatus = boundedText(await captureOptionalGitOutput(runner, ["status", "--porcelain=v2", "--branch"], options), 12000);
+  const conflictedFiles = (await captureOptionalGitOutput(runner, ["diff", "--name-only", "--diff-filter=U"], options) || "")
+    .split("\n").map((entry) => entry.trim()).filter(Boolean);
+  let targetAncestor = false;
+  try {
+    await runner("git", ["merge-base", "--is-ancestor", conflict.targetSha, "HEAD"], options);
+    targetAncestor = true;
+  } catch {}
+  return {
+    active: Boolean(kind),
+    kind,
+    rebaseHeadSha: await captureOptionalGitOutput(runner, ["rev-parse", "-q", "--verify", "REBASE_HEAD"], options),
+    originalHeadSha: await readState("orig-head"),
+    ontoSha: await readState("onto"),
+    headName: await readState("head-name"),
+    currentHeadSha: await captureOptionalGitOutput(runner, ["rev-parse", "HEAD"], options),
+    branch: await captureOptionalGitOutput(runner, ["branch", "--show-current"], options),
+    conflictedFiles,
+    gitStatus,
+    worktreeClean: gitStatus !== null && !gitStatus.split("\n").some((line) => line && !line.startsWith("#")),
+    targetAncestor,
+    reflogSubject: await captureOptionalGitOutput(runner, ["reflog", "-1", "--format=%gs"], options)
+  };
+}
+
+function assessExpectedRebase(conflict, actual) {
+  const expectedHeadName = conflict.branch ? `refs/heads/${conflict.branch}` : null;
+  if (actual.active) {
+    const missing = [];
+    if (!actual.rebaseHeadSha) missing.push("REBASE_HEAD");
+    if (!actual.originalHeadSha) missing.push("original head");
+    if (!actual.ontoSha) missing.push("target");
+    if (expectedHeadName && !actual.headName) missing.push("branch");
+    if (missing.length) {
+      return { state: "unrecoverable", recoverable: false, expectedRebasePresent: false, reason: `active rebase is missing ${missing.join(", ")} metadata` };
+    }
+    const mismatches = [];
+    if (actual.originalHeadSha !== conflict.sourceSha) mismatches.push("original head");
+    if (actual.ontoSha !== conflict.targetSha) mismatches.push("target");
+    if (expectedHeadName && actual.headName !== expectedHeadName) mismatches.push("branch");
+    return mismatches.length
+      ? { state: "replaced", recoverable: false, expectedRebasePresent: false, reason: `active rebase has a different ${mismatches.join(", ")}` }
+      : { state: "active", recoverable: true, expectedRebasePresent: true, reason: null };
+  }
+  if (actual.targetAncestor && actual.worktreeClean && (!conflict.branch || actual.branch === conflict.branch)) {
+    return { state: "completed-unverified", recoverable: false, expectedRebasePresent: false, reason: "the expected rebase is no longer active and its result was not accepted" };
+  }
+  if (/^rebase \(abort\):/.test(actual.reflogSubject || "") ||
+      (actual.currentHeadSha === conflict.sourceSha && (!conflict.branch || actual.branch === conflict.branch))) {
+    return { state: "aborted", recoverable: false, expectedRebasePresent: false, reason: "the resolver aborted or reset away the expected rebase" };
+  }
+  if (!actual.branch) {
+    return { state: "detached", recoverable: false, expectedRebasePresent: false, reason: "the expected rebase is gone and HEAD is detached" };
+  }
+  if (conflict.branch && actual.branch !== conflict.branch) {
+    return { state: "branch-changed", recoverable: false, expectedRebasePresent: false, reason: `the expected rebase is gone and branch changed to ${actual.branch}` };
+  }
+  return { state: "reset-or-replaced", recoverable: false, expectedRebasePresent: false, reason: "the resolver reset, replaced, or otherwise destroyed the expected rebase" };
+}
+
 function resolutionFailure(worker, conflict, resolution, sourceRunId) {
   const continuationAction = sourceRunId
     ? `maestro rework ${worker.issue} --run ${sourceRunId}`
@@ -144,10 +230,13 @@ function resolutionFailure(worker, conflict, resolution, sourceRunId) {
   const reason = semantic
     ? "reported a semantic ambiguity that requires a human decision"
     : "could not safely complete and verify the active rebase";
+  const active = conflict.operationState === "active";
+  const recovery = active
+    ? `The expected rebase remains active in ${worker.worktreePath}. Supported retry after resolving it: \`${continuationAction}\`.`
+    : `The expected rebase is no longer safely active in ${worker.worktreePath} (${conflict.operationState}). Do not assume it can be continued; inspect preserved evidence before recovering or retrying.`;
   const error = new Error(
     `Rework refresh for issue #${worker.issue} encountered a content conflict and its bounded resolver ${reason}. ` +
-    `The rebase and implementation remain in ${worker.worktreePath}. Inspect \`maestro details ${worker.issue}\` and the worktree before continuing. ` +
-    `Supported retry after resolving the active rebase: \`${continuationAction}\`.`
+    `${recovery} Inspect \`maestro details ${worker.issue}\` and the worktree before continuing.`
   );
   error.code = "REWORK_REFRESH_CONFLICT";
   error.outcome = "human-required";
@@ -241,8 +330,8 @@ async function refreshWorker(worker, {
       targetBranch: defaultBranch,
       targetRef,
       targetSha,
-      rebaseHeadSha: await captureOptionalGitOutput(runner, ["rev-parse", "-q", "--verify", "REBASE_HEAD"], options),
-      gitStatus: boundedText(await captureOptionalGitOutput(runner, ["status", "--porcelain=v2", "--branch"], options), 12000),
+      rebaseHeadSha: null,
+      gitStatus: null,
       retainedDiff: boundedText(retainedDiff),
       targetDiff: boundedText(targetDiff),
       continuationAction,
@@ -250,6 +339,10 @@ async function refreshWorker(worker, {
       stderr: error.result?.stderr?.trim() || null,
       resolution: { status: "pending" }
     };
+    const beforeResolver = await captureRebaseOperationState(worker, conflict, { runner, deadlineAt });
+    conflict.rebaseHeadSha = beforeResolver.rebaseHeadSha;
+    conflict.gitStatus = beforeResolver.gitStatus;
+    conflict.operationEvidence = { beforeResolver };
     await onConflictEvidence(conflict);
     let resolution;
     try {
@@ -293,7 +386,11 @@ async function refreshWorker(worker, {
         conflict.resolution.verification = { verified: false, failure: verificationError.message };
       }
     }
-    conflict.operationState = "active";
+    const afterResolver = await captureRebaseOperationState(worker, conflict, { runner, deadlineAt });
+    const operationVerification = assessExpectedRebase(conflict, afterResolver);
+    conflict.operationEvidence.afterResolver = afterResolver;
+    conflict.operationEvidence.verification = operationVerification;
+    conflict.operationState = operationVerification.state;
     await onConflictEvidence(conflict);
     throw resolutionFailure(worker, conflict, conflict.resolution, sourceRunId);
   });

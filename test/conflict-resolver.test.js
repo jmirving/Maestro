@@ -5,7 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { executeReworkRun, refreshWorker } = require("../src/rework");
-const { buildConflictResolverPrompt, parseResolution } = require("../src/conflict-resolver");
+const { buildConflictResolverPrompt, parseResolution, executeConflictResolver } = require("../src/conflict-resolver");
 const { saveRunState, loadRunState, loadPersistedRunStates } = require("../src/run-store");
 const { loadIssueDetails, formatDetails } = require("../src/details");
 
@@ -100,6 +100,31 @@ test("bounded resolver prompt carries intent and prohibits lifecycle authority",
   assert.equal(parseResolution("RESOLUTION: RESOLVED\nDone."), "resolved");
   assert.equal(parseResolution("RESOLUTION: HUMAN_REQUIRED\nAmbiguous."), "human-required");
   assert.equal(parseResolution("looks good"), "invalid");
+});
+
+test("live conflict resolver uses the workspace-write sandbox", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-conflict-sandbox-"));
+  const worktreePath = path.join(root, "worktree");
+  await fs.mkdir(worktreePath);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  let invokedArgs;
+  await executeConflictResolver({
+    repository: "example/repo",
+    issue: "35",
+    conflict: { conflictedFiles: ["shared.txt"], targetRef: "origin/main" },
+    worktreePath,
+    runId: "sandbox-test",
+    runner: async (_command, args) => {
+      invokedArgs = args;
+      return { code: 1, stderr: "fault injection" };
+    }
+  });
+  assert.deepEqual(invokedArgs.slice(0, 3), ["exec", "--sandbox", "workspace-write"]);
+  assert.equal(invokedArgs.includes("--approve-for-me"), true);
+  assert.equal(invokedArgs.includes("--ignore-user-config"), true);
+  assert.equal(invokedArgs.includes("--ignore-rules"), true);
+  assert.equal(invokedArgs.includes("--ephemeral"), true);
+  assert.equal(invokedArgs.includes("danger-full-access"), false);
 });
 
 test("textual conflict resolves, verifies target ancestry, and continues the original correction once", async (t) => {
@@ -216,8 +241,65 @@ test("resolver failure leaves the active rebase and captured evidence recoverabl
   assert.equal(attempt.conflict.sourceSha, fixture.sourceSha);
   assert.equal(attempt.conflict.targetSha, fixture.targetSha);
   assert.equal(attempt.conflict.resolution.status, "failed");
+  assert.equal(attempt.conflict.operationEvidence.beforeResolver.active, true);
+  assert.equal(attempt.conflict.operationEvidence.verification.expectedRebasePresent, true);
+  assert.equal(attempt.conflict.operationEvidence.verification.recoverable, true);
   assert.equal(git(fixture.repoPath, "rev-parse", "-q", "--verify", "REBASE_HEAD"), fixture.sourceSha);
   assert.match(git(fixture.repoPath, "status", "--porcelain"), /UU shared\.txt/);
+});
+
+test("hostile resolver abort is detected and never persisted as an active recoverable rebase", async (t) => {
+  const fixture = await conflictFixture(t);
+  const runId = "20260910040404-dddddd";
+  let workerCalls = 0;
+  await assert.rejects(executeReworkRun({
+    repository: "example/repo",
+    defaultBranch: "main",
+    work: { "35": { status: "ready" } }
+  }, {
+    repoPath: fixture.repoPath,
+    sourceRunId: fixture.sourceRunId,
+    runId,
+    conflictResolver: async ({ worktreePath }) => {
+      git(worktreePath, "rebase", "--abort");
+      return { status: "failed", exitCode: 1, report: "RESOLUTION: FAILED\nAborted unexpectedly." };
+    },
+    workerExecutor: async () => {
+      workerCalls += 1;
+      assert.fail("correction worker must not run");
+    }
+  }), (error) => {
+    assert.equal(error.code, "REWORK_REFRESH_CONFLICT");
+    assert.equal(error.outcome, "human-required");
+    assert.match(error.message, /no longer safely active.*aborted/s);
+    return true;
+  });
+
+  const state = await loadRunState(fixture.repoPath, runId);
+  const attempt = state.correction.attempts["35"];
+  assert.equal(workerCalls, 0);
+  assert.equal(attempt.number, 1);
+  assert.equal(attempt.outcome, "human-required");
+  assert.equal(attempt.conflict.operationState, "aborted");
+  assert.notEqual(attempt.conflict.operationState, "active");
+  assert.equal(attempt.conflict.operationEvidence.beforeResolver.active, true);
+  assert.equal(attempt.conflict.operationEvidence.beforeResolver.rebaseHeadSha, fixture.sourceSha);
+  assert.equal(attempt.conflict.operationEvidence.beforeResolver.originalHeadSha, fixture.sourceSha);
+  assert.equal(attempt.conflict.operationEvidence.beforeResolver.ontoSha, fixture.targetSha);
+  assert.equal(attempt.conflict.operationEvidence.beforeResolver.headName, `refs/heads/${fixture.worker.branch}`);
+  assert.equal(attempt.conflict.operationEvidence.afterResolver.active, false);
+  assert.equal(attempt.conflict.operationEvidence.verification.expectedRebasePresent, false);
+  assert.equal(attempt.conflict.operationEvidence.verification.recoverable, false);
+  assert.deepEqual(attempt.conflict.conflictedFiles, [fixture.filename]);
+  assert.equal(attempt.conflict.sourceSha, fixture.sourceSha);
+  assert.equal(attempt.conflict.targetSha, fixture.targetSha);
+  assert.equal((await loadPersistedRunStates(fixture.repoPath)).length, 2, "resolver failure must not create another correction generation");
+  assert.equal(git(fixture.repoPath, "branch", "--show-current"), fixture.worker.branch);
+  assert.equal(git(fixture.repoPath, "rev-parse", "HEAD"), fixture.sourceSha);
+  const details = formatDetails(await loadIssueDetails(fixture.repoPath, ["35"]));
+  assert.match(details, /Operation state: aborted/);
+  assert.match(details, /Expected rebase present: no/);
+  assert.match(details, /Rebase recoverable: no/);
 });
 
 test("non-content Git failures never invoke the resolver", async () => {

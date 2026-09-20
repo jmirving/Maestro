@@ -81,7 +81,16 @@ async function executeConflictResolver({
     conflict
   });
   console.error(`[Maestro] conflict resolver #${issue} starting`);
-  const result = await runner(codexCommand, ["exec", "--sandbox", "danger-full-access", "--output-last-message", reportPath, "-"], {
+  const result = await runner(codexCommand, [
+    "exec",
+    "--sandbox", "workspace-write",
+    "--approve-for-me",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--ephemeral",
+    "--output-last-message", reportPath,
+    "-"
+  ], {
     cwd: worktreePath,
     input: `${prompt}\n`,
     stream: true,

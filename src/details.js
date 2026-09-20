@@ -120,6 +120,12 @@ function appendEvidence(lines, state, evidence, { heading = null } = {}) {
       lines.push(`    Target ref: ${valueOrNone(conflict.targetRef)}`);
       lines.push(`    Target SHA: ${valueOrNone(conflict.targetSha)}`);
       lines.push(`    Continuation action: ${valueOrNone(conflict.continuationAction)}`);
+      if (conflict.operationEvidence?.verification) {
+        const operation = conflict.operationEvidence.verification;
+        lines.push(`    Expected rebase present: ${operation.expectedRebasePresent === true ? "yes" : "no"}`);
+        lines.push(`    Rebase recoverable: ${operation.recoverable === true ? "yes" : "no"}`);
+        if (operation.reason) lines.push(`    Operation verification: ${operation.reason}`);
+      }
       if (conflict.resolution) {
         lines.push(`    Resolver status: ${valueOrNone(conflict.resolution.status)}`);
         if (conflict.resolution.verification) {
