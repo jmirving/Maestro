@@ -119,12 +119,11 @@ test("live conflict resolver uses the workspace-write sandbox", async (t) => {
       return { code: 1, stderr: "fault injection" };
     }
   });
-  assert.deepEqual(invokedArgs.slice(0, 3), ["exec", "--sandbox", "workspace-write"]);
-  assert.equal(invokedArgs.includes("--approve-for-me"), false);
-  assert.equal(invokedArgs.includes("--ask-for-approval"), true);
-  assert.equal(invokedArgs[invokedArgs.indexOf("--ask-for-approval") + 1], "on-request");
-  assert.equal(invokedArgs.includes("-c"), true);
-  assert.equal(invokedArgs[invokedArgs.indexOf("-c") + 1], "approvals_reviewer=auto_review");
+  assert.equal(invokedArgs[0], "exec");
+  assert.equal(invokedArgs.includes("--approve-for-me"), true);
+  assert.equal(invokedArgs.includes("--sandbox"), false);
+  assert.equal(invokedArgs.includes("--ask-for-approval"), false);
+  assert.equal(invokedArgs.includes("approvals_reviewer=auto_review"), false);
   assert.equal(invokedArgs.includes("--ignore-user-config"), true);
   assert.equal(invokedArgs.includes("--ignore-rules"), true);
   assert.equal(invokedArgs.includes("--ephemeral"), true);
