@@ -84,7 +84,8 @@ async function executeConflictResolver({
   const result = await runner(codexCommand, [
     "exec",
     "--sandbox", "workspace-write",
-    "--approve-for-me",
+    "--ask-for-approval", "on-request",
+    "-c", "approvals_reviewer=auto_review",
     "--ignore-user-config",
     "--ignore-rules",
     "--ephemeral",

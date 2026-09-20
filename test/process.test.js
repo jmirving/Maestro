@@ -61,3 +61,16 @@ test("worker and validator adapters pass the caller's remaining timeout to their
   assert.equal(worker.timedOut, true);
   assert.equal(validation.timedOut, true);
 });
+
+
+test("runProcess tolerates a child exiting before consuming piped stdin", async () => {
+  const result = await runProcess(process.execPath, [
+    "-e",
+    "process.stdin.destroy(); process.exit(2)"
+  ], {
+    input: "x".repeat(1024 * 1024)
+  });
+
+  assert.equal(result.code, 2);
+  assert.equal(result.timedOut, false);
+});

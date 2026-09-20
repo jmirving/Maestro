@@ -59,7 +59,16 @@ function runProcess(command, args = [], options = {}) {
         resolve({ code: code ?? 1, stdout, stderr, timedOut, outputLimitExceeded });
       }
     });
-    if (options.input != null) {
+    if (options.input != null && child.stdin) {
+      child.stdin.on("error", (error) => {
+        if (error.code === "EPIPE" || error.code === "ERR_STREAM_DESTROYED") return;
+        if (timeout) clearTimeout(timeout);
+        if (!settled) {
+          settled = true;
+          child.kill("SIGKILL");
+          reject(error);
+        }
+      });
       child.stdin.end(options.input);
     }
   });
