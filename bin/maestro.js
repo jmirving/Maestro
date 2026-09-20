@@ -564,25 +564,80 @@ async function main() {
     }
     const plan = reservation.plan || { ...candidatePlan, selected: [] };
     const authorizedIssueIds = scope?.issueIds?.map(String) || Object.keys(config.work || {});
-    const lifecycleBackfill = [];
-    const backfillOnOriginalSettlement = !args.includes("--rerun") && !args.includes("--auto-rework")
-      ? async () => {
-          const outcomes = await runLifecycleBackfill(config, {
-            repoPath,
-            authorizedIssueIds,
-            planOptions,
-            verifySelection: (issueIds) => verifyExecutionSelection(config, repoPath, issueIds),
-            runIdFactory: newRunId,
-            extraState: authorization ? { scope: authorization } : {},
-            executeReserved: ({ runId, reservation: backfillReservation }) => executeRun(config, {
+    const lifecycleOutcomes = [];
+    const automaticRework = args.includes("--auto-rework");
+    const automaticTimeoutMs = 30 * 60 * 1000;
+    const automaticDeadlineAt = Date.now() + automaticTimeoutMs;
+    const resumableCorrections = automaticRework
+      ? candidatePlan.deferred
+        ?.filter((item) => item.lifecycle?.state === "awaiting-rework")
+        .map((item) => ({ issue: String(item.id) })) || []
+      : [];
+
+    const correctionTasksForResult = (settledResult, onlyIssue = null) => {
+      const reviewed = settledResult.reviews || {};
+      return (settledResult.validations || [])
+        .filter((entry) => (
+          entry.verdict === "rework" &&
+          !reviewed[String(entry.issue)] &&
+          (!onlyIssue || String(entry.issue) === String(onlyIssue))
+        ))
+        .map((entry) => ({ issue: String(entry.issue) }));
+    };
+
+    const driveLifecycle = async (initialTasks = []) => {
+      const outcomes = await runLifecycleBackfill(config, {
+        repoPath,
+        authorizedIssueIds,
+        planOptions,
+        initialTasks,
+        ...(automaticRework ? {
+          reserveInitial: async (task) => {
+            const [resolved] = await resolveCurrentIssueStates(repoPath, [task.issue]);
+            const runId = newRunId();
+            const correctionReservation = await reserveExplicitWork(config, {
               repoPath,
               runId,
-              plan: backfillReservation.plan,
-              scope: authorization,
-              reservedState: backfillReservation.state
-            })
-          });
-          lifecycleBackfill.push(...outcomes);
+              mode: "rework",
+              items: [{ id: task.issue, ...(config.work?.[task.issue] || {}), mode: "rework" }]
+            });
+            return { ...correctionReservation, runId, resolved };
+          },
+          executeInitial: (task, prepared) => autoRework(config, {
+            repoPath,
+            issueIds: [task.issue],
+            capacity: 1,
+            timeoutMs: Math.max(1, automaticDeadlineAt - Date.now()),
+            initialReservations: {
+              [task.issue]: { runId: prepared.runId, reservedState: prepared.state, resolved: prepared.resolved }
+            },
+            reworkOptions: { reserveCapacity: true }
+          }),
+          tasksAfterOutcome: (settledResult) => correctionTasksForResult(settledResult)
+        } : {}),
+        verifySelection: (issueIds) => verifyExecutionSelection(config, repoPath, issueIds),
+        runIdFactory: newRunId,
+        extraState: authorization ? { scope: authorization } : {},
+        executeReserved: ({ runId, reservation: backfillReservation }) => executeRun(config, {
+          repoPath,
+          runId,
+          plan: backfillReservation.plan,
+          scope: authorization,
+          reservedState: backfillReservation.state
+        })
+      });
+      lifecycleOutcomes.push(...outcomes);
+    };
+
+    const backfillOnOriginalSettlement = !args.includes("--rerun")
+      ? async (settlement) => {
+          const initialTasks = automaticRework
+            ? [
+                ...resumableCorrections.splice(0),
+                ...correctionTasksForResult(settlement.result, settlement.issue)
+              ]
+            : [];
+          await driveLifecycle(initialTasks);
         }
       : undefined;
     const result = await executeRun(config, {
@@ -594,62 +649,18 @@ async function main() {
       ...(reservation.reserved ? { reservedState: reservation.state } : {})
     });
     let automatic = null;
-    let backfill = lifecycleBackfill;
-    if (args.includes("--auto-rework")) {
-      const newlyExecuted = result.plan?.selected?.map((item) => String(item.id)) || [];
-      const resumable = plan.deferred
-        ?.filter((item) => item.lifecycle?.state === "awaiting-rework")
-        .map((item) => String(item.id)) || [];
-      const currentStates = await resolveCurrentIssueStates(repoPath, [...new Set([...newlyExecuted, ...resumable])]);
-      const correctionIssues = currentStates
-        .filter((entry) => entry.evidence?.verdict === "rework" && !entry.evidence?.review)
-        .map((entry) => entry.issue);
-      const outcomes = await runLifecycleBackfill(config, {
-        repoPath,
-        authorizedIssueIds,
-        planOptions,
-        initialTasks: correctionIssues.map((issue) => ({ issue: String(issue) })),
-        reserveInitial: async (task) => {
-          const [resolved] = await resolveCurrentIssueStates(repoPath, [task.issue]);
-          const runId = newRunId();
-          const reservation = await reserveExplicitWork(config, {
-            repoPath,
-            runId,
-            mode: "rework",
-            items: [{ id: task.issue, ...(config.work?.[task.issue] || {}), mode: "rework" }]
-          });
-          return { ...reservation, runId, resolved };
-        },
-        executeInitial: (task, prepared) => autoRework(config, {
-          repoPath,
-          issueIds: [task.issue],
-          capacity: 1,
-          initialReservations: {
-            [task.issue]: { runId: prepared.runId, reservedState: prepared.state, resolved: prepared.resolved }
-          },
-          reworkOptions: { reserveCapacity: true }
-        }),
-        verifySelection: (issueIds) => verifyExecutionSelection(config, repoPath, issueIds),
-        runIdFactory: newRunId,
-        extraState: authorization ? { scope: authorization } : {},
-        executeReserved: ({ runId, reservation }) => executeRun(config, {
-          repoPath,
-          runId,
-          plan: reservation.plan,
-          scope: authorization,
-          reservedState: reservation.state
-        })
-      });
-      const corrections = outcomes.filter((entry) => entry?.mode === "auto-rework");
-      backfill = outcomes.filter((entry) => entry?.mode !== "auto-rework");
+    if (automaticRework) {
+      await driveLifecycle(resumableCorrections.splice(0));
+      const corrections = lifecycleOutcomes.filter((entry) => entry?.mode === "auto-rework");
       automatic = {
         mode: "auto-rework",
         retryLimit: corrections[0]?.retryLimit || 3,
         capacity: config.defaultConcurrency || 2,
-        timeoutMs: corrections[0]?.timeoutMs || 30 * 60 * 1000,
+        timeoutMs: automaticTimeoutMs,
         issues: corrections.flatMap((entry) => entry.issues || [])
       };
     }
+    const backfill = lifecycleOutcomes.filter((entry) => entry?.mode !== "auto-rework");
     const output = automatic
       ? { ...result, autoRework: automatic, backfill }
       : backfill.length ? { ...result, backfill } : result;

@@ -102,3 +102,94 @@ fs.writeFileSync(reportPath, "Result: complete\\n");
   assert.ok(events.indexOf("start 3") > events.indexOf("finish 1"), events.join(", "));
   assert.ok(events.indexOf("start 3") < events.indexOf("finish 2"), events.join(", "));
 });
+
+test("start --auto-rework begins a fast REWORK correction before a slow original sibling finishes", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-auto-rework-backfill-"));
+  const repoPath = path.join(root, "target");
+  const originPath = path.join(root, "origin.git");
+  const binPath = path.join(root, "bin");
+  const eventPath = path.join(root, "events.log");
+  await fs.mkdir(repoPath);
+  await fs.mkdir(binPath);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  run("git", ["init", "-q", "-b", "main"], { cwd: repoPath });
+  run("git", ["config", "user.name", "Test"], { cwd: repoPath });
+  run("git", ["config", "user.email", "test@example.com"], { cwd: repoPath });
+  await fs.writeFile(path.join(repoPath, "tracked.txt"), "base\n");
+  run("git", ["add", "tracked.txt"], { cwd: repoPath });
+  run("git", ["commit", "-qm", "base"], { cwd: repoPath });
+  run("git", ["clone", "-q", "--bare", repoPath, originPath]);
+  run("git", ["remote", "add", "origin", originPath], { cwd: repoPath });
+
+  const issues = [issue(1), issue(2), issue(3)];
+  const manifest = proposeDraft({ repository: "owner/repo", issues }).manifest;
+  manifest.defaultBranch = "main";
+  manifest.defaultConcurrency = 2;
+  await fs.writeFile(path.join(repoPath, ".maestro.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+
+  await fs.writeFile(path.join(binPath, "gh"), `#!/usr/bin/env node
+const issues = JSON.parse(process.env.MAESTRO_TEST_ISSUES);
+const args = process.argv.slice(2);
+if (args[0] === "repo") process.stdout.write(JSON.stringify({ nameWithOwner: "owner/repo" }));
+else if (args[0] === "issue" && args[1] === "view") process.stdout.write(JSON.stringify(issues.find((item) => String(item.number) === args[2])));
+else if (args[0] === "api") {
+  const number = args[1].split("/").at(-1);
+  process.stdout.write(JSON.stringify({ number: Number(number), state_reason: null }));
+} else process.exit(2);
+`);
+  await fs.writeFile(path.join(binPath, "codex"), `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+const reportIndex = args.indexOf("--output-last-message");
+const reportPath = args[reportIndex + 1];
+const issue = path.basename(process.cwd()).match(/^(\\d+)-/)[1];
+if (args.includes("read-only")) {
+  const corrected = fs.existsSync("issue-1-correction.txt");
+  fs.writeFileSync(reportPath, issue === "1" && !corrected ? "VERDICT: REWORK\\n" : "VERDICT: APPROVE\\n");
+  process.exit(0);
+}
+const correction = issue === "1" && fs.existsSync("issue-1.txt");
+const phase = correction ? "correction" : "original";
+fs.appendFileSync(process.env.MAESTRO_TEST_EVENTS, "start " + issue + " " + phase + "\\n");
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, issue === "2" ? 1400 : 75);
+const filename = correction ? "issue-1-correction.txt" : "issue-" + issue + ".txt";
+fs.writeFileSync(filename, issue + " " + phase + "\\n");
+spawnSync("git", ["add", filename], { stdio: "inherit" });
+spawnSync("git", ["commit", "-qm", "implement " + issue + " " + phase], { stdio: "inherit" });
+fs.appendFileSync(process.env.MAESTRO_TEST_EVENTS, "finish " + issue + " " + phase + "\\n");
+fs.writeFileSync(reportPath, "Result: complete\\n");
+`);
+  await fs.chmod(path.join(binPath, "gh"), 0o755);
+  await fs.chmod(path.join(binPath, "codex"), 0o755);
+
+  const cli = path.resolve(__dirname, "../bin/maestro.js");
+  const result = run(process.execPath, [cli, "start", "--auto-rework", "--repo-path", repoPath], {
+    cwd: repoPath,
+    env: {
+      ...process.env,
+      PATH: `${binPath}${path.delimiter}${process.env.PATH}`,
+      MAESTRO_TEST_ISSUES: JSON.stringify(issues),
+      MAESTRO_TEST_EVENTS: eventPath
+    }
+  });
+  const output = JSON.parse(result.stdout.split("\n\nIssue #", 1)[0]);
+  const events = (await fs.readFile(eventPath, "utf8")).trim().split("\n");
+
+  assert.deepEqual(output.plan.selected.map((item) => item.id), ["1", "2"]);
+  assert.equal(output.autoRework.issues.find((entry) => entry.issue === "1")?.outcome, "approved");
+  assert.ok(events.indexOf("start 1 correction") > events.indexOf("finish 1 original"), events.join(", "));
+  assert.ok(events.indexOf("start 1 correction") < events.indexOf("finish 2 original"), events.join(", "));
+
+  let active = 0;
+  let peak = 0;
+  for (const event of events) {
+    if (event.startsWith("start ")) active += 1;
+    if (event.startsWith("finish ")) active -= 1;
+    peak = Math.max(peak, active);
+  }
+  assert.equal(active, 0, events.join(", "));
+  assert.equal(peak, 2, events.join(", "));
+});

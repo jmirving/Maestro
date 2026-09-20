@@ -286,6 +286,7 @@ async function runLifecycleBackfill(config, {
   reserveInitial = null,
   executeInitial,
   executeReserved,
+  tasksAfterOutcome = async () => [],
   verifySelection = async () => {},
   runIdFactory,
   extraState = {}
@@ -299,8 +300,10 @@ async function runLifecycleBackfill(config, {
 
   const launch = (promise) => {
     let tracked;
-    tracked = Promise.resolve(promise).then((result) => {
+    tracked = Promise.resolve(promise).then(async (result) => {
       outcomes.push(result);
+      const followUps = await tasksAfterOutcome(result);
+      pending.push(...(followUps || []));
     }, (error) => {
       firstError ||= error;
     }).finally(() => running.delete(tracked));

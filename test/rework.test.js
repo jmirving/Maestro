@@ -853,6 +853,7 @@ if (index >= 0) fs.writeFileSync(process.argv[index + 1], process.argv.includes(
   assert.equal(result.status, 0, result.stderr);
   const output = parseLeadingJson(result.stdout);
   assert.deepEqual(output.plan.selected, []);
+  assert.ok(output.autoRework.issues[0], JSON.stringify(output, null, 2));
   assert.equal(output.autoRework.issues[0].outcome, "approved");
   assert.equal(output.autoRework.issues[0].runs[0].correction.attempts["7"].automatic, true);
   assert.match(result.stdout, /Recommended: `maestro approve 7`/);
