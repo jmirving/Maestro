@@ -22,16 +22,16 @@ GitHub sub-issues are recursive and paginated. Body checklists and issue mention
 
 ## Supervised wave
 
-Start or refresh scope, preview the next wave, then execute it:
+Start or refresh scope, inspect the effective next wave, then execute it:
 
 ```bash
 maestro draft
 maestro draft --write
-maestro plan
+maestro status
 maestro start
 ```
 
-The first draft command gives a compact four-part summary of changes, the manifest-only next-wave projection, items needing attention, and the preview/write outcome. It groups active prerequisites under their dependent issue, omits completed prerequisites from the blocker view, and distinguishes hard `waits for` relationships from advisory `scheduled separately` overlap. Use `maestro draft --verbose` for the full proposal and audit trail or `maestro draft --json` for one machine-readable result; those output modes are mutually exclusive and do not change scope or planning behavior. `--write` saves only the schema-valid proposal to `.maestro.json` and rejects an intervening edit; neither form launches work, expands a delegated scope, or grants integration permission. Closed issues become non-runnable `inactive` history rather than assumed-complete work. `plan` is also read-only. `start` checks every selected issue for GitHub drift and rejects legacy entries without reconciliation provenance, then executes the current ready wave in isolated worktrees and validates changed branches in fresh agent contexts, but it does not approve or integrate results.
+The first draft command gives a compact four-part summary of changes, the manifest-only next-wave projection, items needing attention, and the preview/write outcome. It groups active prerequisites under their dependent issue, omits completed prerequisites from the blocker view, and distinguishes hard `waits for` relationships from advisory `scheduled separately` overlap. Use `maestro draft --verbose` for the full proposal and audit trail or `maestro draft --json` for one machine-readable result; those output modes are mutually exclusive and do not change scope or planning behavior. `--write` saves only the schema-valid proposal to `.maestro.json` and rejects an intervening edit; neither form launches work, expands a delegated scope, or grants integration permission. Closed issues become non-runnable `inactive` history rather than assumed-complete work. `status` is the normal effective-state preview after a write; `plan` remains a read-only manifest-only debugging preview. `start` checks every selected issue for GitHub drift and rejects legacy entries without reconciliation provenance, then executes the current ready wave in isolated worktrees and validates changed branches in fresh agent contexts, but it does not approve or integrate results.
 
 For routine validator-guided correction, opt in to the bounded loop:
 
@@ -53,7 +53,7 @@ maestro details 57
 maestro output
 ```
 
-`status` is the decision surface and ends with state-derived next commands. `details` reads issue-level worker, validator, review, and integration evidence. `output` prints and copies the latest combined report. None reruns work.
+`status` is the canonical decision surface and ends with state-derived next commands. Its default action-first groups include the effective scheduler selection, while completed history is collapsed to a count. Use `status --all` for the full effective inventory, `status --completed` for completed history, or `status <issue...>` for focused lifecycle evidence; expansion filters cannot be combined with focused issue numbers. `plan` remains available for manifest-only or hypothetical planning/debugging previews. `details` reads issue-level worker, validator, review, and integration evidence. `output` prints and copies the latest combined report. None reruns work.
 
 Resolve every item in the wave, integrate reviewed work, and continue:
 

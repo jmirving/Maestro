@@ -29,7 +29,7 @@ ${group.commands.map((command) => `  ${label(command).padEnd(23)} ${command.summ
   return `Maestro — safe, dependency-aware repository agent orchestration
 
 Normal workflow
-  draft → plan → start → status/details → rework or approve → commit → next
+  draft → status → start → status/details → rework or approve → commit → next
 
 Workers and validators run in isolated worktrees. Without explicit --delegate,
 start/next never integrate; validator approval, human approval, delegated eligibility,
@@ -43,8 +43,8 @@ Help and walkthroughs
   maestro <command> --help Same command guidance; safe outside a configured checkout
   maestro help workflow    Expanded supervised lifecycle and exception paths
 
-Start with: maestro draft (create/refresh scope), maestro plan (preview existing scope),
-or maestro status (resume persisted work).`;
+Start with: maestro draft (create/refresh scope) or maestro status (inspect lifecycle
+state and the next scheduler selection). Use maestro plan for manifest-only debugging.`;
 }
 
 function formatOptions(command) {

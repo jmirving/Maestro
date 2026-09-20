@@ -161,7 +161,7 @@ function statusIssuePositionals(rest) {
       index += 1;
       continue;
     }
-    if (value === "--watch") continue;
+    if (["--watch", "--all", "--completed"].includes(value)) continue;
     if (value.startsWith("--")) throw new Error(`Unknown maestro status option: ${value}`);
     if (!/^[1-9]\d*$/.test(value)) throw new Error(`Invalid issue number: ${value}`);
     issues.push(value);
@@ -545,8 +545,10 @@ async function main() {
 
   if (command === "status") {
     const requestedIssues = statusIssuePositionals(rest);
-    if (args.includes("--watch")) await watchStatus(config, repoPath, requestedIssues, { concurrency });
-    else process.stdout.write(formatStatus(await statusSnapshot(config, repoPath, requestedIssues, { concurrency })));
+    const view = args.includes("--all") ? "all" : args.includes("--completed") ? "completed" : "default";
+    const columns = process.stdout.isTTY ? process.stdout.columns : undefined;
+    if (args.includes("--watch")) await watchStatus(config, repoPath, requestedIssues, { concurrency, view, columns });
+    else process.stdout.write(formatStatus(await statusSnapshot(config, repoPath, requestedIssues, { concurrency, view }), { columns }));
     return;
   }
 

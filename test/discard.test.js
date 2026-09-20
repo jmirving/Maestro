@@ -66,7 +66,7 @@ test("discard records the disposition and makes ready manifest work eligible aga
   assert.equal(config.work["7"].status, "ready");
 
   const status = formatStatus(await statusSnapshot(config, repoPath));
-  assert.match(status, /Issue #7 — Rejected implementation — implementation discarded, ready for a fresh run/);
+  assert.match(status, /Next \(1, scheduler order\)[\s\S]*#7 Rejected implementation - implementation discarded, ready for a fresh run/);
   assert.match(status, /Recommended: `maestro start`/);
   const details = formatDetails(await loadIssueDetails(repoPath, ["7"], { config }));
   assert.match(details, /Issue state: discarded/);
@@ -89,15 +89,15 @@ test("discarded work stays blocked by manifest dependencies until they complete"
   assert.deepEqual(blockedPlan.blocked.map((item) => item.id), ["7"]);
   assert.deepEqual(blockedPlan.blocked[0].unresolved, ["2"]);
   const blockedStatus = formatStatus(await statusSnapshot(config, repoPath));
-  assert.match(blockedStatus, /Issue #7 — Rejected implementation — implementation discarded; blocked, waiting on #2/);
-  assert.doesNotMatch(blockedStatus, /Issue #7 .*ready for a fresh run/);
-  assert.match(blockedStatus, /Next wave: #2/);
+  assert.match(blockedStatus, /Blocked \(1\)[\s\S]*#7 Rejected implementation - implementation discarded; blocked, waiting on #2/);
+  assert.doesNotMatch(blockedStatus, /#7 .*ready for a fresh run/);
+  assert.match(blockedStatus, /Next \(1, scheduler order\)[\s\S]*#2 Dependency/);
 
   config.work["2"].status = "complete";
   const readyPlan = await computeEffectivePlan(config, repoPath);
   assert.deepEqual(readyPlan.selected.map((item) => item.id), ["7"]);
   const readyStatus = formatStatus(await statusSnapshot(config, repoPath));
-  assert.match(readyStatus, /Issue #7 — Rejected implementation — implementation discarded, ready for a fresh run/);
+  assert.match(readyStatus, /Next \(1, scheduler order\)[\s\S]*#7 Rejected implementation - implementation discarded, ready for a fresh run/);
 });
 
 test("discarded work stays behind a manifest human gate until the gate clears", async (t) => {
@@ -115,7 +115,7 @@ test("discarded work stays behind a manifest human gate until the gate clears", 
   assert.deepEqual(gatedPlan.selected, []);
   assert.deepEqual(gatedPlan.humanGates.map((item) => item.id), ["7"]);
   const gatedStatus = formatStatus(await statusSnapshot(config, repoPath));
-  assert.match(gatedStatus, /Issue #7 — Rejected implementation — implementation discarded; blocked by human gate: owner authorizes production access/);
+  assert.match(gatedStatus, /Needs attention \(1\)[\s\S]*#7 Rejected implementation - implementation discarded; blocked by human gate: owner authorizes production access/);
   assert.doesNotMatch(gatedStatus, /ready for a fresh run/);
   assert.doesNotMatch(gatedStatus, /Recommended: `maestro start`/);
 
@@ -123,7 +123,7 @@ test("discarded work stays behind a manifest human gate until the gate clears", 
   const readyPlan = await computeEffectivePlan(config, repoPath);
   assert.deepEqual(readyPlan.selected.map((item) => item.id), ["7"]);
   const readyStatus = formatStatus(await statusSnapshot(config, repoPath));
-  assert.match(readyStatus, /Issue #7 — Rejected implementation — implementation discarded, ready for a fresh run/);
+  assert.match(readyStatus, /Next \(1, scheduler order\)[\s\S]*#7 Rejected implementation - implementation discarded, ready for a fresh run/);
 });
 
 test("discard CLI is explicit, refuses non-REWORK work, and leaves the manifest unchanged", async (t) => {

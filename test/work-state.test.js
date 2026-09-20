@@ -316,7 +316,7 @@ test("legacy reports defer work after their disposable worktree is removed", asy
   const repeated = invoke("next");
 
   assert.equal(status.status, 0, status.stderr);
-  assert.match(status.stdout, /Issue #14 — validator approved, awaiting human approval/);
+  assert.match(status.stdout, /Awaiting human approval \(1\)[\s\S]*#14 - validator approved, awaiting human approval/);
   assert.match(status.stdout, /Recommended: `maestro approve 14`/);
   assert.equal(first.status, 0, first.stderr);
   assert.equal(repeated.status, 0, repeated.stderr);

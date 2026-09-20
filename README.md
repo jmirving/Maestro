@@ -45,7 +45,7 @@ When run from a target repository containing `.maestro.json`, Maestro now discov
 ```bash
 cd ~/Nexus
 
-maestro plan
+maestro status
 maestro start
 maestro status
 maestro details 57
@@ -206,7 +206,7 @@ Automatic correction never converts validator approval into human approval or in
 
 `maestro details <issue...>` is the verbose issue-level evidence view. It resolves each issue's latest relevant persisted run independently and shows worker results, commits, validator verdicts and reports, human review, integration state, and branch/worktree debugging identifiers. Rework and reconciliation children also include their parent/source evidence so the reason for a correction remains visible. Use `--run <run-id>` to inspect an explicit historical run; no workers or validators are rerun.
 
-`maestro status` is the concise decision surface between workflow actions. It projects each issue's latest relevant state, keeps validator verdicts distinct from human dispositions, reports whether commit is blocked or ready, and ends with executable next commands. In a mixed run it names every missing disposition; once settled, it says exactly which issues will integrate and which will remain out for rework. Use `maestro status <issue...>` for a focused view with the current worker commit, validator verdict, human-review state, integration eligibility, and next actions. `--watch` supports both the repository-wide and focused forms.
+`maestro status` is the concise decision surface between workflow actions. Its default view groups action-first lifecycle state, shows the effective scheduler's exact next selection in planner order, bounds ready/blocked previews with exact hidden counts, and collapses completed history to a count. It keeps validator verdicts distinct from human dispositions, reports whether each relevant run is commit-ready together with its executable command, and ends with state-derived next commands. Use `maestro status --all` for one effective row per known issue, `maestro status --completed` for completed history, or `maestro status <issue...>` for a focused view with the current worker commit, validator verdict, human-review state, integration eligibility, and next actions. Expansion flags cannot be combined with focused issue numbers. `--watch` uses the same grouping and filtering rules. `maestro plan` remains available as a manifest-only planning/debugging preview, but is not required in the routine loop.
 
 For validator-REWORK items, status recommends rework first and shows override and discard only as explicit alternatives. `maestro details` displays the resulting disposition and any validator override provenance.
 

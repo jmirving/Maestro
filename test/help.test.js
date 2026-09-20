@@ -46,7 +46,7 @@ test("help cannot invoke repository, GitHub, or agent executables", () => {
 
 test("top-level help teaches the workflow and separates everyday commands from advanced controls", () => {
   const text = renderTopLevelHelp();
-  assert.match(text, /draft → plan → start → status\/details → rework or approve → commit → next/);
+  assert.match(text, /draft → status → start → status\/details → rework or approve → commit → next/);
   assert.match(text, /Planning:\n[\s\S]*draft[\s\S]*plan/);
   assert.match(text, /Execution:\n[\s\S]*start \(s\)[\s\S]*next \(n\)/);
   assert.match(text, /Inspection:\n[\s\S]*status \(st\)[\s\S]*details[\s\S]*output \(o\)/);
@@ -134,6 +134,11 @@ test("aliases and important documented flags are accepted by the shared registry
   assert.deepEqual(parseInvocation(["config", "set", "defaultConcurrency", "4"]).positionals, ["set", "defaultConcurrency", "4"]);
   assert.deepEqual(parseInvocation(["config", "config/maestro.json", "get", "defaultConcurrency"]).positionals, ["config/maestro.json", "get", "defaultConcurrency"]);
   assert.equal(parseInvocation(["st", "57", "--watch"]).command, "status");
+  assert.equal(parseInvocation(["status", "--all"]).options["--all"], true);
+  assert.equal(parseInvocation(["status", "--completed", "--watch"]).options["--completed"], true);
+  assert.throws(() => parseInvocation(["status", "57", "--all"]), /either issue numbers or --all/);
+  assert.throws(() => parseInvocation(["status", "57", "--completed"]), /either issue numbers or --completed/);
+  assert.throws(() => parseInvocation(["status", "--all", "--completed"]), /only one/);
   assert.equal(parseInvocation(["a", "57", "--override"]).command, "approve");
   assert.equal(parseInvocation(["run", "--continuous", "--allow-failing-baseline"]).command, "run");
   assert.equal(parseInvocation(["review", "--run", "run-1", "--issue", "57", "--disposition", "approve"]).command, "review");

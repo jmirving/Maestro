@@ -191,7 +191,7 @@ test("CLI concurrency overrides are temporary and config set persists only the e
   const longPreview = spawnSync(process.execPath, [cliPath, "status", "--concurrency", "3"], { cwd: repoPath, encoding: "utf8" });
   assert.equal(longPreview.status, 0, longPreview.stderr);
   assert.match(longPreview.stdout, /Concurrency: 3 \(this invocation; saved default: 2\)/);
-  assert.match(longPreview.stdout, /Next wave: #1, #2, #3/);
+  assert.match(longPreview.stdout, /Next \(3, scheduler order\)[\s\S]*#1[\s\S]*#2[\s\S]*#3/);
   assert.equal(JSON.parse(fs.readFileSync(defaultManifest, "utf8")).defaultConcurrency, 2);
 
   const saved = spawnSync(process.execPath, [cliPath, "config", explicitManifest, "set", "defaultConcurrency", "4"], { cwd: repoPath, encoding: "utf8" });

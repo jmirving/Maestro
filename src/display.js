@@ -1,4 +1,4 @@
-const { loadExecutionStates, reconcilePlan } = require("./work-state");
+const { loadExecutionStates } = require("./work-state");
 const { currentIssueEvidenceFromStates, effectiveIssueStates } = require("./run-resolver");
 const { assessRunItems } = require("./existing-run");
 const { buildRecommendations, formatRecommendations } = require("./recommendations");
@@ -51,15 +51,18 @@ function describeIssue(config, issue, evidence, plan, effective = null, delegate
   const integration = evidence?.integration || null;
   const conflict = evidence?.conflict || evidence?.correction?.conflict || null;
   let state;
+  let group;
   let integrationState = "not eligible";
   let action = null;
 
   if (effective?.consistencyConflict) {
     state = "consistency conflict: manifest says complete, but execution history has no integration record";
+    group = "attention";
     integrationState = "blocked pending manifest/run reconciliation";
   } else if (effective?.terminal || manifest?.status === "complete" || integration) {
-    const external = effective?.completion?.source === "external";
+const external = effective?.completion?.source === "external";
     state = external ? "complete (external)" : "integrated/complete";
+    group = "complete";
     integrationState = external ? "external completion adopted during reconciliation" : "integrated";
   } else if (conflict && !evidence?.correction?.conflict && !["completed", "resolved", "manually-resolved"].includes(conflict.operationState)) {
     state = `Git ${conflict.operation} content conflict during ${conflict.interruptedStage} (${conflict.operationState}); preserved at ${conflict.worktreePath}`;
@@ -67,19 +70,23 @@ function describeIssue(config, issue, evidence, plan, effective = null, delegate
     action = conflict.continuationAction || `maestro details ${issue}`;
   } else if (review?.disposition === "discard") {
     state = discardedManifestState(issue, manifest, plan, selected);
+    group = planEntry(plan.humanGates, issue) ? "attention" : planEntry(plan.blocked, issue) ? "blocked" : "ready";
     integrationState = "discarded; branch/worktree preserved and excluded from integration";
     action = selected ? "maestro start" : null;
   } else if (review?.disposition === "rework-original") {
     state = "human rework disposition recorded, excluded from integration";
+    group = "attention";
     integrationState = "excluded; will be reworked";
     action = `maestro rework ${issue}`;
   } else if (isValidValidatorOverride(review, validation)) {
     state = "human override approved, ready to integrate";
+    group = "ready-integrate";
     integrationState = "eligible when every item in its run has a human disposition";
   } else if (evidence?.autoRework?.status === "retry-exhausted") {
     const attempts = evidence.autoRework.attemptsUsed;
     const limit = evidence.autoRework.retryLimit;
     state = `automatic rework exhausted after ${attempts} of ${limit} correction attempts; human review required`;
+    group = "attention";
     integrationState = "not eligible; inspect the correction lineage and decide whether to rework manually, override, or discard";
     action = `maestro details ${issue}`;
   } else if (delegated?.eligible && validation?.verdict === "approve") {
@@ -90,24 +97,30 @@ function describeIssue(config, issue, evidence, plan, effective = null, delegate
     integrationState = "not eligible under delegated policy";
   } else if (review && validation?.verdict === "approve") {
     state = "human approved, ready to integrate";
+    group = "ready-integrate";
     integrationState = "eligible when every item in its run has a human disposition";
   } else if (review) {
     state = `blocked: human ${review.disposition} conflicts with validator ${validation?.verdict || "state"}`;
+    group = "attention";
     integrationState = "blocked by inconsistent review state";
   } else if (validation?.verdict === "approve") {
     state = "validator approved, awaiting human approval";
+    group = "awaiting-approval";
     integrationState = "not eligible until human approval";
     action = `maestro approve ${issue}`;
   } else if (validation?.verdict === "rework") {
     state = "validator requested rework, awaiting human rework disposition";
+    group = "attention";
     integrationState = "not eligible; correct, override, or discard it";
   } else if (validation?.verdict === "human_gate") {
     state = "validator requested a human decision, awaiting human disposition";
+    group = "attention";
     integrationState = "not eligible until human disposition";
   } else if (["worker-failure", "validator-failure", "infrastructure-failure", "technical-conflict", "human-required", "timeout", "no-progress"].includes(evidence?.autoRework?.status || evidence?.correction?.outcome)) {
     const outcome = evidence.autoRework?.status || evidence.correction.outcome;
     const attempt = evidence.autoRework?.attemptsUsed ?? evidence.correction?.number ?? 0;
     const conflict = evidence.correction?.conflict;
+    group = "attention";
     state = outcome === "technical-conflict"
       ? `automatic correction stopped after charged attempt ${attempt}: rebase content conflict (${conflict?.operationState || "state unknown"}); resolve safely, then run ${conflict?.continuationAction || `maestro rework ${issue}`}`
       : outcome === "human-required"
@@ -125,32 +138,41 @@ function describeIssue(config, issue, evidence, plan, effective = null, delegate
       : `maestro details ${issue}`;
   } else if (evidence?.state === "running" || evidence?.state === "rework-running") {
     state = evidence.state === "rework-running" ? "rework in progress" : "worker in progress";
+    group = "in-progress";
     action = "maestro status --watch";
   } else if (evidence?.state === "failed-awaiting-retry" || evidence?.worker?.exitCode > 0) {
     state = "failed, awaiting explicit retry";
+    group = "attention";
     action = "maestro start --rerun";
   } else if (evidence) {
     state = "pending validation or review";
+    group = "in-progress";
     action = "maestro status --watch";
   } else if (manifest?.status === "human_gate") {
     state = `blocked by human gate${manifest.humanGate ? `: ${manifest.humanGate}` : ""}`;
+    group = "attention";
   } else if (manifest?.status === "blocked" || plan.blocked?.some((entry) => String(entry.id) === issue)) {
     const waiting = (manifest?.blockedBy || []).filter((dependency) => config.work?.[dependency]?.status !== "complete");
     state = `blocked${waiting.length ? `, waiting on ${waiting.map((id) => `#${id}`).join(", ")}` : ""}`;
+    group = "blocked";
   } else if (deferred) {
     state = deferred.lifecycle?.state || "in flight";
+    group = ["running", "rework-running"].includes(deferred.lifecycle?.state) ? "in-progress" : "ready";
     action = deferred.lifecycle?.action || null;
   } else if (manifest?.status === "ready") {
     state = selected ? "ready to start next" : "ready";
+    group = "ready";
     action = selected ? "maestro start" : null;
   } else {
     state = manifest?.status || "unknown";
+    group = "other";
   }
 
   return {
     issue,
     title: titleFor(config, issue, evidence),
     state,
+    group,
     action,
     workerCommit: evidence?.worker?.headSha || null,
     validator: validation?.verdict || null,
@@ -203,12 +225,17 @@ function runReadiness(states, currentByIssue, effectiveByIssue = null, delegated
 async function statusSnapshot(config, repoPath, requestedIssues = [], {
   stateLoader = loadExecutionStates,
   concurrency,
-  scopeAssessmentOptions = {}
+  scopeAssessmentOptions = {},
+  view = "default"
 } = {}) {
+  if (!["default", "all", "completed"].includes(view)) throw new Error(`Unknown status view: ${view}.`);
   const states = await stateLoader(repoPath);
   const capacity = capacitySnapshot(config, states, { concurrency });
   const plan = capacity.plan;
   const requested = [...new Set(requestedIssues.map(String))];
+  if (requested.length && view !== "default") {
+    throw new Error("Focused status issue selections cannot be combined with --all or --completed.");
+  }
   const current = states.length ? currentIssueEvidenceFromStates(states) : [];
   const currentByIssue = new Map(current.map((entry) => [entry.issue, entry]));
   const effectiveByIssue = effectiveIssueStates(config, states);
@@ -239,6 +266,10 @@ async function statusSnapshot(config, repoPath, requestedIssues = [], {
     return describeIssue(config, issue, evidence, plan, effectiveByIssue.get(issue), delegated);
   });
   const readiness = runReadiness(states, currentByIssue, effectiveByIssue, delegatedByRun);
+  for (const item of items.filter((entry) => entry.group === "ready-integrate")) {
+    const commitReady = readiness.some((run) => run.ready && run.integrate.includes(item.issue));
+    if (!commitReady) item.group = "awaiting-integration";
+  }
   return {
     repository: config.repository,
     concurrency: {
@@ -247,10 +278,23 @@ async function statusSnapshot(config, repoPath, requestedIssues = [], {
       savedDefault: plan.savedDefaultConcurrency
     },
     focused: requested.length > 0,
+    view,
     items,
     readiness,
     recommendations: buildRecommendations(items, readiness, plan.selected || [], { states }),
     selected: plan.selected?.map((item) => String(item.id)) || [],
+    scheduler: {
+      selected: (plan.selected || []).map((item) => String(item.id)),
+      ready: (plan.ready || []).map((item) => String(item.id)),
+      blocked: (plan.blocked || []).map((item) => String(item.id)),
+      humanGates: (plan.humanGates || []).map((item) => String(item.id)),
+      advisoryDeferred: (plan.advisoryDeferred || []).map((item) => ({
+        issue: String(item.id),
+        conflictsWith: item.conflictsWith ? String(item.conflictsWith) : null,
+        reason: item.reason || null
+      })),
+      priority: Object.fromEntries((plan.ready || []).map((item) => [String(item.id), item.priority]))
+    },
     capacity: {
       limit: capacity.limit,
       used: capacity.used,
@@ -267,17 +311,113 @@ function issueHeading(item) {
 
 function formatCommit(lines, run) {
   if (run.ready) {
-    lines.push(`Commit: ready — integrates ${run.integrate.map((issue) => `#${issue}`).join(", ")}${run.skip.length ? `; skips ${run.skip.map((issue) => `#${issue}`).join(", ")} for rework` : ""}${run.discard.length ? `; excludes discarded ${run.discard.map((issue) => `#${issue}`).join(", ")}` : ""}`);
+    lines.push(`Commit: ready — integrates ${run.integrate.map((issue) => `#${issue}`).join(", ")}${run.skip.length ? `; skips ${run.skip.map((issue) => `#${issue}`).join(", ")} for rework` : ""}${run.discard.length ? `; excludes discarded ${run.discard.map((issue) => `#${issue}`).join(", ")}` : ""}; run \`${run.command}\``);
     return;
   }
   const requirements = [
     ...run.missing.map((entry) => `#${entry.issue} needs ${entry.kind}`),
     ...run.blocked.map((entry) => `#${entry.issue} needs ${entry.kind}`)
   ];
-  if (requirements.length) lines.push(`Commit: not ready — ${requirements.join("; ")}`);
+  if (requirements.length) lines.push(`Commit: not ready — ${requirements.join("; ")}; inspect run ${run.runId}`);
 }
 
-function formatStatus(snapshot) {
+function wrapLine(line, columns, continuation = "  ") {
+  if (!Number.isFinite(columns) || columns < 20 || line.length <= columns) return [line];
+  const output = [];
+  let remaining = line;
+  while (remaining.length > columns) {
+    let split = remaining.lastIndexOf(" ", columns);
+    if (split <= continuation.length) split = columns;
+    output.push(remaining.slice(0, split));
+    remaining = `${continuation}${remaining.slice(split).trimStart()}`;
+  }
+  output.push(remaining);
+  return output;
+}
+
+function issueLabel(item) {
+  return `#${item.issue}${item.title ? ` ${item.title}` : ""}`;
+}
+
+function formatGroupedStatus(lines, snapshot, { columns = Number.POSITIVE_INFINITY } = {}) {
+  const itemByIssue = new Map(snapshot.items.map((item) => [String(item.issue), item]));
+  const scheduler = snapshot.scheduler || { selected: snapshot.selected || [], ready: [], blocked: [] };
+  const selected = new Set(scheduler.selected || []);
+  const all = snapshot.view === "all";
+  const previewLimit = all ? Number.POSITIVE_INFINITY : 5;
+  const rendered = new Set();
+
+  function addGroup(label, items, { detail = true, limit = previewLimit } = {}) {
+    if (!items.length) return;
+    lines.push("", `${label} (${items.length})`);
+    for (const item of items.slice(0, limit)) {
+      rendered.add(String(item.issue));
+      const displayedState = item.group === "awaiting-integration"
+        ? item.state.replace("ready to integrate", "awaiting other run dispositions")
+        : item.state;
+      const row = detail ? `  ${issueLabel(item)} - ${displayedState}` : `  ${issueLabel(item)}`;
+      lines.push(...wrapLine(row, columns, "    "));
+    }
+    if (items.length > limit) {
+      lines.push(`  ... ${items.length - limit} more (use maestro status --all)`);
+    }
+  }
+
+  if (snapshot.view === "completed") {
+    const completed = snapshot.items.filter((item) => item.group === "complete").sort((a, b) => numericSort(a.issue, b.issue));
+    if (!completed.length) lines.push("", "Complete (0)", "  No completed work.");
+    else addGroup("Complete", completed, { limit: Number.POSITIVE_INFINITY });
+    return;
+  }
+
+  if (!snapshot.items.length) lines.push("", "No known work.");
+
+  const byGroup = (group) => snapshot.items
+    .filter((item) => item.group === group)
+    .sort((a, b) => numericSort(a.issue, b.issue));
+  addGroup("Needs attention", byGroup("attention"), { limit: all ? Number.POSITIVE_INFINITY : 8 });
+  addGroup("Awaiting human approval", byGroup("awaiting-approval"));
+  addGroup("Ready to integrate", byGroup("ready-integrate"));
+  addGroup("Awaiting integration readiness", byGroup("awaiting-integration"));
+  addGroup("In progress", byGroup("in-progress"));
+
+  const next = (scheduler.selected || []).map((issue) => itemByIssue.get(String(issue))).filter(Boolean);
+  if (next.length) {
+    lines.push("", `Next (${next.length}, scheduler order)`);
+    for (const item of next) {
+      rendered.add(String(item.issue));
+      const priority = scheduler.priority?.[item.issue];
+      const reason = priority == null ? "selected by dependency, conflict, and capacity rules" : `priority ${priority}; dependency, conflict, and capacity rules satisfied`;
+      lines.push(...wrapLine(`  ${issueLabel(item)} - ${item.state}; ${reason}`, columns, "    "));
+    }
+  }
+
+  const remainingReady = (scheduler.ready || [])
+    .filter((issue) => !selected.has(String(issue)))
+    .map((issue) => itemByIssue.get(String(issue)))
+    .filter(Boolean)
+    .map((item) => {
+      const deferred = (scheduler.advisoryDeferred || []).find((entry) => entry.issue === String(item.issue));
+      return {
+        ...item,
+        state: deferred
+          ? `ready; scheduled separately from #${deferred.conflictsWith}${deferred.reason ? ` (${deferred.reason})` : ""}`
+          : "ready after the selected wave"
+      };
+    });
+  addGroup("Remaining ready", remainingReady);
+
+  addGroup("Blocked", byGroup("blocked"));
+
+  const other = byGroup("other").filter((item) => !rendered.has(String(item.issue)));
+  addGroup("Other", other);
+
+  const completed = byGroup("complete");
+  if (all) addGroup("Complete", completed, { limit: Number.POSITIVE_INFINITY });
+  else if (completed.length) lines.push("", `Complete: ${completed.length} (history collapsed; use maestro status --completed)`);
+}
+
+function formatStatus(snapshot, { columns = Number.POSITIVE_INFINITY } = {}) {
   const heading = `MAESTRO  ${snapshot.repository || "repository"}`;
   const lines = [heading, "=".repeat(Math.max(24, heading.length)), formatConcurrency(snapshot.concurrency)];
 
@@ -290,8 +430,11 @@ function formatStatus(snapshot) {
       lines.push(`  Integration: ${item.integrationState}`);
     }
   } else {
-    lines.push("");
-    for (const item of snapshot.items) lines.push(`${issueHeading(item)} — ${item.state}`);
+    formatGroupedStatus(lines, snapshot, { columns });
+  }
+
+  if (snapshot.view === "completed") {
+    return `${lines.flatMap((line) => wrapLine(line, columns)).join("\n")}\n`;
   }
 
   if (snapshot.capacity) {
@@ -305,19 +448,16 @@ function formatStatus(snapshot) {
   }
 
   for (const run of snapshot.readiness) formatCommit(lines, run);
-  if (snapshot.selected.length && !snapshot.items.some((item) => item.action && item.action !== "maestro start")) {
-    lines.push(`Next wave: ${snapshot.selected.map((issue) => `#${issue}`).join(", ")}`);
-  }
   const recommendations = formatRecommendations(snapshot.recommendations);
   if (recommendations) lines.push("", recommendations.trimEnd());
-  return `${lines.join("\n")}\n`;
+  return `${lines.flatMap((line) => wrapLine(line, columns)).join("\n")}\n`;
 }
 
-async function watchStatus(config, repoPath, requestedIssues = [], { intervalMs = 2000, concurrency } = {}) {
+async function watchStatus(config, repoPath, requestedIssues = [], { intervalMs = 2000, concurrency, view = "default", columns } = {}) {
   const interactive = Boolean(process.stdout.isTTY);
   let first = true;
   for (;;) {
-    const text = formatStatus(await statusSnapshot(config, repoPath, requestedIssues, { concurrency }));
+    const text = formatStatus(await statusSnapshot(config, repoPath, requestedIssues, { concurrency, view }), { columns });
     if (interactive && !first) process.stdout.write("\x1b[2J\x1b[H");
     process.stdout.write(text);
     first = false;

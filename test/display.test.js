@@ -41,10 +41,11 @@ test("mixed status separates validator results from missing human dispositions",
   const snapshot = await statusSnapshot(config, "/unused", [], { stateLoader: async () => [mixedRun()] });
   const text = formatStatus(snapshot);
 
-  assert.match(text, /Issue #2 — Passing change — validator approved, awaiting human approval/);
-  assert.match(text, /Issue #7 — Needs correction — validator requested rework, awaiting human rework disposition/);
-  assert.match(text, /Issue #12 — integrated\/complete/);
-  assert.match(text, /Issue #13 — blocked, waiting on #2/);
+  assert.match(text, /Needs attention \(1\)[\s\S]*#7 Needs correction - validator requested rework/);
+  assert.match(text, /Awaiting human approval \(1\)[\s\S]*#2 Passing change - validator approved/);
+  assert.match(text, /Blocked \(1\)[\s\S]*#13 - blocked, waiting on #2/);
+  assert.match(text, /Complete: 1 \(history collapsed; use maestro status --completed\)/);
+  assert.doesNotMatch(text, /#12 .*integrated\/complete/);
   assert.match(text, /Commit: not ready — #2 needs human approval; #7 needs human rework disposition/);
   assert.match(text, /Recommended: `maestro rework 7`/);
   assert.match(text, /Also available: `maestro details 7`, `maestro approve 7 --override`, `maestro discard 7`, `maestro approve 2`/);
@@ -56,11 +57,21 @@ test("reviewed mixed status shows exactly what commit integrates and skips", asy
   const snapshot = await statusSnapshot(config, "/unused", [], { stateLoader: async () => [mixedRun({ reviewed: true })] });
   const text = formatStatus(snapshot);
 
-  assert.match(text, /Issue #2 — Passing change — human approved, ready to integrate/);
-  assert.match(text, /Issue #7 — Needs correction — human rework disposition recorded, excluded from integration/);
+  assert.match(text, /Ready to integrate \(1\)[\s\S]*#2 Passing change - human approved, ready to integrate/);
+  assert.match(text, /Needs attention \(1\)[\s\S]*#7 Needs correction - human rework disposition recorded/);
   assert.match(text, /Commit: ready — integrates #2; skips #7 for rework/);
   assert.match(text, /Recommended: `maestro commit`/);
   assert.match(text, /Also available: `maestro rework 7`/);
+});
+
+test("reviewed work is not labeled ready to integrate while its run still needs a disposition", async () => {
+  const run = mixedRun();
+  run.reviews["2"] = { disposition: "approve" };
+  const text = formatStatus(await statusSnapshot(config, "/unused", [], { stateLoader: async () => [run] }));
+
+  assert.match(text, /Awaiting integration readiness \(1\)[\s\S]*#2 Passing change - human approved, awaiting other run dispositions/);
+  assert.doesNotMatch(text, /Ready to integrate \(1\)/);
+  assert.match(text, /Commit: not ready/);
 });
 
 test("focused issue status includes commit, validator, human review, integration, and next action", async () => {
@@ -94,6 +105,20 @@ test("status CLI accepts issue positionals and resolves the latest relevant run"
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Issue #7 — Needs correction/);
   assert.doesNotMatch(result.stdout, /Issue #2 —/);
+
+  const completed = spawnSync(process.execPath, [cli, "status", "--completed", "--repo-path", repoPath], { encoding: "utf8" });
+  assert.equal(completed.status, 0, completed.stderr);
+  assert.match(completed.stdout, /Complete \(1\)[\s\S]*#12 - integrated\/complete/);
+  assert.doesNotMatch(completed.stdout, /#7 Needs correction/);
+
+  const all = spawnSync(process.execPath, [cli, "status", "--all", "--repo-path", repoPath], { encoding: "utf8" });
+  assert.equal(all.status, 0, all.stderr);
+  assert.match(all.stdout, /Needs attention \(1\)[\s\S]*#7 Needs correction/);
+  assert.match(all.stdout, /Complete \(1\)[\s\S]*#12 - integrated\/complete/);
+
+  const invalid = spawnSync(process.execPath, [cli, "status", "7", "--all", "--repo-path", repoPath], { encoding: "utf8" });
+  assert.equal(invalid.status, 1);
+  assert.match(invalid.stderr, /either issue numbers or --all/);
 });
 
 test("repository status derives start versus next from persisted integration history", async (t) => {
@@ -133,14 +158,14 @@ test("repository status derives start versus next from persisted integration his
   assert.match(initial, /Recommended: `maestro start`/);
 
   const snapshotText = formatStatus(await statusSnapshot(advancedConfig, repoPath));
-  assert.match(snapshotText, /Next wave: #3/);
+  assert.match(snapshotText, /Next \(1, scheduler order\)[\s\S]*#3 Newly ready work/);
   assert.match(snapshotText, /Recommended: `maestro next`/);
   assert.doesNotMatch(snapshotText, /Recommended: `maestro start`/);
 
   const cli = path.resolve(__dirname, "../bin/maestro.js");
   const result = spawnSync(process.execPath, [cli, "status", "--repo-path", repoPath], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /Next wave: #3/);
+  assert.match(result.stdout, /Next \(1, scheduler order\)[\s\S]*#3 Newly ready work/);
   assert.match(result.stdout, /Recommended: `maestro next`/);
   assert.doesNotMatch(result.stdout, /Recommended: `maestro start`/);
 });
@@ -149,6 +174,10 @@ test("focused status rejects issues absent from both manifest and persisted work
   await assert.rejects(
     statusSnapshot(config, "/unused", ["404"], { stateLoader: async () => [mixedRun()] }),
     /No Maestro workflow state for issue #404/
+  );
+  await assert.rejects(
+    statusSnapshot(config, "/unused", ["12"], { stateLoader: async () => [], view: "completed" }),
+    /Focused status issue selections cannot be combined/
   );
 });
 
@@ -186,7 +215,7 @@ test("manifest completion without integration evidence is a reconciliation confl
     work: { "2": { status: "complete", title: "Passing change" } }
   }, "/unused", [], { stateLoader: async () => [historical] }));
 
-  assert.match(text, /Issue #2 .*consistency conflict: manifest says complete, but execution history has no integration record/);
+  assert.match(text, /Needs attention \(1\)[\s\S]*#2 Passing change - consistency conflict: manifest says complete, but execution history has no integration record/);
   assert.match(text, /Commit: not ready — #2 needs manifest\/run reconciliation/);
   assert.doesNotMatch(text, /Commit: ready/);
   assert.doesNotMatch(text, /Recommended: `maestro (approve|rework|commit)/);
@@ -234,7 +263,8 @@ test("integration in a newer reconciliation run suppresses an older approved imp
     work: { "2": { status: "complete", title: "Passing change" } }
   }, "/unused", [], { stateLoader: async () => [historical, reconciliation] }));
 
-  assert.match(text, /Issue #2 .*integrated\/complete/);
+  assert.match(text, /Complete: 1 \(history collapsed/);
+  assert.doesNotMatch(text, /#2 .*integrated\/complete/);
   assert.doesNotMatch(text, /Commit:/);
   assert.doesNotMatch(text, /Recommended:/);
 });
@@ -390,4 +420,90 @@ test("status displays timeout and no-progress as distinct automatic correction s
   const noProgressText = formatStatus(await statusSnapshot(config, "/unused", ["7"], { stateLoader: async () => [noProgress] }));
   assert.match(noProgressText, /worker completed without a new commit/);
   assert.match(noProgressText, /Recommended: `maestro details 7`/);
+});
+
+test("default status is bounded, follows scheduler order, and collapses completed history", async () => {
+  const work = {};
+  for (let issue = 1; issue <= 1000; issue += 1) {
+    work[String(issue)] = { status: "complete", title: `Historical item ${issue}` };
+  }
+  for (let issue = 1001; issue <= 1012; issue += 1) {
+    work[String(issue)] = { status: "ready", priority: 1100 - issue, title: `Ready item ${issue}` };
+  }
+  const snapshot = await statusSnapshot({ repository: "example/large", defaultConcurrency: 2, work }, "/unused", [], {
+    stateLoader: async () => []
+  });
+  const text = formatStatus(snapshot);
+
+  assert.match(text, /Next \(2, scheduler order\)[\s\S]*#1012 Ready item 1012[\s\S]*#1011 Ready item 1011/);
+  assert.match(text, /Remaining ready \(10\)/);
+  assert.match(text, /\.\.\. 5 more \(use maestro status --all\)/);
+  assert.match(text, /Complete: 1000 \(history collapsed/);
+  assert.doesNotMatch(text, /Historical item 1/);
+  assert.ok(text.split("\n").length < 35, "routine status should remain near one screen");
+});
+
+test("all and completed views expand one effective row per issue", async () => {
+  const viewConfig = {
+    repository: "example/history",
+    work: {
+      "1": { status: "complete", title: "Done one" },
+      "2": { status: "complete" },
+      "3": { status: "ready", title: "Current work" }
+    }
+  };
+  const all = formatStatus(await statusSnapshot(viewConfig, "/unused", [], {
+    stateLoader: async () => [],
+    view: "all"
+  }));
+  const completed = formatStatus(await statusSnapshot(viewConfig, "/unused", [], {
+    stateLoader: async () => [],
+    view: "completed"
+  }));
+
+  assert.match(all, /Next \(1, scheduler order\)[\s\S]*#3 Current work/);
+  assert.match(all, /Complete \(2\)[\s\S]*#1 Done one - integrated\/complete[\s\S]*#2 - integrated\/complete/);
+  assert.match(completed, /Complete \(2\)[\s\S]*#1 Done one - integrated\/complete[\s\S]*#2 - integrated\/complete/);
+  assert.doesNotMatch(completed, /#3 Current work/);
+  assert.doesNotMatch(completed, /Recommended:/);
+});
+
+test("action groups precede ready work and narrow output wraps deterministically", async () => {
+  const longConfig = {
+    ...config,
+    work: {
+      ...config.work,
+      "20": { status: "ready", priority: 1, title: "A deliberately very long title that must wrap on narrow terminals" }
+    }
+  };
+  const text = formatStatus(await statusSnapshot(longConfig, "/unused", [], {
+    stateLoader: async () => [mixedRun()]
+  }), { columns: 40 });
+
+  assert.ok(text.indexOf("Needs attention") < text.indexOf("Next"));
+  assert.ok(text.split("\n").every((line) => line.length <= 40), text);
+  assert.match(text, /#20 A deliberately very long title/);
+});
+
+test("advisory-deferred ready work explains its scheduler constraint", async () => {
+  const text = formatStatus(await statusSnapshot({
+    repository: "example/conflicts",
+    defaultConcurrency: 2,
+    planning: { advisoryConflicts: [{ issues: ["1", "2"], reason: "same subsystem" }] },
+    work: {
+      "1": { status: "ready", priority: 1, title: "First" },
+      "2": { status: "ready", priority: 2, title: "Second" }
+    }
+  }, "/unused", [], { stateLoader: async () => [] }));
+
+  assert.match(text, /Next \(1, scheduler order\)[\s\S]*#1 First/);
+  assert.match(text, /Remaining ready \(1\)[\s\S]*#2 Second - ready; scheduled separately from #1 \(same subsystem\)/);
+});
+
+test("no-history empty scope is explicit", async () => {
+  const text = formatStatus(await statusSnapshot({ repository: "example/empty", work: {} }, "/unused", [], {
+    stateLoader: async () => []
+  }));
+  assert.match(text, /No known work\./);
+  assert.doesNotMatch(text, /Recommended:/);
 });

@@ -28,7 +28,7 @@ const COMMANDS = [
     prerequisites: "A Git checkout and readable GitHub repository. Writing requires a safe, schema-valid dependency graph.",
     effects: "Reads issues and builds a proposal; only --write changes the manifest. Scoped writes also save a revisioned scope snapshot beside run evidence.",
     cautions: "Repository configuration controls execution, a workset selects canonical work, and a run records authorization/history. Saving either draft artifact does not launch work, expand delegated scope, grant human approval, or authorize integration. Lifecycle and epic-resolution conflicts remain fail-closed; drafting never mutates GitHub. If Codex rejects the agent output schema, retry deterministically without --agent; that provider error does not mean the repository manifest is invalid.",
-    next: ["maestro plan", "maestro start"],
+    next: ["maestro status", "maestro start"],
     examples: [
       ["draft", "--agent", "--verbose"],
       ["draft", "101", "102", "--write"]
@@ -63,7 +63,7 @@ const COMMANDS = [
     name: "plan",
     category: "Planning",
     summary: "Show the next dependency- and concurrency-aware wave without executing it.",
-    when: "Use to inspect what the manifest currently makes ready.",
+    when: "Use for a manifest-only planning/debugging preview; ordinary workflow can use status instead.",
     usages: ["maestro plan [manifest.json] [--repo-path <path>] [--workset <name>] [-j <count>]"],
     positionals: "Optional manifest path; defaults to .maestro.json in the target repository.",
     options: { "--repo-path": COMMON_REPO_OPTION, ...CONCURRENCY_OPTIONS, "--workset": { value: "<name>", description: "Limit the preview to a saved workset scope snapshot." } },
@@ -150,20 +150,23 @@ const COMMANDS = [
     category: "Inspection",
     summary: "Show current issue states and executable next-action recommendations.",
     when: "Use between every workflow action, especially for mixed validator or review outcomes.",
-    usages: ["maestro status [manifest.json] [issue ...] [--repo-path <path>] [-j <count>] [--watch]"],
-    positionals: "Optional manifest path and optional issue numbers for a focused view.",
+    usages: ["maestro status [manifest.json] [issue ...] [--all|--completed] [--repo-path <path>] [-j <count>] [--watch]"],
+    positionals: "Optional manifest path and optional issue numbers for a focused view. Issue numbers cannot be combined with --all or --completed.",
     options: {
       "--repo-path": COMMON_REPO_OPTION,
       ...CONCURRENCY_OPTIONS,
+      "--all": { description: "Expand the full known issue inventory, grouped by operational state." },
+      "--completed": { description: "Show completed items that are collapsed in the default operational view." },
       "--watch": { description: "Continuously refresh the current or issue-focused status view." }
     },
     prerequisites: "A target repository and manifest. Persisted runs are optional.",
     effects: "Reads manifest and run evidence only; --watch repeats the read until interrupted.",
-    cautions: "Validator approval, human approval, and integration are displayed as distinct states.",
+    cautions: "Default output is bounded and collapses completed history. Validator approval, human approval, and integration remain distinct.",
     next: ["Follow the Recommended command", "maestro details <issue>"],
-    examples: [["status"], ["status", "57", "63"]],
+    examples: [["status"], ["status", "--completed"]],
     positionalKind: "manifest-issues",
-    exclusive: [["-j", "--concurrency"]]
+    conflicts: [["--all", "$issues"], ["--completed", "$issues"]],
+    exclusive: [["-j", "--concurrency"], ["--all", "--completed"]]
   },
   {
     name: "details",
@@ -350,7 +353,7 @@ const WALKTHROUGHS = [
 
 1. Scope work:  maestro draft             Preview newly eligible GitHub issues.
                 maestro draft --write     Save a reviewed manifest proposal.
-2. Preview:     maestro plan              See the next ready wave.
+2. Inspect:     maestro status            See lifecycle state and the exact next wave.
 3. Execute:     maestro start             Run isolated workers and fresh validators.
                 maestro start --auto-rework  Also cycle actionable REWORK results (max 3).
 4. Inspect:     maestro status            Read states and the recommended next command.
