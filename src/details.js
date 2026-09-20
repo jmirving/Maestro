@@ -116,8 +116,22 @@ function appendEvidence(lines, state, evidence, { heading = null } = {}) {
       lines.push(`    Operation state: ${valueOrNone(conflict.operationState)}`);
       lines.push(`    Interrupted stage: ${valueOrNone(conflict.interruptedStage)}`);
       lines.push(`    Conflicted files: ${conflict.conflictedFiles?.length ? conflict.conflictedFiles.join(", ") : "none recorded"}`);
+      lines.push(`    Source SHA: ${valueOrNone(conflict.sourceSha)}`);
       lines.push(`    Target ref: ${valueOrNone(conflict.targetRef)}`);
+      lines.push(`    Target SHA: ${valueOrNone(conflict.targetSha)}`);
       lines.push(`    Continuation action: ${valueOrNone(conflict.continuationAction)}`);
+      if (conflict.resolution) {
+        lines.push(`    Resolver status: ${valueOrNone(conflict.resolution.status)}`);
+        if (conflict.resolution.verification) {
+          lines.push(`    Target ancestry verified: ${conflict.resolution.verification.targetAncestor === true ? "yes" : "no"}`);
+          lines.push(`    Worktree clean: ${conflict.resolution.verification.worktreeClean === true ? "yes" : "no"}`);
+          if (conflict.resolution.verification.failure) {
+            lines.push(`    Verification failure: ${conflict.resolution.verification.failure}`);
+          }
+        }
+        if (conflict.resolution.report) appendReport(lines, "Resolver report", conflict.resolution.report);
+        if (conflict.resolution.stderr) appendReport(lines, "Resolver stderr", conflict.resolution.stderr);
+      }
       if (conflict.stderr) appendReport(lines, "Git evidence", conflict.stderr);
       if (conflict.abortError) lines.push(`    Abort error: ${conflict.abortError}`);
     }

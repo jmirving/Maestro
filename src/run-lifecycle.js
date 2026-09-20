@@ -34,7 +34,7 @@ function classifyRunIssue(state, worker) {
   if (state.autoRework?.[issue]?.status === "retry-exhausted") {
     return { state: "rework-exhausted", action: `maestro details ${issue}` };
   }
-  if (["worker-failure", "validator-failure", "infrastructure-failure", "technical-conflict", "timeout", "no-progress"].includes(state.autoRework?.[issue]?.status)) {
+  if (["worker-failure", "validator-failure", "infrastructure-failure", "technical-conflict", "human-required", "timeout", "no-progress"].includes(state.autoRework?.[issue]?.status)) {
     return { state: "failed-awaiting-retry", action: `maestro details ${issue}` };
   }
   if (review && validation?.verdict === "approve") {

@@ -773,7 +773,7 @@ test("an exhausted session persists timeout before another attempt and resume pr
   assert.equal(executorCalls, 0);
 });
 
-test("displayed technical-conflict continuation resolves its source and resumes correction without authority", async (t) => {
+test("semantic rebase ambiguity preserves active conflict evidence and supports explicit human continuation", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-rework-conflict-"));
   const repoPath = path.join(root, "target");
   const originPath = path.join(root, "origin.git");
@@ -828,6 +828,11 @@ test("displayed technical-conflict continuation resolves its source and resumes 
     repoPath,
     issueIds: ["7"],
     reworkOptions: {
+      conflictResolver: async () => ({
+        status: "human-required",
+        exitCode: 0,
+        report: "RESOLUTION: HUMAN_REQUIRED\nThe two one-line replacements need a product decision."
+      }),
       workerExecutor: async () => {
         workerCalls += 1;
         throw new Error("worker must not start");
@@ -835,24 +840,26 @@ test("displayed technical-conflict continuation resolves its source and resumes 
     }
   });
 
-  assert.equal(result.issues[0].outcome, "technical-conflict");
+  assert.equal(result.issues[0].outcome, "human-required");
   assert.equal(workerCalls, 0);
   const state = await loadRunState(repoPath, result.issues[0].finalRunId);
   const attempt = state.correction.attempts["7"];
   assert.equal(attempt.number, 1);
   assert.equal(attempt.phase, "stopped");
-  assert.equal(attempt.outcome, "technical-conflict");
+  assert.equal(attempt.outcome, "human-required");
   assert.deepEqual(attempt.conflict.conflictedFiles, ["shared.txt"]);
   assert.equal(attempt.conflict.operation, "rebase");
-  assert.equal(attempt.conflict.operationState, "aborted");
+  assert.equal(attempt.conflict.operationState, "active");
   assert.equal(attempt.conflict.interruptedStage, "rework-refresh");
   assert.equal(attempt.conflict.continuationAction, `maestro rework 7 --run ${sourceRunId}`);
   assert.match(attempt.conflict.stderr, /could not apply.*worker change/s);
-  assert.equal(state.autoRework["7"].status, "technical-conflict");
+  assert.equal(attempt.conflict.resolution.status, "human-required");
+  assert.match(attempt.conflict.resolution.report, /product decision/);
+  assert.equal(state.autoRework["7"].status, "human-required");
   assert.equal(state.autoRework["7"].attemptsUsed, 1);
   assert.equal(state.autoRework["7"].action, "maestro details 7");
-  assert.equal(git(repoPath, "status", "--porcelain"), "");
-  assert.equal(git(repoPath, "rev-parse", "HEAD"), workerHeadSha);
+  assert.match(git(repoPath, "status", "--porcelain"), /UU shared\.txt/);
+  assert.equal(git(repoPath, "rev-parse", "-q", "--verify", "REBASE_HEAD"), workerHeadSha);
 
   const manualRebase = spawnSync("git", ["rebase", "origin/main"], { cwd: repoPath, encoding: "utf8" });
   assert.notEqual(manualRebase.status, 0, "the recorded conflict should remain reproducible for manual resolution");
@@ -907,7 +914,7 @@ if (process.argv.includes("read-only")) {
   assert.match(recovery.stdout, /Recommended: `maestro approve 7`/);
 
   const preservedConflict = await loadRunState(repoPath, result.issues[0].finalRunId);
-  assert.equal(preservedConflict.correction.attempts["7"].outcome, "technical-conflict");
+  assert.equal(preservedConflict.correction.attempts["7"].outcome, "human-required");
   assert.equal(preservedConflict.autoRework["7"].attemptsUsed, 1);
 });
 

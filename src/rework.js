@@ -12,9 +12,11 @@ const { reserveExplicitWork } = require("./scheduler");
 const { commitLifecycleTransition } = require("./lifecycle-coordination");
 const { selectReady } = require("./planner");
 const { loadExecutionStates, unresolvedWork } = require("./work-state");
+const { boundedText, executeConflictResolver } = require("./conflict-resolver");
 
 const DEFAULT_AUTO_REWORK_LIMIT = 3;
 const DEFAULT_AUTO_REWORK_TIMEOUT_MS = 30 * 60 * 1000;
+const DEFAULT_CONFLICT_RESOLUTION_TIMEOUT_MS = 10 * 60 * 1000;
 
 function remainingTime(deadlineAt) {
   if (!deadlineAt) return null;
@@ -114,7 +116,7 @@ async function resolveReworkParentRunId(repoPath, sourceRunId, issueIds) {
   const correction = current?.evidence?.correction;
   if (
     current?.state?.status === "failed" &&
-    correction?.outcome === "technical-conflict" &&
+    ["technical-conflict", "human-required"].includes(correction?.outcome) &&
     String(correction.sourceRunId) === String(sourceRunId)
   ) {
     return current.runId;
@@ -122,56 +124,178 @@ async function resolveReworkParentRunId(repoPath, sourceRunId, issueIds) {
   return sourceRunId;
 }
 
-async function refreshWorker(worker, { defaultBranch = "main", sourceRunId = null, runner = runChecked, deadlineAt = null } = {}) {
+async function gitOutput(runner, args, options) {
+  return (await runner("git", args, options)).stdout.trim();
+}
+
+async function captureOptionalGitOutput(runner, args, options) {
+  try {
+    return await gitOutput(runner, args, options);
+  } catch {
+    return null;
+  }
+}
+
+function resolutionFailure(worker, conflict, resolution, sourceRunId) {
+  const continuationAction = sourceRunId
+    ? `maestro rework ${worker.issue} --run ${sourceRunId}`
+    : `maestro rework ${worker.issue}`;
+  const semantic = resolution.status === "human-required";
+  const reason = semantic
+    ? "reported a semantic ambiguity that requires a human decision"
+    : "could not safely complete and verify the active rebase";
+  const error = new Error(
+    `Rework refresh for issue #${worker.issue} encountered a content conflict and its bounded resolver ${reason}. ` +
+    `The rebase and implementation remain in ${worker.worktreePath}. Inspect \`maestro details ${worker.issue}\` and the worktree before continuing. ` +
+    `Supported retry after resolving the active rebase: \`${continuationAction}\`.`
+  );
+  error.code = "REWORK_REFRESH_CONFLICT";
+  error.outcome = "human-required";
+  error.issue = String(worker.issue);
+  error.conflict = conflict;
+  return error;
+}
+
+async function verifyResolvedRebase(worker, conflict, { runner, deadlineAt }) {
+  const options = { cwd: worker.worktreePath, timeoutMs: remainingTime(deadlineAt) };
+  await runner("git", ["merge-base", "--is-ancestor", conflict.targetSha, "HEAD"], options);
+  const status = await gitOutput(runner, ["status", "--porcelain"], options);
+  if (status) throw new Error(`worktree is not clean:\n${status}`);
+  const branch = await gitOutput(runner, ["branch", "--show-current"], options);
+  if (conflict.branch && branch !== conflict.branch) {
+    throw new Error(`expected branch ${conflict.branch}, found ${branch || "detached HEAD"}`);
+  }
+  const aheadCount = Number(await gitOutput(runner, ["rev-list", "--count", `${conflict.targetSha}..HEAD`], options));
+  const retainedFiles = (await gitOutput(runner, ["diff", "--name-only", conflict.targetSha, "HEAD"], options))
+    .split("\n").map((entry) => entry.trim()).filter(Boolean);
+  const allowedFiles = new Set([...(conflict.implementationFiles || []), ...conflict.conflictedFiles]);
+  const unexpectedFiles = retainedFiles.filter((entry) => !allowedFiles.has(entry));
+  const retainedImplementationFiles = retainedFiles.filter((entry) => (conflict.implementationFiles || []).includes(entry));
+  if (!Number.isInteger(aheadCount) || aheadCount < 1 || !retainedFiles.length) {
+    throw new Error("the rebased branch no longer contains a retained implementation beyond the target");
+  }
+  if (!retainedImplementationFiles.length) {
+    throw new Error("none of the original implementation files remain changed beyond the target");
+  }
+  if (unexpectedFiles.length) {
+    throw new Error(`resolver changed files outside the retained implementation: ${unexpectedFiles.join(", ")}`);
+  }
+  return {
+    verified: true,
+    targetAncestor: true,
+    worktreeClean: true,
+    branch,
+    aheadCount,
+    retainedFiles,
+    retainedImplementationFiles,
+    headSha: await gitOutput(runner, ["rev-parse", "HEAD"], options)
+  };
+}
+
+async function refreshWorker(worker, {
+  repository = null,
+  issueContext = {},
+  priorWorkerReport = "",
+  validatorReport = "",
+  runId = "unknown",
+  defaultBranch = "main",
+  sourceRunId = null,
+  runner = runChecked,
+  conflictResolver = executeConflictResolver,
+  onConflictEvidence = async () => {},
+  deadlineAt = null
+} = {}) {
+  const options = { cwd: worker.worktreePath, timeoutMs: remainingTime(deadlineAt) };
   const status = (await runner("git", ["status", "--porcelain"], { cwd: worker.worktreePath, timeoutMs: remainingTime(deadlineAt) })).stdout.trim();
   if (status) throw new Error(`Rework branch for issue #${worker.issue} is not clean:\n${status}`);
   await runner("git", ["fetch", "origin", defaultBranch], { cwd: worker.worktreePath, timeoutMs: remainingTime(deadlineAt) });
+  const sourceSha = await gitOutput(runner, ["rev-parse", "HEAD"], options);
+  const targetRef = `origin/${defaultBranch}`;
+  const targetSha = await gitOutput(runner, ["rev-parse", targetRef], options);
+  const originalBaseSha = worker.baseSha || await gitOutput(runner, ["merge-base", sourceSha, targetSha], options);
+  const retainedDiff = await gitOutput(runner, ["diff", "--binary", originalBaseSha, sourceSha], options);
+  const implementationFiles = (await gitOutput(runner, ["diff", "--name-only", originalBaseSha, sourceSha], options))
+    .split("\n").map((entry) => entry.trim()).filter(Boolean);
   await runner("git", ["rebase", `origin/${defaultBranch}`], { cwd: worker.worktreePath, timeoutMs: remainingTime(deadlineAt) }).catch(async (error) => {
     let conflictedFiles = [];
     try {
       const unmerged = await runner("git", ["diff", "--name-only", "--diff-filter=U"], { cwd: worker.worktreePath, timeoutMs: remainingTime(deadlineAt) });
       conflictedFiles = unmerged.stdout.split("\n").map((entry) => entry.trim()).filter(Boolean);
     } catch {}
-    let operationState = "active";
-    let abortError = null;
-    try {
-      await runner("git", ["rebase", "--abort"], { cwd: worker.worktreePath, timeoutMs: remainingTime(deadlineAt) });
-      operationState = "aborted";
-    } catch (abortFailure) {
-      abortError = abortFailure.message;
-    }
+    if (!conflictedFiles.length) throw error;
     const continuationAction = sourceRunId
       ? `maestro rework ${worker.issue} --run ${sourceRunId}`
       : `maestro rework ${worker.issue}`;
-    const wrapped = new Error(
-      `Rework refresh for issue #${worker.issue} failed before its correction worker started. ` +
-      `Maestro ${operationState === "aborted" ? "aborted" : "could not abort"} its rebase so the implementation remains at ${worker.worktreePath}. ` +
-      `Inspect \`maestro details ${worker.issue}\`; after resolving the refresh safely, run \`${continuationAction}\`. ` +
-      `Cause: ${error.message}`
-    );
-    wrapped.cause = error;
-    wrapped.issue = String(worker.issue);
-    if (conflictedFiles.length) {
-      wrapped.code = "REWORK_REFRESH_CONFLICT";
-      wrapped.outcome = "technical-conflict";
-      wrapped.conflict = {
-        type: "content",
-        operation: "rebase",
-        operationState,
-        interruptedStage: "rework-refresh",
-        conflictedFiles,
+    const targetDiff = await captureOptionalGitOutput(runner, ["diff", "--binary", originalBaseSha, targetSha, "--", ...conflictedFiles], options);
+    const conflict = {
+      type: "content",
+      operation: "rebase",
+      operationState: "active",
+      interruptedStage: "rework-refresh",
+      conflictedFiles,
+      worktreePath: worker.worktreePath,
+      branch: worker.branch || null,
+      originalBaseSha,
+      sourceSha,
+      implementationFiles,
+      targetBranch: defaultBranch,
+      targetRef,
+      targetSha,
+      rebaseHeadSha: await captureOptionalGitOutput(runner, ["rev-parse", "-q", "--verify", "REBASE_HEAD"], options),
+      gitStatus: boundedText(await captureOptionalGitOutput(runner, ["status", "--porcelain=v2", "--branch"], options), 12000),
+      retainedDiff: boundedText(retainedDiff),
+      targetDiff: boundedText(targetDiff),
+      continuationAction,
+      failure: error.message,
+      stderr: error.result?.stderr?.trim() || null,
+      resolution: { status: "pending" }
+    };
+    await onConflictEvidence(conflict);
+    let resolution;
+    try {
+      resolution = await conflictResolver({
+        repository,
+        issue: String(worker.issue),
+        issueContext,
+        priorWorkerReport,
+        validatorReport,
+        conflict,
         worktreePath: worker.worktreePath,
-        branch: worker.branch || null,
-        originalBaseSha: worker.baseSha || null,
-        targetBranch: defaultBranch,
-        targetRef: `origin/${defaultBranch}`,
-        continuationAction,
-        failure: error.message,
-        stderr: error.result?.stderr?.trim() || null,
-        ...(abortError ? { abortError } : {})
+        runId,
+        timeoutMs: Math.min(remainingTime(deadlineAt) || DEFAULT_CONFLICT_RESOLUTION_TIMEOUT_MS, DEFAULT_CONFLICT_RESOLUTION_TIMEOUT_MS)
+      });
+    } catch (resolverError) {
+      resolution = { status: "failed", report: "", stderr: resolverError.message, thrown: true };
+    }
+    if (!resolution || !["resolved", "human-required", "failed"].includes(resolution.status)) {
+      resolution = {
+        status: "failed",
+        report: resolution?.report || "",
+        stderr: resolution?.stderr || `Resolver returned unsupported status: ${resolution?.status || "missing"}`
       };
     }
-    throw wrapped;
+    conflict.resolution = {
+      status: resolution.status,
+      exitCode: resolution.exitCode ?? null,
+      timedOut: resolution.timedOut === true,
+      reportPath: resolution.reportPath || null,
+      report: resolution.report || null,
+      stderr: resolution.stderr || null
+    };
+    if (resolution.status === "resolved") {
+      try {
+        conflict.resolution.verification = await verifyResolvedRebase(worker, conflict, { runner, deadlineAt });
+        conflict.operationState = "completed";
+        await onConflictEvidence(conflict);
+        return;
+      } catch (verificationError) {
+        conflict.resolution.status = "failed";
+        conflict.resolution.verification = { verified: false, failure: verificationError.message };
+      }
+    }
+    conflict.operationState = "active";
+    await onConflictEvidence(conflict);
+    throw resolutionFailure(worker, conflict, conflict.resolution, sourceRunId);
   });
   const baseSha = (await runner("git", ["rev-parse", `origin/${defaultBranch}`], { cwd: worker.worktreePath, timeoutMs: remainingTime(deadlineAt) })).stdout.trim();
   return { ...worker, baseSha };
@@ -188,6 +312,7 @@ async function executeReworkRun(config, {
   baselineRunner,
   workerExecutor = executeWorker,
   validatorExecutor = validateWorker,
+  conflictResolver = executeConflictResolver,
   stateSaver = saveRunState,
   stateLoader = loadRunState,
   executionStateLoader = loadExecutionStates,
@@ -370,15 +495,35 @@ async function executeReworkRun(config, {
 
     const refreshed = [];
     for (const worker of candidates) {
+      const issue = String(worker.issue);
+      const configuredIssue = config.work?.[issue] || {};
+      const selectedIssue = (source.plan?.selected || []).find((entry) => String(entry.id) === issue) || {};
+      const issueContext = {
+        title: selectedIssue.title || configuredIssue.title || configuredIssue.github?.title || null,
+        body: selectedIssue.body || configuredIssue.body || null
+      };
+      const priorValidation = validationByIssue.get(issue);
       currentStage = "refresh";
       console.error(`[Maestro] rework #${worker.issue}: rebasing existing implementation onto current ${config.defaultBranch || "main"}`);
       refreshed.push(await refreshWorker(worker, {
+        repository: config.repository,
+        issueContext,
+        priorWorkerReport: worker.report || "",
+        validatorReport: priorValidation?.report || "",
+        runId,
         defaultBranch: config.defaultBranch || "main",
         sourceRunId,
         runner,
+        conflictResolver,
+        onConflictEvidence: async (conflict) => {
+          const attempt = result.correction.attempts[issue];
+          attempt.phase = conflict.resolution?.status === "pending" ? "resolving-refresh-conflict" : "refresh";
+          attempt.conflict = conflict;
+          await stateSaver(repoPath, runId, result);
+        },
         deadlineAt
       }));
-      result.correction.attempts[String(worker.issue)].phase = "worker-pending";
+      result.correction.attempts[issue].phase = "worker-pending";
       await stateSaver(repoPath, runId, result);
     }
 
@@ -455,7 +600,7 @@ async function executeReworkRun(config, {
           attempt.outcome = "timeout";
           attempt.timeoutStage = currentStage;
         } else if (error.code === "REWORK_REFRESH_CONFLICT" && String(error.issue) === issue) {
-          attempt.outcome = "technical-conflict";
+          attempt.outcome = error.outcome || "human-required";
           attempt.conflict = error.conflict;
         } else {
           attempt.outcome = "infrastructure-failure";
@@ -536,7 +681,7 @@ async function autoReworkIssue(config, {
 
     if (resolved.state.status === "failed") {
       const persistedOutcome = evidence.correction?.outcome;
-      const outcome = ["validator-failure", "worker-failure", "technical-conflict", "timeout", "no-progress"].includes(persistedOutcome)
+      const outcome = ["validator-failure", "worker-failure", "technical-conflict", "human-required", "timeout", "no-progress"].includes(persistedOutcome)
         ? persistedOutcome
         : "infrastructure-failure";
       await recordOutcome(resolved.runId, issue, {
@@ -657,7 +802,7 @@ async function autoReworkIssue(config, {
       }
       const outcome = error.code === "AUTOMATION_TIMEOUT"
         ? "timeout"
-        : error.code === "REWORK_REFRESH_CONFLICT" ? "technical-conflict" : "infrastructure-failure";
+        : error.code === "REWORK_REFRESH_CONFLICT" ? (error.outcome || "human-required") : "infrastructure-failure";
       await recordOutcome(runId, issue, {
         status: outcome,
         finalVerdict: null,
@@ -752,6 +897,7 @@ async function autoRework(config, {
 module.exports = {
   DEFAULT_AUTO_REWORK_LIMIT,
   DEFAULT_AUTO_REWORK_TIMEOUT_MS,
+  DEFAULT_CONFLICT_RESOLUTION_TIMEOUT_MS,
   resolveIssueReworkSources,
   resolveReworkParentRunId,
   refreshWorker,

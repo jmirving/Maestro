@@ -69,6 +69,17 @@ test("terminal and inconsistent items cannot produce stale review or rework reco
   ], [], []), { recommended: null, alternatives: [] });
 });
 
+test("human-required conflict recovery recommends preserved details", () => {
+  assert.deepEqual(buildRecommendations([{
+    issue: "35",
+    autoReworkStatus: "human-required",
+    action: "maestro details 35"
+  }], [], []), {
+    recommended: "maestro details 35",
+    alternatives: []
+  });
+});
+
 test("the shareable artifact ends with the same compact issue summary and recommendation footer", () => {
   const snapshot = {
     items: [{ issue: "7", title: "Correction", state: "validator approved, awaiting human approval" }],

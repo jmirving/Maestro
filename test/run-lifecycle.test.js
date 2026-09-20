@@ -46,3 +46,18 @@ test("other human dispositions remain non-recoverable", () => {
     review: { disposition: "discard" }
   }), false);
 });
+
+test("resolver ambiguity is a failed correction awaiting explicit human action", () => {
+  const state = {
+    runId: "20260920101010-aaaaaa",
+    status: "failed",
+    workers: [{ issue: "35", exitCode: 0 }],
+    validations: [],
+    reviews: {},
+    autoRework: { "35": { status: "human-required" } }
+  };
+  assert.deepEqual(classifyRunIssue(state, state.workers[0]), {
+    state: "failed-awaiting-retry",
+    action: "maestro details 35"
+  });
+});

@@ -347,6 +347,28 @@ test("status distinguishes a rework refresh conflict and shows its continuation"
   assert.doesNotMatch(text, /human decision/);
 });
 
+test("status presents resolver ambiguity as an explicit human-required conflict", async () => {
+  const run = mixedRun();
+  run.status = "failed";
+  run.workers = [];
+  run.validations = [];
+  run.plan.selected = [{ id: "7", title: "Needs correction" }];
+  run.correction = { attempts: { "7": {
+    number: 1,
+    phase: "stopped",
+    outcome: "human-required",
+    conflict: { operationState: "active", resolution: { status: "human-required" } }
+  } } };
+  run.autoRework = { "7": { status: "human-required", attemptsUsed: 1, action: "maestro details 7" } };
+
+  const text = formatStatus(await statusSnapshot(config, "/unused", ["7"], {
+    stateLoader: async () => [run]
+  }));
+  assert.match(text, /rebase conflict requires human resolution \(active\)/);
+  assert.match(text, /conflicted implementation and recovery evidence are preserved/);
+  assert.match(text, /Recommended: `maestro details 7`/);
+});
+
 test("status displays timeout and no-progress as distinct automatic correction stops", async () => {
   const timeout = mixedRun();
   timeout.status = "failed";

@@ -92,21 +92,23 @@ function describeIssue(config, issue, evidence, plan, effective = null) {
   } else if (validation?.verdict === "human_gate") {
     state = "validator requested a human decision, awaiting human disposition";
     integrationState = "not eligible until human disposition";
-  } else if (["worker-failure", "validator-failure", "infrastructure-failure", "technical-conflict", "timeout", "no-progress"].includes(evidence?.autoRework?.status || evidence?.correction?.outcome)) {
+  } else if (["worker-failure", "validator-failure", "infrastructure-failure", "technical-conflict", "human-required", "timeout", "no-progress"].includes(evidence?.autoRework?.status || evidence?.correction?.outcome)) {
     const outcome = evidence.autoRework?.status || evidence.correction.outcome;
     const attempt = evidence.autoRework?.attemptsUsed ?? evidence.correction?.number ?? 0;
     const conflict = evidence.correction?.conflict;
     state = outcome === "technical-conflict"
       ? `automatic correction stopped after charged attempt ${attempt}: rebase content conflict (${conflict?.operationState || "state unknown"}); resolve safely, then run ${conflict?.continuationAction || `maestro rework ${issue}`}`
+      : outcome === "human-required"
+        ? `automatic correction stopped after charged attempt ${attempt}: rebase conflict requires human resolution (${conflict?.operationState || "state unknown"}); inspect preserved resolver evidence and Git state`
       : outcome === "timeout"
         ? `automatic correction stopped${attempt ? ` after charged attempt ${attempt}` : " before a correction attempt"}: session timeout during ${evidence.autoRework?.timeoutStage || evidence.correction?.timeoutStage || "activity"}; human attention required`
         : outcome === "no-progress"
           ? `automatic correction stopped after charged attempt ${attempt}: worker completed without a new commit; human attention required`
       : `automatic correction stopped${attempt ? ` after attempt ${attempt}` : " before a correction attempt"}: ${outcome}; human attention required`;
-    integrationState = outcome === "technical-conflict"
+    integrationState = ["technical-conflict", "human-required"].includes(outcome)
       ? "not eligible; conflicted implementation and recovery evidence are preserved"
       : "not eligible; failure evidence is preserved";
-    action = outcome === "technical-conflict"
+    action = ["technical-conflict", "human-required"].includes(outcome)
       ? (evidence.autoRework?.action || `maestro details ${issue}`)
       : `maestro details ${issue}`;
   } else if (evidence?.state === "running" || evidence?.state === "rework-running") {
