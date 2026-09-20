@@ -363,7 +363,7 @@
       ],
       "github": {
         "state": "CLOSED",
-        "stateReason": null,
+        "stateReason": "completed",
         "closedAt": "2026-09-11T19:29:33Z",
         "updatedAt": "2026-09-11T19:29:33Z",
         "title": "Allow `maestro commit` to handle the target `.maestro.json` manifest without self-blocking on cleanliness",
@@ -373,6 +373,16 @@
           "requires": [
             "node"
           ]
+        }
+      },
+      "completion": {
+        "source": "external",
+        "reconciledAt": "2026-09-11T19:29:33Z",
+        "githubState": "CLOSED",
+        "githubStateReason": "completed",
+        "evidence": {
+          "manifestStatus": "complete",
+          "maestroHistory": true
         }
       }
     },
@@ -686,7 +696,7 @@
       }
     },
     "33": {
-      "status": "ready",
+      "status": "complete",
       "priority": 5,
       "github": {
         "state": "OPEN",
