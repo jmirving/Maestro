@@ -9,6 +9,8 @@ const { newRunId } = require("./controller");
 const { resolveCurrentIssueStates } = require("./run-resolver");
 const { isRecoverableValidatorRework } = require("./run-lifecycle");
 const { reserveExplicitWork } = require("./scheduler");
+const { selectReady } = require("./planner");
+const { loadExecutionStates, unresolvedWork } = require("./work-state");
 
 const DEFAULT_AUTO_REWORK_LIMIT = 3;
 const DEFAULT_AUTO_REWORK_TIMEOUT_MS = 30 * 60 * 1000;
@@ -187,6 +189,7 @@ async function executeReworkRun(config, {
   validatorExecutor = validateWorker,
   stateSaver = saveRunState,
   stateLoader = loadRunState,
+  executionStateLoader = loadExecutionStates,
   automatic = false,
   retryLimit = null,
   deadlineAt = null,
@@ -240,14 +243,36 @@ async function executeReworkRun(config, {
   const reservedIssues = reservedState?.plan?.selected
     ? new Set(reservedState.plan.selected.map((item) => String(item.id)))
     : null;
-  const candidates = reservedIssues
-    ? eligibleCandidates.filter((worker) => reservedIssues.has(String(worker.issue)))
-    : eligibleCandidates.slice(0, concurrencySetting.value);
-
-  const items = candidates.map((worker) => {
+  const eligibleItems = eligibleCandidates.map((worker) => {
     const configured = config.work?.[String(worker.issue)] || {};
     return { id: String(worker.issue), ...configured, mode: "rework" };
   });
+  let advisoryDeferred = [];
+  let selectedItems;
+  if (reservedIssues) {
+    selectedItems = eligibleItems.filter((item) => reservedIssues.has(item.id));
+  } else {
+    const states = await executionStateLoader(repoPath);
+    const activeIssues = [...unresolvedWork(states, config).values()]
+      .filter((item) => ["running", "rework-running"].includes(item.state))
+      .map((item) => item.issue);
+    const selection = selectReady(
+      eligibleItems,
+      Math.max(0, concurrencySetting.value - activeIssues.length),
+      config.planning?.advisoryConflicts || [],
+      activeIssues
+    );
+    selectedItems = selection.selected;
+    advisoryDeferred = selection.advisoryDeferred;
+  }
+  if (!selectedItems.length) {
+    const error = new Error("Cannot start selected rework because repository capacity is exhausted or every available item has an advisory conflict with active work.");
+    error.code = "CAPACITY_UNAVAILABLE";
+    throw error;
+  }
+  const selectedIds = new Set(selectedItems.map((item) => item.id));
+  const candidates = eligibleCandidates.filter((worker) => selectedIds.has(String(worker.issue)));
+  const items = candidates.map((worker) => selectedItems.find((item) => item.id === String(worker.issue)));
 
   const attempts = {};
   for (const worker of candidates) {
@@ -283,7 +308,8 @@ async function executeReworkRun(config, {
       concurrencySource: concurrencySetting.source,
       savedDefaultConcurrency: concurrencySetting.savedDefault,
       ready: eligibleCandidates.map((worker) => ({ id: String(worker.issue), mode: "rework" })),
-      selected: items
+      selected: items,
+      advisoryDeferred
     },
     baseline: null,
     preflights: [],

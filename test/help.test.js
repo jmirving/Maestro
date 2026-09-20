@@ -136,6 +136,10 @@ test("aliases and important documented flags are accepted by the shared registry
   assert.equal(parseInvocation(["review", "--run", "run-1", "--issue", "57", "--disposition", "approve"]).command, "review");
   assert.throws(() => parseInvocation(["run", "--execute", "--integrate"]), /only one/);
   assert.throws(() => parseInvocation(["next", "-j", "2", "--concurrency", "4"]), /only one/);
+  const duplicateDraftConcurrency = invoke(tempDir(), "draft", "-j", "2", "--concurrency", "4");
+  assert.equal(duplicateDraftConcurrency.status, 1);
+  assert.match(duplicateDraftConcurrency.stderr, /draft accepts only one of -j, --concurrency/);
+  assert.doesNotMatch(duplicateDraftConcurrency.stderr, /could not find a Git repository/i);
   for (const value of ["0", "-1", "1.5", "four", "9", "9007199254740992"]) {
     assert.throws(() => parseInvocation(["plan", "-j", value]), /between 1 and 8/);
   }

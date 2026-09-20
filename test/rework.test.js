@@ -96,6 +96,40 @@ test("manual rework records and respects a temporary concurrency bound", async (
   assert.deepEqual(result.workers.map((item) => item.issue), ["7"]);
 });
 
+test("manual rework selection respects advisory conflicts between candidates and active work", async (t) => {
+  const fixture = await autoFixture(t, ["7", "8", "9"]);
+  fixture.config.work["99"] = { status: "ready" };
+  fixture.config.planning = {
+    advisoryConflicts: [
+      { issues: ["7", "99"], reason: "active overlap", source: "test", confidence: "high" },
+      { issues: ["8", "9"], reason: "candidate overlap", source: "test", confidence: "high" }
+    ]
+  };
+  await saveRunState(fixture.repoPath, "20260910100500-acdeff", {
+    runId: "20260910100500-acdeff",
+    mode: "execute",
+    status: "running",
+    plan: { selected: [{ id: "99" }] },
+    workers: [],
+    validations: [],
+    reviews: {}
+  });
+
+  const result = await executeReworkRun(fixture.config, {
+    repoPath: fixture.repoPath,
+    sourceRunId: fixture.sourceRunId,
+    runId: "20260910101010-conflict-safe",
+    concurrency: { value: 3, source: "this invocation", savedDefault: 2 },
+    runner: fixture.runner,
+    workerExecutor: async ({ item, worktree }) => ({ issue: item.id, exitCode: 0, ...worktree, headSha: `new-${item.id}` }),
+    validatorExecutor: async ({ worker }) => ({ issue: worker.issue, verdict: "approve", exitCode: 0 })
+  });
+
+  assert.deepEqual(result.plan.selected.map((item) => item.id), ["8"]);
+  assert.deepEqual(result.plan.advisoryDeferred.map((item) => [item.id, item.conflictsWith]), [["7", "99"], ["9", "8"]]);
+  assert.deepEqual(result.workers.map((item) => item.issue), ["8"]);
+});
+
 test("a human-gated run marked rework-original can enter rework", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-gate-rework-"));
   const repoPath = path.join(root, "target");
@@ -900,10 +934,15 @@ test("issue-local automatic rework lets an independent sibling approve after ano
   ]);
 });
 
-test("maestro next --auto-rework resumes persisted REWORK without a run ID", async (t) => {
-  const fixture = await autoFixture(t);
+test("maestro next --auto-rework serializes advisory conflicts and preserves invocation concurrency across resumed corrections", async (t) => {
+  const fixture = await autoFixture(t, ["7", "8"]);
+  fixture.config.planning = {
+    advisoryConflicts: [{ issues: ["7", "8"], reason: "shared files", source: "test", confidence: "high" }]
+  };
   const manifestPath = path.join(fixture.repoPath, ".maestro.json");
   const binPath = path.join(path.dirname(fixture.repoPath), "bin");
+  const eventPath = path.join(path.dirname(fixture.repoPath), "rework-events.log");
+  const validationCountPath = path.join(path.dirname(fixture.repoPath), "validation-count");
   await fs.mkdir(binPath);
   await fs.writeFile(manifestPath, `${JSON.stringify(fixture.config)}\n`);
   await fs.writeFile(path.join(binPath, "git"), `#!/usr/bin/env node
@@ -912,23 +951,43 @@ if (process.argv[2] === "rev-parse") process.stdout.write(process.argv[3] === "H
   await fs.writeFile(path.join(binPath, "codex"), `#!/usr/bin/env node
 const fs = require("node:fs");
 const index = process.argv.indexOf("--output-last-message");
-if (index >= 0) fs.writeFileSync(process.argv[index + 1], process.argv.includes("read-only") ? "VERDICT: APPROVE\\n" : "Result: complete\\n");
+if (process.argv.includes("read-only")) {
+  const countPath = process.env.MAESTRO_TEST_VALIDATION_COUNT;
+  const count = fs.existsSync(countPath) ? Number(fs.readFileSync(countPath, "utf8")) : 0;
+  fs.writeFileSync(countPath, String(count + 1));
+  fs.writeFileSync(process.argv[index + 1], count === 0 ? "VERDICT: REWORK\\n" : "VERDICT: APPROVE\\n");
+} else {
+  fs.appendFileSync(process.env.MAESTRO_TEST_EVENTS, "start\\n");
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 75);
+  fs.appendFileSync(process.env.MAESTRO_TEST_EVENTS, "finish\\n");
+  fs.writeFileSync(process.argv[index + 1], "Result: complete\\n");
+}
 `);
   await fs.chmod(path.join(binPath, "git"), 0o755);
   await fs.chmod(path.join(binPath, "codex"), 0o755);
 
   const result = spawnSync(process.execPath, [
-    path.resolve(__dirname, "../bin/maestro.js"), "next", "--auto-rework", "--repo-path", fixture.repoPath
+    path.resolve(__dirname, "../bin/maestro.js"), "next", "--auto-rework", "-j", "4", "--repo-path", fixture.repoPath
   ], {
     encoding: "utf8",
-    env: { ...process.env, PATH: `${binPath}${path.delimiter}${process.env.PATH}` }
+    env: {
+      ...process.env,
+      PATH: `${binPath}${path.delimiter}${process.env.PATH}`,
+      MAESTRO_TEST_EVENTS: eventPath,
+      MAESTRO_TEST_VALIDATION_COUNT: validationCountPath
+    }
   });
 
   assert.equal(result.status, 0, result.stderr);
   const output = parseLeadingJson(result.stdout);
   assert.deepEqual(output.plan.selected, []);
-  assert.ok(output.autoRework.issues[0], JSON.stringify(output, null, 2));
-  assert.equal(output.autoRework.issues[0].outcome, "approved");
-  assert.equal(output.autoRework.issues[0].runs[0].correction.attempts["7"].automatic, true);
-  assert.match(result.stdout, /Recommended: `maestro approve 7`/);
+  assert.deepEqual(output.autoRework.issues.map((entry) => [entry.issue, entry.outcome]), [["7", "approved"], ["8", "approved"]]);
+  const children = output.autoRework.issues.flatMap((entry) => entry.runs);
+  assert.equal(children.length, 3);
+  assert.ok(children.every((child) => child.plan.concurrency === 4));
+  assert.ok(children.every((child) => child.plan.concurrencySource === "this invocation"));
+  assert.ok(children.every((child) => child.plan.savedDefaultConcurrency === 2));
+  assert.ok(children.every((child) => Object.values(child.correction.attempts).every((attempt) => attempt.automatic)));
+  assert.deepEqual((await fs.readFile(eventPath, "utf8")).trim().split("\n"), ["start", "finish", "start", "finish", "start", "finish"]);
+  assert.match(result.stdout, /Recommended: `maestro approve 7 8`/);
 });

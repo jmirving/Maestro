@@ -649,7 +649,7 @@ async function main() {
             initialReservations: {
               [task.issue]: { runId: prepared.runId, reservedState: prepared.state, resolved: prepared.resolved }
             },
-            reworkOptions: { reserveCapacity: true }
+            reworkOptions: { reserveCapacity: true, concurrency }
           }),
           tasksAfterOutcome: (settledResult) => correctionTasksForResult(settledResult)
         } : {}),
