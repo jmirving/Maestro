@@ -224,6 +224,80 @@ test("young incomplete locks and changed lock identities are never reclaimed", a
   assert.equal(await fs.readFile(lock, "utf8"), `${process.pid}\n`);
 });
 
+test("simultaneous stale-lock reclaimers serialize before either writer publishes", async (t) => {
+  const { repoPath } = await fixture(t);
+  const file = statePath(repoPath, runId);
+  const lock = `${file}.lock`;
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(lock, "abandoned\n", "utf8");
+  await ageFile(lock);
+
+  let releaseFirst;
+  const firstMayRemove = new Promise((resolve) => { releaseFirst = resolve; });
+  let firstInspected;
+  const firstDidInspect = new Promise((resolve) => { firstInspected = resolve; });
+  let secondContended;
+  const secondDidContend = new Promise((resolve) => { secondContended = resolve; });
+
+  const firstState = runState(1);
+  const secondState = runState(2);
+  const first = saveRunState(repoPath, runId, firstState, {
+    retryMs: 0,
+    beforeStaleLockRemoval: async () => {
+      firstInspected();
+      await firstMayRemove;
+    }
+  });
+  await firstDidInspect;
+  const second = saveRunState(repoPath, runId, secondState, {
+    retryMs: 0,
+    onStaleLockReclaimBusy: secondContended
+  });
+  await secondDidContend;
+  releaseFirst();
+
+  const results = await Promise.allSettled([first, second]);
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+  const rejection = results.find((result) => result.status === "rejected").reason;
+  assert.ok(rejection instanceof RunStateConflictError);
+  assert.ok([1, 2].includes((await loadRunState(repoPath, runId)).generation));
+  await assert.rejects(fs.stat(lock), { code: "ENOENT" });
+});
+
+test("a writer paused before owner publication exposes no incomplete reclaimable lock", async (t) => {
+  const { repoPath } = await fixture(t);
+  const file = statePath(repoPath, runId);
+  const lock = `${file}.lock`;
+  let resumeFirst;
+  const firstMayPublish = new Promise((resolve) => { resumeFirst = resolve; });
+  let firstPrepared;
+  const firstDidPrepare = new Promise((resolve) => { firstPrepared = resolve; });
+  let paused = false;
+  let currentTime = Date.now();
+
+  const first = saveRunState(repoPath, runId, runState(1), {
+    retryMs: 0,
+    staleLockMs: 1_000,
+    now: () => currentTime,
+    beforeLockPublish: async () => {
+      if (paused) return;
+      paused = true;
+      firstPrepared();
+      await firstMayPublish;
+    }
+  });
+  await firstDidPrepare;
+  currentTime += 5_000;
+  await assert.rejects(fs.stat(lock), { code: "ENOENT" });
+
+  await saveRunState(repoPath, runId, runState(2), { retryMs: 0, staleLockMs: 1_000 });
+  resumeFirst();
+  await assert.rejects(first, RunStateConflictError);
+
+  assert.equal((await loadRunState(repoPath, runId)).generation, 2);
+  await assert.rejects(fs.stat(lock), { code: "ENOENT" });
+});
+
 test("genuinely corrupt state still fails clearly", async (t) => {
   const { repoPath } = await fixture(t);
   const root = reportRootForRepo(repoPath);

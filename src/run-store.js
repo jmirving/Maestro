@@ -43,6 +43,27 @@ function sameFileIdentity(left, right) {
     left.ctimeNs === right.ctimeNs;
 }
 
+function lockCandidatePath(lock) {
+  return `${lock}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.candidate`;
+}
+
+async function prepareLockCandidate(lock) {
+  const candidate = lockCandidatePath(lock);
+  let handle;
+  try {
+    handle = await fs.open(candidate, "wx", 0o600);
+    await handle.writeFile(`${process.pid}\n`, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    return candidate;
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    await fs.unlink(candidate).catch(() => {});
+    throw error;
+  }
+}
+
 async function lockIdentity(lock) {
   try {
     return await fs.stat(lock, { bigint: true });
@@ -83,30 +104,47 @@ async function removeLockIfUnchanged(lock, expectedIdentity) {
 async function removeStaleLock(lock, {
   now = Date.now,
   staleLockMs = LOCK_STALE_GRACE_MS,
-  beforeStaleLockRemoval = null
+  beforeStaleLockRemoval = null,
+  onStaleLockReclaimBusy = null
 } = {}) {
-  const inspected = await inspectLock(lock);
-  if (inspected == null) return true;
-  const { contents, identity } = inspected;
-
-  // A live writer can be paused between exclusive creation and its PID write.
-  // Never interpret an incomplete (or even partially numeric) lock as abandoned
-  // until it has remained unchanged for a grace period.
-  const ageMs = now() - Number(identity.mtimeNs / 1_000_000n);
-  if (ageMs < staleLockMs) return false;
-
-  const owner = Number(contents.trim());
-  if (Number.isInteger(owner) && owner > 0) {
+  const reclaim = `${lock}.reclaim`;
+  let reclaimHandle;
+  try {
     try {
-      process.kill(owner, 0);
-      return false;
+      reclaimHandle = await fs.open(reclaim, "wx", 0o600);
     } catch (error) {
-      if (error.code !== "ESRCH") return false;
+      if (error.code !== "EEXIST") throw error;
+      if (onStaleLockReclaimBusy) await onStaleLockReclaimBusy({ lock, reclaim });
+      return false;
+    }
+
+    const inspected = await inspectLock(lock);
+    if (inspected == null) return true;
+    const { contents, identity } = inspected;
+
+    const ageMs = now() - Number(identity.mtimeNs / 1_000_000n);
+    if (ageMs < staleLockMs) return false;
+
+    const owner = Number(contents.trim());
+    if (Number.isInteger(owner) && owner > 0) {
+      try {
+        process.kill(owner, 0);
+        return false;
+      } catch (error) {
+        if (error.code !== "ESRCH") return false;
+      }
+    }
+
+    if (beforeStaleLockRemoval) await beforeStaleLockRemoval({ lock, identity });
+    return removeLockIfUnchanged(lock, identity);
+  } finally {
+    if (reclaimHandle) {
+      await reclaimHandle.close();
+      await fs.unlink(reclaim).catch((error) => {
+        if (error.code !== "ENOENT") throw error;
+      });
     }
   }
-
-  if (beforeStaleLockRemoval) await beforeStaleLockRemoval({ lock, identity });
-  return removeLockIfUnchanged(lock, identity);
 }
 
 async function withRunStateLock(file, operation, {
@@ -114,32 +152,54 @@ async function withRunStateLock(file, operation, {
   timeoutMs = LOCK_TIMEOUT_MS,
   now = Date.now,
   staleLockMs = LOCK_STALE_GRACE_MS,
-  beforeStaleLockRemoval = null
+  beforeStaleLockRemoval = null,
+  onStaleLockReclaimBusy = null,
+  beforeLockPublish = null
 } = {}) {
   const lock = `${file}.lock`;
+  const reclaim = `${lock}.reclaim`;
   await fs.mkdir(path.dirname(file), { recursive: true });
   const started = now();
-  let handle;
+  let candidate;
   let acquiredIdentity;
   for (;;) {
     try {
-      handle = await fs.open(lock, "wx");
+      candidate = await prepareLockCandidate(lock);
       try {
-        await handle.writeFile(`${process.pid}\n`);
-        acquiredIdentity = await handle.stat({ bigint: true });
-      } catch (error) {
-        const incompleteIdentity = await handle.stat({ bigint: true }).catch(() => null);
-        await handle.close().catch(() => {});
-        handle = null;
-        if (incompleteIdentity != null) {
-          await removeLockIfUnchanged(lock, incompleteIdentity).catch(() => {});
+        if (beforeLockPublish) await beforeLockPublish({ lock, candidate });
+        await fs.link(candidate, lock);
+        await fs.unlink(candidate);
+        candidate = null;
+        acquiredIdentity = await lockIdentity(lock);
+
+        // A reclaimer may have claimed the stale lock after this writer's
+        // initial attempt but before publication. It cannot mistake this live
+        // owner for stale, but waiting for its claim to clear keeps lock
+        // publication and stale deletion strictly ordered.
+        try {
+          await fs.access(reclaim);
+          await removeLockIfUnchanged(lock, acquiredIdentity);
+          acquiredIdentity = null;
+          const busy = new Error("Run-state lock reclamation is in progress.");
+          busy.code = "EEXIST";
+          throw busy;
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
         }
+      } catch (error) {
+        await fs.unlink(candidate).catch(() => {});
+        candidate = null;
         throw error;
       }
       break;
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
-      if (await removeStaleLock(lock, { now, staleLockMs, beforeStaleLockRemoval })) continue;
+      if (await removeStaleLock(lock, {
+        now,
+        staleLockMs,
+        beforeStaleLockRemoval,
+        onStaleLockReclaimBusy
+      })) continue;
       if (now() - started >= timeoutMs) {
         throw new Error(`Timed out waiting for Maestro's run-state lock at ${lock}.`);
       }
@@ -149,7 +209,6 @@ async function withRunStateLock(file, operation, {
   try {
     return await operation();
   } finally {
-    await handle.close();
     await removeLockIfUnchanged(lock, acquiredIdentity);
   }
 }
