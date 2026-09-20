@@ -5,6 +5,7 @@ const { reportRootForRepo } = require("./reporter");
 const { saveRunState } = require("./run-store");
 const { conflictFor } = require("./planning-analysis");
 const { selectReady } = require("./planner");
+const { currentIssueEvidenceFromStates } = require("./run-resolver");
 
 const LOCK_RETRY_MS = 20;
 const LOCK_TIMEOUT_MS = 10_000;
@@ -161,6 +162,8 @@ async function reserveExplicitWork(config, {
   items,
   stateLoader = loadExecutionStates,
   stateSaver = saveRunState,
+  expectedCurrent = [],
+  currentEligibility = null,
   extraState = {}
 } = {}) {
   const requested = items.map((item) => ({ ...item, id: String(item.id) }));
@@ -171,6 +174,29 @@ async function reserveExplicitWork(config, {
   }
   return withCapacityLock(repoPath, async () => {
     const states = await stateLoader(repoPath);
+    const expectedByIssue = new Map(expectedCurrent.map((entry) => [String(entry.issue), entry]));
+    const current = expectedByIssue.size
+      ? currentIssueEvidenceFromStates(states)
+        .filter((entry) => expectedByIssue.has(String(entry.issue)))
+      : [];
+    const currentByIssue = new Map(current.map((entry) => [String(entry.issue), entry]));
+    const changed = requested.find((item) => {
+      const expected = expectedByIssue.get(item.id);
+      if (!expected) return false;
+      const actual = currentByIssue.get(item.id);
+      return !actual || String(actual.runId) !== String(expected.runId) ||
+        (currentEligibility && !currentEligibility(actual));
+    });
+    if (changed) {
+      return {
+        reserved: false,
+        reason: "changed-evidence",
+        issue: changed.id,
+        expected: expectedByIssue.get(changed.id),
+        current: currentByIssue.get(changed.id) || null,
+        state: null
+      };
+    }
     const capacity = capacitySnapshot(config, states);
     const activeIssues = new Set(capacity.active.map((entry) => String(entry.issue)));
     const duplicate = requested.find((item) => activeIssues.has(item.id));
@@ -214,7 +240,13 @@ async function reserveExplicitWork(config, {
     const plan = { ...capacity.plan, selected: requested };
     const state = reservedRunState({ repoPath, runId, mode, plan, capacity, extraState });
     await stateSaver(repoPath, runId, state);
-    return { reserved: true, capacity, plan, state };
+    return {
+      reserved: true,
+      capacity,
+      plan,
+      state,
+      ...(expectedByIssue.size ? { current } : {})
+    };
   });
 }
 
@@ -322,7 +354,14 @@ async function runLifecycleBackfill(config, {
         for (let index = 0; index < pending.length; index += 1) {
           const task = pending[index];
           const prepared = reserveInitial ? await reserveInitial(task) : null;
-          if (prepared && !prepared.reserved) continue;
+          if (prepared && !prepared.reserved) {
+            if (prepared.terminal) {
+              pending.splice(index, 1);
+              admitted = true;
+              break;
+            }
+            continue;
+          }
           pending.splice(index, 1);
           launch(executeInitial(task, prepared));
           launched = true;

@@ -6,6 +6,8 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { loadPersistedRunStates, saveRunState } = require("../src/run-store");
 const { reportRootForRepo } = require("../src/reporter");
+const { resolveCurrentIssueStates } = require("../src/run-resolver");
+const { isRecoverableValidatorRework } = require("../src/run-lifecycle");
 const {
   capacitySnapshot,
   reserveReadyWork,
@@ -54,6 +56,77 @@ test("atomic repository reservations cannot duplicate work or oversubscribe capa
   assert.equal(snapshot.used, 2);
   assert.equal(snapshot.available, 0);
   assert.equal(snapshot.idle.kind, "exhausted");
+});
+
+test("stale rework discovery cannot reserve after another invocation settles the issue", async (t) => {
+  for (const verdict of ["approve", "human_gate"]) {
+    await t.test(verdict, async (t) => {
+      const { repoPath } = await tempRepo(t);
+      const manifest = config({ "7": { status: "ready" } }, 1);
+      const sourceRunId = "20260912010101-aaaaaa";
+      const settledRunId = verdict === "approve"
+        ? "20260912010102-bbbbbb"
+        : "20260912010103-cccccc";
+      const reservationRunId = verdict === "approve"
+        ? "20260912010104-dddddd"
+        : "20260912010105-eeeeee";
+      await saveRunState(repoPath, sourceRunId, {
+        runId: sourceRunId,
+        mode: "execute",
+        status: "awaiting-review",
+        plan: { selected: [{ id: "7" }] },
+        workers: [{ issue: "7", exitCode: 0, baseSha: "base", headSha: "rejected" }],
+        validations: [{ issue: "7", exitCode: 0, verdict: "rework" }],
+        reviews: {}
+      });
+      const [discovered] = await resolveCurrentIssueStates(repoPath, ["7"]);
+      let workerStarts = 0;
+
+      const outcomes = await runLifecycleBackfill(manifest, {
+        repoPath,
+        authorizedIssueIds: ["7"],
+        initialTasks: [{ issue: "7" }],
+        reserveInitial: async (task) => {
+          await saveRunState(repoPath, settledRunId, {
+            runId: settledRunId,
+            parentRunId: sourceRunId,
+            mode: "rework",
+            status: "awaiting-review",
+            plan: { selected: [{ id: task.issue }] },
+            workers: [{ issue: task.issue, exitCode: 0, baseSha: "rejected", headSha: "settled" }],
+            validations: [{ issue: task.issue, exitCode: 0, verdict }],
+            reviews: {}
+          });
+          const reservation = await reserveExplicitWork(manifest, {
+            repoPath,
+            runId: reservationRunId,
+            mode: "rework",
+            items: [{ id: task.issue, mode: "rework" }],
+            expectedCurrent: [{ issue: task.issue, runId: discovered.runId }],
+            currentEligibility: (current) => (
+              current.evidence?.state === "awaiting-rework" &&
+              isRecoverableValidatorRework(current.evidence)
+            )
+          });
+          return { ...reservation, terminal: reservation.reason === "changed-evidence" };
+        },
+        executeInitial: async () => {
+          workerStarts += 1;
+          return "unexpected-worker";
+        },
+        runIdFactory: () => "20260912010106-ffffff",
+        executeReserved: async () => "unexpected-backfill"
+      });
+
+      assert.deepEqual(outcomes, []);
+      assert.equal(workerStarts, 0);
+      const states = await loadPersistedRunStates(repoPath);
+      assert.equal(states.some((state) => state.runId === reservationRunId), false);
+      const snapshot = capacitySnapshot(manifest, states);
+      assert.equal(snapshot.used, 0);
+      assert.equal(snapshot.available, 1);
+    });
+  }
 });
 
 test("reserveReadyWork applies authorization before capacity selection", async (t) => {

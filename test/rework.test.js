@@ -12,6 +12,8 @@ const {
   loadCorrectionLineage
 } = require("../src/rework");
 const { saveRunState, loadRunState, loadPersistedRunStates } = require("../src/run-store");
+const { resolveCurrentIssueStates } = require("../src/run-resolver");
+const { capacitySnapshot } = require("../src/scheduler");
 
 function parseLeadingJson(stdout) {
   return JSON.parse(stdout.split("\n\nIssue #", 1)[0]);
@@ -389,6 +391,58 @@ test("automatic rework stops at HUMAN_GATE and never launches a correction for a
   assert.equal(gatedRun.validations[0].verdict, "human_gate");
   assert.equal(second.issues[0].outcome, "human-gate");
   assert.equal(calls, 0);
+});
+
+test("automatic rework releases a prepared reservation when current evidence is already terminal", async (t) => {
+  const fixture = await autoFixture(t);
+  const settledRunId = "20260910020202-bbbbbb";
+  const reservationRunId = "20260910030303-cccccc";
+  await saveRunState(fixture.repoPath, settledRunId, {
+    runId: settledRunId,
+    parentRunId: fixture.sourceRunId,
+    mode: "rework",
+    status: "awaiting-review",
+    plan: { selected: [{ id: "7", mode: "rework" }] },
+    workers: [{ issue: "7", exitCode: 0, baseSha: "head-7", headSha: "approved" }],
+    validations: [{ issue: "7", exitCode: 0, verdict: "approve" }],
+    reviews: {}
+  });
+  const [resolved] = await resolveCurrentIssueStates(fixture.repoPath, ["7"]);
+  const reservedState = {
+    runId: reservationRunId,
+    mode: "rework",
+    status: "running",
+    plan: { selected: [{ id: "7", mode: "rework" }] },
+    workers: [],
+    validations: [],
+    reviews: {},
+    capacity: { scope: "repository", limit: 1, issues: ["7"] }
+  };
+  await saveRunState(fixture.repoPath, reservationRunId, reservedState);
+  let workerStarts = 0;
+
+  const result = await autoRework(fixture.config, {
+    repoPath: fixture.repoPath,
+    issueIds: ["7"],
+    capacity: 1,
+    initialReservations: {
+      "7": { runId: reservationRunId, reservedState, resolved }
+    },
+    reworkExecutor: async () => {
+      workerStarts += 1;
+      throw new Error("worker must not start");
+    }
+  });
+
+  assert.equal(result.issues[0].outcome, "approved");
+  assert.equal(workerStarts, 0);
+  const released = await loadRunState(fixture.repoPath, reservationRunId);
+  assert.equal(released.status, "cancelled");
+  assert.deepEqual(released.capacity.issues, []);
+  assert.equal(released.reservationRelease.reason, "current-approved");
+  const states = await loadPersistedRunStates(fixture.repoPath);
+  assert.equal(capacitySnapshot(fixture.config, states).used, 0);
+  assert.equal((await resolveCurrentIssueStates(fixture.repoPath, ["7"]))[0].runId, settledRunId);
 });
 
 test("automatic rework exhausts a durable three-attempt budget across child runs and resume", async (t) => {

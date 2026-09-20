@@ -19,6 +19,7 @@ const {
 const { executeReconcileRun } = require("../src/reconcile");
 const { latestRunId, loadRunState } = require("../src/run-store");
 const { resolveCurrentIssueStates } = require("../src/run-resolver");
+const { isRecoverableValidatorRework } = require("../src/run-lifecycle");
 const { statusSnapshot, formatStatus, watchStatus } = require("../src/display");
 const { formatRecommendationFooter, appendRecommendationFooter } = require("../src/recommendations");
 const { loadIssueDetails, formatDetails } = require("../src/details");
@@ -599,9 +600,19 @@ async function main() {
               repoPath,
               runId,
               mode: "rework",
-              items: [{ id: task.issue, ...(config.work?.[task.issue] || {}), mode: "rework" }]
+              items: [{ id: task.issue, ...(config.work?.[task.issue] || {}), mode: "rework" }],
+              expectedCurrent: [{ issue: task.issue, runId: resolved.runId }],
+              currentEligibility: (current) => (
+                current.evidence?.state === "awaiting-rework" &&
+                isRecoverableValidatorRework(current.evidence)
+              )
             });
-            return { ...correctionReservation, runId, resolved };
+            return {
+              ...correctionReservation,
+              runId,
+              resolved: correctionReservation.current?.[0] || resolved,
+              terminal: correctionReservation.reason === "changed-evidence"
+            };
           },
           executeInitial: (task, prepared) => autoRework(config, {
             repoPath,

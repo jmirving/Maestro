@@ -417,6 +417,26 @@ async function autoReworkIssue(config, {
 }) {
   const runs = [];
   let prepared = initialReservation || null;
+  async function finishWithoutExecution(result, reason) {
+    if (prepared?.reservedState) {
+      const reservation = await stateLoader(repoPath, prepared.runId);
+      if (reservation.status === "running") {
+        if (reservation.capacity?.issues) {
+          reservation.capacity.issues = reservation.capacity.issues
+            .filter((entry) => String(entry) !== String(issue));
+        }
+        reservation.status = "cancelled";
+        reservation.reservationRelease = {
+          issue: String(issue),
+          reason,
+          releasedAt: new Date().toISOString()
+        };
+        await stateSaver(repoPath, prepared.runId, reservation);
+      }
+      prepared = null;
+    }
+    return result;
+  }
   for (;;) {
     const [resolved] = prepared?.resolved
       ? [prepared.resolved]
@@ -427,14 +447,14 @@ async function autoReworkIssue(config, {
     const persistedAutomaticOutcome = evidence.autoRework?.status;
 
     if (["timeout", "no-progress"].includes(persistedAutomaticOutcome)) {
-      return {
+      return finishWithoutExecution({
         issue: String(issue),
         outcome: persistedAutomaticOutcome,
         finalRunId: resolved.runId,
         finalVerdict: evidence.autoRework.finalVerdict ?? validation?.verdict ?? null,
         ...(evidence.autoRework.timeoutStage ? { timeoutStage: evidence.autoRework.timeoutStage } : {}),
         runs
-      };
+      }, `persisted-${persistedAutomaticOutcome}`);
     }
 
     if (resolved.state.status === "failed") {
@@ -446,23 +466,38 @@ async function autoReworkIssue(config, {
         status: outcome,
         finalVerdict: validation?.verdict || null
       });
-      return { issue: String(issue), outcome, finalRunId: resolved.runId, finalVerdict: validation?.verdict || null, runs };
+      return finishWithoutExecution(
+        { issue: String(issue), outcome, finalRunId: resolved.runId, finalVerdict: validation?.verdict || null, runs },
+        `current-${outcome}`
+      );
     }
     if (!worker || worker.exitCode !== 0) {
       await recordOutcome(resolved.runId, issue, { status: "worker-failure", finalVerdict: null });
-      return { issue: String(issue), outcome: "worker-failure", finalRunId: resolved.runId, runs };
+      return finishWithoutExecution(
+        { issue: String(issue), outcome: "worker-failure", finalRunId: resolved.runId, runs },
+        "current-worker-failure"
+      );
     }
     if (!validation || validation.exitCode !== 0 || !["approve", "rework", "human_gate"].includes(validation.verdict)) {
       await recordOutcome(resolved.runId, issue, { status: "validator-failure", finalVerdict: validation?.verdict || null });
-      return { issue: String(issue), outcome: "validator-failure", finalRunId: resolved.runId, finalVerdict: validation?.verdict || null, runs };
+      return finishWithoutExecution({
+        issue: String(issue), outcome: "validator-failure", finalRunId: resolved.runId,
+        finalVerdict: validation?.verdict || null, runs
+      }, "current-validator-failure");
     }
     if (validation.verdict === "approve") {
       await recordOutcome(resolved.runId, issue, { status: "approved", finalVerdict: "approve" });
-      return { issue: String(issue), outcome: "approved", finalRunId: resolved.runId, finalVerdict: "approve", runs };
+      return finishWithoutExecution(
+        { issue: String(issue), outcome: "approved", finalRunId: resolved.runId, finalVerdict: "approve", runs },
+        "current-approved"
+      );
     }
     if (validation.verdict === "human_gate") {
       await recordOutcome(resolved.runId, issue, { status: "human-gate", finalVerdict: "human_gate" });
-      return { issue: String(issue), outcome: "human-gate", finalRunId: resolved.runId, finalVerdict: "human_gate", runs };
+      return finishWithoutExecution({
+        issue: String(issue), outcome: "human-gate", finalRunId: resolved.runId,
+        finalVerdict: "human_gate", runs
+      }, "current-human-gate");
     }
 
     const lineage = await loadCorrectionLineage(repoPath, resolved.runId, issue, stateLoader);
@@ -472,7 +507,7 @@ async function autoReworkIssue(config, {
         attemptsUsed: lineage.attempts.length,
         finalVerdict: "rework"
       });
-      return {
+      return finishWithoutExecution({
         issue: String(issue),
         outcome: "retry-exhausted",
         finalRunId: resolved.runId,
@@ -480,7 +515,7 @@ async function autoReworkIssue(config, {
         attemptsUsed: lineage.attempts.length,
         retryLimit,
         runs
-      };
+      }, "retry-exhausted");
     }
 
     if (reworkOptions.deadlineAt && now() >= reworkOptions.deadlineAt) {
@@ -490,14 +525,14 @@ async function autoReworkIssue(config, {
         finalVerdict: "rework",
         timeoutStage: "session"
       });
-      return {
+      return finishWithoutExecution({
         issue: String(issue),
         outcome: "timeout",
         finalRunId: resolved.runId,
         finalVerdict: "rework",
         timeoutStage: "session",
         runs
-      };
+      }, "session-timeout");
     }
 
     const runId = prepared?.runId || newRunId();
@@ -534,14 +569,14 @@ async function autoReworkIssue(config, {
       }
     } catch (error) {
       if (error.code === "CAPACITY_UNAVAILABLE") {
-        return {
+        return finishWithoutExecution({
           issue: String(issue),
           outcome: "capacity-unavailable",
           finalRunId: resolved.runId,
           finalVerdict: "rework",
           error: error.message,
           runs
-        };
+        }, "capacity-unavailable");
       }
       const outcome = error.code === "AUTOMATION_TIMEOUT"
         ? "timeout"
@@ -551,14 +586,14 @@ async function autoReworkIssue(config, {
         finalVerdict: null,
         timeoutStage: error.timeoutStage
       });
-      return {
+      return finishWithoutExecution({
         issue: String(issue),
         outcome,
         finalRunId: runId,
         error: error.message,
         ...(error.timeoutStage ? { timeoutStage: error.timeoutStage } : {}),
         runs
-      };
+      }, `execution-${outcome}`);
     }
   }
 }

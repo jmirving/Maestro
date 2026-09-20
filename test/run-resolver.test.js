@@ -43,6 +43,20 @@ test("resolves the latest run globally and the latest run containing a target is
   assert.equal(resolved.evidence[0].verdict, "rework");
 });
 
+test("released reservations do not supersede current evidence but remain explicitly inspectable", () => {
+  const source = run("20260910010101-aaaaaa", "7", { verdict: "approve" });
+  const released = run("20260910020202-bbbbbb", "7", { verdict: null, status: "cancelled", mode: "rework" });
+  released.workers = [];
+  released.parentRunId = source.runId;
+  released.reservationRelease = { issue: "7", reason: "current-approved" };
+
+  assert.equal(resolveFromStates([source, released], { issueIds: ["7"] }).runId, source.runId);
+  assert.equal(currentIssueEvidenceFromStates([source, released], ["7"])[0].runId, source.runId);
+  assert.equal(resolveFromStates([source, released], {
+    issueIds: ["7"], explicitRunId: released.runId
+  }).runId, released.runId);
+});
+
 test("semantic filters prefer the latest matching evidence instead of the literal latest run", () => {
   const rework = run("20260910010101-aaaaaa", "7", { verdict: "rework" });
   const approved = run("20260910020202-bbbbbb", "7", { verdict: "approve", disposition: "approve" });

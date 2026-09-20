@@ -147,7 +147,9 @@ function currentIssueEvidenceFromStates(states, issueIds = []) {
   }
 
   for (const issue of issues) {
-    const candidates = newestFirst(states).filter((state) => evidenceForIssue(state, issue));
+    const candidates = newestFirst(states).filter((state) => (
+      state.status !== "cancelled" && evidenceForIssue(state, issue)
+    ));
     const integrated = candidates.find((candidate) => evidenceForIssue(candidate, issue)?.integration);
     const leaves = candidates.filter((candidate) => !candidates.some((other) => (
       other !== candidate && descendsFrom(other, String(candidate.runId))
@@ -223,7 +225,7 @@ function resolveFromStates(states, { issueIds = [], filter = {}, explicitRunId =
   const ordered = newestFirst(states);
   const candidates = explicitRunId
     ? ordered.filter((state) => String(state.runId) === String(explicitRunId))
-    : ordered;
+    : ordered.filter((state) => state.status !== "cancelled");
 
   if (explicitRunId && !candidates.length) throw new Error(`No Maestro run ${explicitRunId} found.`);
   if (!ordered.length) throw new Error("No persisted Maestro runs are available for resolution.");
