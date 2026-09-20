@@ -7,6 +7,7 @@ const { executeWorker } = require("./worker");
 const { validateWorker } = require("./validator");
 const { integrateApproved } = require("./integrator");
 const { saveRunState } = require("./run-store");
+const { commitLifecycleTransition } = require("./lifecycle-coordination");
 
 function newRunId(now = new Date()) {
   const stamp = now.toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
@@ -15,6 +16,14 @@ function newRunId(now = new Date()) {
 
 function cloneConfig(config) {
   return JSON.parse(JSON.stringify(config));
+}
+
+function upsertIssueEvidence(entries = [], replacement) {
+  if (!replacement) return entries;
+  return [
+    ...entries.filter((entry) => String(entry.issue) !== String(replacement.issue)),
+    replacement
+  ];
 }
 
 async function dryRun(config, { repoPath, planOptions = {}, concurrency } = {}) {
@@ -70,6 +79,14 @@ async function executeRun(config, {
   if (!reservedState || scope) await stateSaver(repoPath, runId, result);
   let sourceSettled = false;
 
+  async function persistLifecycle(issueIds, mutate) {
+    if (stateSaver !== saveRunState) {
+      await stateSaver(repoPath, runId, result);
+      return result;
+    }
+    return commitLifecycleTransition({ repoPath, runId, issueIds, mutate });
+  }
+
   try {
     // Fail fast on missing runtime capabilities before spending minutes on the
     // expensive repository baseline. A missing database/browser/etc. is an
@@ -81,12 +98,7 @@ async function executeRun(config, {
     console.error(`[Maestro] run ${runId}: preparing ${plan.selected.length} worker(s)`);
 
     console.error(`[Maestro] run ${runId}: workers running`);
-    let persistence = Promise.resolve();
     const settlementErrors = [];
-    const persist = () => {
-      persistence = persistence.then(() => stateSaver(repoPath, runId, result));
-      return persistence;
-    };
     const settled = await Promise.allSettled(plan.selected.map(async (item) => {
       const issue = String(item.id);
       try {
@@ -103,9 +115,21 @@ async function executeRun(config, {
         }
         throw error;
       } finally {
+        const hasPerIssueReservations = Boolean(result.capacity?.issues);
         if (result.capacity?.issues) {
           result.capacity.issues = result.capacity.issues.filter((id) => String(id) !== issue);
-          await persist();
+        }
+        if (hasPerIssueReservations) {
+          const worker = result.workers.find((entry) => String(entry.issue) === issue);
+          const validation = result.validations.find((entry) => String(entry.issue) === issue);
+          await persistLifecycle([issue], (current) => {
+            current.workers = upsertIssueEvidence(current.workers, worker);
+            current.validations = upsertIssueEvidence(current.validations, validation);
+            if (current.capacity?.issues) {
+              current.capacity.issues = current.capacity.issues.filter((id) => String(id) !== issue);
+            }
+            return current;
+          });
         }
         try {
           await onIssueSettled({ issue, result });
@@ -118,7 +142,13 @@ async function executeRun(config, {
     if (rejected) throw rejected.reason;
 
     result.status = "awaiting-review";
-    await persist();
+    await persistLifecycle(plan.selected.map((item) => item.id), (current) => {
+      current.status = "awaiting-review";
+      current.workers = result.workers;
+      current.validations = result.validations;
+      if (current.capacity?.issues) current.capacity.issues = [];
+      return current;
+    });
     sourceSettled = true;
     console.error(`[Maestro] run ${runId}: complete`);
     if (settlementErrors.length === 1) throw settlementErrors[0];
@@ -130,7 +160,14 @@ async function executeRun(config, {
     if (sourceSettled) throw error;
     result.status = "failed";
     result.failure = error.message;
-    await stateSaver(repoPath, runId, result);
+    await persistLifecycle(plan.selected.map((item) => item.id), (current) => {
+      current.status = "failed";
+      current.failure = error.message;
+      current.workers = result.workers;
+      current.validations = result.validations;
+      if (current.capacity?.issues) current.capacity.issues = [];
+      return current;
+    });
     throw error;
   }
 }

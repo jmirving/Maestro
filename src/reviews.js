@@ -1,5 +1,6 @@
 const { runChecked } = require("./process");
 const { loadRunState, saveRunState } = require("./run-store");
+const { commitLifecycleTransition } = require("./lifecycle-coordination");
 
 const DISPOSITIONS = new Set([
   "approve",
@@ -33,25 +34,31 @@ async function recordReview({
   if (disposition === "approve-override" && !validatorOverride?.verdict) {
     throw new Error("approve-override requires validator override provenance.");
   }
-  const state = await loadRunState(repoPath, runId);
-  const known = state.workers?.some((worker) => String(worker.issue) === String(issue));
-  if (!known) throw new Error(`Issue #${issue} is not part of run ${runId}.`);
-  const validation = (state.validations || []).find((entry) => String(entry.issue) === String(issue));
-  if (disposition === "discard" && validation?.verdict !== "rework") {
-    throw new Error(`Issue #${issue} is not validator-REWORK and cannot be discarded.`);
-  }
-  if (disposition === "approve-override" && !isValidValidatorOverride({ disposition, validatorOverride }, validation)) {
-    throw new Error(`Validator override provenance does not match issue #${issue} in run ${runId}.`);
-  }
-  state.reviews = state.reviews || {};
-  state.reviews[String(issue)] = {
-    disposition,
-    title,
-    notes,
-    ...(validatorOverride ? { validatorOverride } : {}),
-    recordedAt: new Date().toISOString()
-  };
-  await saveRunState(repoPath, runId, state);
+  const state = await commitLifecycleTransition({
+    repoPath,
+    runId,
+    issueIds: [issue],
+    mutate: (current) => {
+      const known = current.workers?.some((worker) => String(worker.issue) === String(issue));
+      if (!known) throw new Error(`Issue #${issue} is not part of run ${runId}.`);
+      const validation = (current.validations || []).find((entry) => String(entry.issue) === String(issue));
+      if (disposition === "discard" && validation?.verdict !== "rework") {
+        throw new Error(`Issue #${issue} is not validator-REWORK and cannot be discarded.`);
+      }
+      if (disposition === "approve-override" && !isValidValidatorOverride({ disposition, validatorOverride }, validation)) {
+        throw new Error(`Validator override provenance does not match issue #${issue} in run ${runId}.`);
+      }
+      current.reviews = current.reviews || {};
+      current.reviews[String(issue)] = {
+        disposition,
+        title,
+        notes,
+        ...(validatorOverride ? { validatorOverride } : {}),
+        recordedAt: new Date().toISOString()
+      };
+      return current;
+    }
+  });
   return state.reviews[String(issue)];
 }
 

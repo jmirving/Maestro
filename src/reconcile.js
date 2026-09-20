@@ -8,6 +8,7 @@ const { runChecked, runProcess } = require("./process");
 const { newRunId } = require("./controller");
 const { currentHead } = require("./worktrees");
 const { reserveExplicitWork } = require("./scheduler");
+const { commitLifecycleTransition } = require("./lifecycle-coordination");
 
 async function ensureCleanWorktree(worker, runner = runChecked) {
   const status = (await runner("git", ["status", "--porcelain"], { cwd: worker.worktreePath })).stdout.trim();
@@ -167,13 +168,38 @@ async function executeReconcileRun(config, {
     reviews: {},
     status: "awaiting-review"
   };
-  await stateSaver(repoPath, runId, result);
+  if (stateSaver === saveRunState) {
+    await commitLifecycleTransition({
+      repoPath,
+      runId,
+      issueIds: items.map((item) => item.id),
+      mutate: (current) => {
+        const reviews = current.reviews || {};
+        Object.assign(current, result, { reviews });
+        if (current.capacity?.issues) current.capacity.issues = [];
+        return current;
+      }
+    });
+    if (result.capacity?.issues) result.capacity.issues = [];
+  } else {
+    await stateSaver(repoPath, runId, result);
+  }
   return result;
   } catch (error) {
     if (reservation?.state) {
       reservation.state.status = "failed";
       reservation.state.failure = error.message;
-      await stateSaver(repoPath, runId, reservation.state);
+      if (reservation.state.capacity?.issues) reservation.state.capacity.issues = [];
+      if (stateSaver === saveRunState) {
+        await commitLifecycleTransition({
+          repoPath,
+          runId,
+          issueIds: items.map((item) => item.id),
+          mutate: () => reservation.state
+        });
+      } else {
+        await stateSaver(repoPath, runId, reservation.state);
+      }
     }
     throw error;
   }

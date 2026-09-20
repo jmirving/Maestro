@@ -4,10 +4,12 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
-const { loadPersistedRunStates, saveRunState } = require("../src/run-store");
+const { loadPersistedRunStates, loadRunState, saveRunState } = require("../src/run-store");
 const { reportRootForRepo } = require("../src/reporter");
 const { resolveCurrentIssueStates } = require("../src/run-resolver");
 const { isRecoverableValidatorRework } = require("../src/run-lifecycle");
+const { commitLifecycleTransition } = require("../src/lifecycle-coordination");
+const { recordReview } = require("../src/reviews");
 const {
   capacitySnapshot,
   reserveReadyWork,
@@ -33,6 +35,28 @@ async function tempRepo(t) {
   assert.equal(spawnSync("git", ["init", "-q"], { cwd: repoPath }).status, 0);
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   return { root, repoPath };
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function rejectedRun(runId) {
+  return {
+    runId,
+    mode: "execute",
+    status: "awaiting-review",
+    plan: { selected: [{ id: "7" }] },
+    workers: [{ issue: "7", exitCode: 0, baseSha: "base", headSha: "rejected" }],
+    validations: [{ issue: "7", exitCode: 0, verdict: "rework" }],
+    reviews: {}
+  };
+}
+
+function reworkEligibility(current) {
+  return current.evidence?.state === "awaiting-rework" && isRecoverableValidatorRework(current.evidence);
 }
 
 test("atomic repository reservations cannot duplicate work or oversubscribe capacity", async (t) => {
@@ -127,6 +151,134 @@ test("stale rework discovery cannot reserve after another invocation settles the
       assert.equal(snapshot.available, 1);
     });
   }
+});
+
+test("validator terminal transitions win atomically over a reservation paused after its stale eligibility read", async (t) => {
+  for (const verdict of ["approve", "human_gate"]) {
+    await t.test(verdict, async (t) => {
+      const { repoPath } = await tempRepo(t);
+      const manifest = config({ "7": { status: "ready" } }, 1);
+      const sourceRunId = "20260912011101-aaaaaa";
+      const reservationRunId = verdict === "approve"
+        ? "20260912011102-bbbbbb"
+        : "20260912011103-cccccc";
+      await saveRunState(repoPath, sourceRunId, rejectedRun(sourceRunId));
+      const [discovered] = await resolveCurrentIssueStates(repoPath, ["7"]);
+      const transitionEntered = deferred();
+      const releaseTransition = deferred();
+
+      const transition = commitLifecycleTransition({
+        repoPath,
+        runId: sourceRunId,
+        issueIds: ["7"],
+        mutate: (state) => {
+          state.validations[0].verdict = verdict;
+          return state;
+        },
+        beforePersist: async () => {
+          transitionEntered.resolve();
+          await releaseTransition.promise;
+        }
+      });
+      await transitionEntered.promise;
+
+      let workerStarts = 0;
+      const reservation = reserveExplicitWork(manifest, {
+        repoPath,
+        runId: reservationRunId,
+        mode: "rework",
+        items: [{ id: "7", mode: "rework" }],
+        expectedCurrent: [{ issue: "7", runId: discovered.runId }],
+        currentEligibility: reworkEligibility
+      }).then((result) => {
+        if (result.reserved) workerStarts += 1;
+        return result;
+      });
+      releaseTransition.resolve();
+      await transition;
+      const reservationResult = await reservation;
+
+      assert.equal(reservationResult.reserved, false);
+      assert.equal(reservationResult.reason, "changed-evidence");
+      assert.equal(workerStarts, 0);
+      const states = await loadPersistedRunStates(repoPath);
+      assert.equal(states.filter((state) => state.mode === "rework").length, 0);
+      assert.equal(capacitySnapshot(manifest, states).used, 0);
+      const [current] = await resolveCurrentIssueStates(repoPath, ["7"]);
+      assert.equal(current.evidence.verdict, verdict);
+    });
+  }
+});
+
+test("a reservation that wins first owns the issue until its terminal transition releases capacity", async (t) => {
+  const { repoPath } = await tempRepo(t);
+  const manifest = config({ "7": { status: "ready" } }, 1);
+  const sourceRunId = "20260912011201-aaaaaa";
+  const reservationRunId = "20260912011202-bbbbbb";
+  await saveRunState(repoPath, sourceRunId, rejectedRun(sourceRunId));
+  const [discovered] = await resolveCurrentIssueStates(repoPath, ["7"]);
+  const reservationEntered = deferred();
+  const releaseReservation = deferred();
+
+  const reservation = reserveExplicitWork(manifest, {
+    repoPath,
+    runId: reservationRunId,
+    mode: "rework",
+    items: [{ id: "7", mode: "rework" }],
+    expectedCurrent: [{ issue: "7", runId: discovered.runId }],
+    currentEligibility: reworkEligibility,
+    extraState: { parentRunId: sourceRunId },
+    beforePersist: async () => {
+      reservationEntered.resolve();
+      await releaseReservation.promise;
+    }
+  });
+  await reservationEntered.promise;
+
+  const competingTransition = commitLifecycleTransition({
+    repoPath,
+    runId: sourceRunId,
+    issueIds: ["7"],
+    mutate: (state) => {
+      state.validations[0].verdict = "approve";
+      return state;
+    }
+  });
+  releaseReservation.resolve();
+  const reserved = await reservation;
+  assert.equal(reserved.reserved, true);
+  await assert.rejects(competingTransition, (error) => {
+    assert.equal(error.code, "ISSUE_ACTIVE_OWNERSHIP");
+    assert.equal(error.ownerRunId, reservationRunId);
+    return true;
+  });
+  await assert.rejects(recordReview({
+    repoPath,
+    runId: sourceRunId,
+    issue: "7",
+    disposition: "rework-original"
+  }), /active ownership belongs to run/);
+
+  await commitLifecycleTransition({
+    repoPath,
+    runId: reservationRunId,
+    issueIds: ["7"],
+    mutate: (state) => {
+      state.status = "awaiting-review";
+      state.workers = [{ issue: "7", exitCode: 0, baseSha: "rejected", headSha: "corrected" }];
+      state.validations = [{ issue: "7", exitCode: 0, verdict: "approve" }];
+      state.capacity.issues = [];
+      return state;
+    }
+  });
+
+  const states = await loadPersistedRunStates(repoPath);
+  assert.equal(states.filter((state) => state.mode === "rework").length, 1);
+  assert.equal(capacitySnapshot(manifest, states).used, 0);
+  const [current] = await resolveCurrentIssueStates(repoPath, ["7"]);
+  assert.equal(current.runId, reservationRunId);
+  assert.equal(current.evidence.verdict, "approve");
+  assert.deepEqual((await loadRunState(repoPath, sourceRunId)).reviews, {});
 });
 
 test("reserveReadyWork applies authorization before capacity selection", async (t) => {

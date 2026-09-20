@@ -9,6 +9,7 @@ const { newRunId } = require("./controller");
 const { resolveCurrentIssueStates } = require("./run-resolver");
 const { isRecoverableValidatorRework } = require("./run-lifecycle");
 const { reserveExplicitWork } = require("./scheduler");
+const { commitLifecycleTransition } = require("./lifecycle-coordination");
 const { selectReady } = require("./planner");
 const { loadExecutionStates, unresolvedWork } = require("./work-state");
 
@@ -339,6 +340,26 @@ async function executeReworkRun(config, {
   const result = reservedState ? { ...reservedState, parentRunId, correction: { attempts } } : initialState;
   if (!reservedState) await stateSaver(repoPath, runId, result);
 
+  async function persistTerminalState() {
+    if (stateSaver !== saveRunState) {
+      if (result.capacity?.issues) result.capacity.issues = [];
+      await stateSaver(repoPath, runId, result);
+      return;
+    }
+    await commitLifecycleTransition({
+      repoPath,
+      runId,
+      issueIds: items.map((item) => item.id),
+      mutate: (current) => {
+        const reviews = current.reviews || {};
+        Object.assign(current, result, { reviews });
+        if (current.capacity?.issues) current.capacity.issues = [];
+        return current;
+      }
+    });
+    if (result.capacity?.issues) result.capacity.issues = [];
+  }
+
   let currentStage = "preflight";
   try {
     console.error(`[Maestro] rework ${runId} from ${sourceRunId}: capability preflight`);
@@ -417,7 +438,7 @@ async function executeReworkRun(config, {
     if (failed.length) {
       result.failure = failed.map((entry) => `#${entry.issue} ${entry.status}`).join("; ");
     }
-    await stateSaver(repoPath, runId, result);
+    await persistTerminalState();
     return result;
   } catch (error) {
     const timedOut = error.code === "AUTOMATION_TIMEOUT" || error.result?.timedOut || error.cause?.result?.timedOut;
@@ -441,7 +462,7 @@ async function executeReworkRun(config, {
         }
       }
     }
-    await stateSaver(repoPath, runId, result);
+    await persistTerminalState();
     throw error;
   }
 }
@@ -465,17 +486,29 @@ async function autoReworkIssue(config, {
     if (prepared?.reservedState) {
       const reservation = await stateLoader(repoPath, prepared.runId);
       if (reservation.status === "running") {
-        if (reservation.capacity?.issues) {
-          reservation.capacity.issues = reservation.capacity.issues
-            .filter((entry) => String(entry) !== String(issue));
-        }
-        reservation.status = "cancelled";
-        reservation.reservationRelease = {
-          issue: String(issue),
-          reason,
-          releasedAt: new Date().toISOString()
+        const release = (current) => {
+          if (current.capacity?.issues) {
+            current.capacity.issues = current.capacity.issues
+              .filter((entry) => String(entry) !== String(issue));
+          }
+          current.status = "cancelled";
+          current.reservationRelease = {
+            issue: String(issue),
+            reason,
+            releasedAt: new Date().toISOString()
+          };
+          return current;
         };
-        await stateSaver(repoPath, prepared.runId, reservation);
+        if (stateSaver === saveRunState && stateLoader === loadRunState) {
+          await commitLifecycleTransition({
+            repoPath,
+            runId: prepared.runId,
+            issueIds: [issue],
+            mutate: release
+          });
+        } else {
+          await stateSaver(repoPath, prepared.runId, release(reservation));
+        }
       }
       prepared = null;
     }
