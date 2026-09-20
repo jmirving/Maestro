@@ -197,7 +197,10 @@ function effectiveIssueStates(config, states, issueIds = []) {
       ? evidenceForIssue(integratedRun, issue).integration
       : null;
     const manifestComplete = manifest?.status === "complete";
-    const consistencyConflict = manifestComplete && evidenceRuns.length > 0 && !integration
+    const externalCompletion = manifestComplete && manifest?.completion?.source === "external"
+      ? manifest.completion
+      : null;
+    const consistencyConflict = manifestComplete && evidenceRuns.length > 0 && !integration && !externalCompletion
       ? `Issue #${issue} is complete in the manifest, but persisted execution history has no integration record. Reconcile the manifest and run evidence before integration.`
       : null;
 
@@ -208,13 +211,15 @@ function effectiveIssueStates(config, states, issueIds = []) {
       evidence: resolved?.evidence || null,
       integration,
       integrationRunId: integratedRun ? String(integratedRun.runId) : null,
-      terminal: Boolean(integration) || (manifestComplete && !consistencyConflict),
+      completion: integration ? { source: "maestro", integration } : externalCompletion,
+      terminal: Boolean(integration) || Boolean(externalCompletion) || (manifestComplete && !consistencyConflict),
       consistencyConflict,
       state: consistencyConflict
         ? "consistency-conflict"
         : integration
           ? manifestComplete ? "complete" : "integrated-pending-manifest"
-          : manifestComplete ? "complete" : resolved?.evidence?.state || manifest?.status || "unknown"
+          : externalCompletion ? "complete-external"
+            : manifestComplete ? "complete" : resolved?.evidence?.state || manifest?.status || "unknown"
     }];
   }));
 }

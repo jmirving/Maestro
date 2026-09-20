@@ -39,12 +39,23 @@ async function loadIssueDetails(repoPath, issueIds, {
   resolver = resolveRunsForIssues,
   stateLoader = loadRunState
 } = {}) {
-  const resolved = await resolver(repoPath, issueIds, { explicitRunId: runId });
+  const resolved = [];
+  for (const issue of issueIds.map(String)) {
+    try {
+      const [entry] = await resolver(repoPath, [issue], { explicitRunId: runId });
+      resolved.push(entry);
+    } catch (error) {
+      const noHistory = /No Maestro runs found|No relevant Maestro run/.test(error.message);
+      if (runId || !noHistory || config?.work?.[issue]?.completion?.source !== "external") throw error;
+      resolved.push({ issue, runId: null, state: null, evidence: null });
+    }
+  }
   return Promise.all(resolved.map(async (entry) => ({
     ...entry,
-    title: issueTitle(config, entry.evidence),
+    title: entry.evidence ? issueTitle(config, entry.evidence) : config?.work?.[entry.issue]?.github?.title || null,
     manifestStatus: config?.work?.[entry.issue]?.status || null,
-    lineage: await loadLineage(repoPath, entry.issue, entry.state, stateLoader)
+    completion: config?.work?.[entry.issue]?.completion || null,
+    lineage: entry.state ? await loadLineage(repoPath, entry.issue, entry.state, stateLoader) : []
   })));
 }
 
@@ -175,13 +186,22 @@ function formatDetails(items, { repository = null } = {}) {
     const lines = [];
     lines.push(`# Issue #${item.issue}${item.title ? ` — ${item.title}` : ""}`);
     if (repository) lines.push(`Repository: ${repository}`);
+    lines.push(`Manifest state: ${valueOrNone(item.manifestStatus)}`);
+    if (item.completion) {
+      lines.push(`Completion provenance: ${item.completion.source}`);
+      lines.push(`Reconciled at: ${valueOrNone(item.completion.reconciledAt)}`);
+      lines.push(`GitHub evidence: ${valueOrNone(item.completion.githubState)} / ${valueOrNone(item.completion.githubStateReason)}`);
+    }
+    if (!item.state) {
+      lines.push("Maestro execution history: none");
+      return lines.join("\n");
+    }
     lines.push(`Resolved run: ${item.runId}`);
     if (item.state.parentRunId) {
       lines.push(`Provenance: ${item.state.mode || "child"} child run of ${item.state.parentRunId}`);
     } else {
       lines.push("Provenance: original/source run");
     }
-    lines.push(`Manifest state: ${valueOrNone(item.manifestStatus)}`);
     appendEvidence(lines, item.state, item.evidence);
 
     for (const ancestor of item.lineage) {

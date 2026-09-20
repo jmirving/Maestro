@@ -192,6 +192,26 @@ test("manifest completion without integration evidence is a reconciliation confl
   assert.doesNotMatch(text, /Recommended: `maestro (approve|rework|commit)/);
 });
 
+test("status reports adopted external completion and suppresses stale lifecycle actions", async () => {
+  const historical = mixedRun({ reviewed: true });
+  historical.workers = historical.workers.filter((entry) => entry.issue === "2");
+  historical.validations = historical.validations.filter((entry) => entry.issue === "2");
+  historical.plan.selected = historical.plan.selected.filter((entry) => entry.id === "2");
+  delete historical.reviews["7"];
+  const text = formatStatus(await statusSnapshot({
+    repository: "example/repo",
+    work: { "2": {
+      status: "complete",
+      title: "Passing change",
+      completion: { source: "external", githubState: "CLOSED", githubStateReason: "completed" }
+    } }
+  }, "/unused", [], { stateLoader: async () => [historical] }));
+
+  assert.match(text, /Issue #2 .*complete \(external\)/);
+  assert.doesNotMatch(text, /consistency conflict/);
+  assert.doesNotMatch(text, /Recommended: `maestro (approve|rework|commit)/);
+});
+
 test("integration in a newer reconciliation run suppresses an older approved implementation and its actions", async () => {
   const historical = mixedRun({ reviewed: true });
   historical.workers = historical.workers.filter((entry) => entry.issue === "2");

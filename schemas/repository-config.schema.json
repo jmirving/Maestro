@@ -140,6 +140,26 @@
           "blockedBy": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
           "requires": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
           "humanGate": { "type": ["string", "null"] },
+          "completion": {
+            "type": "object",
+            "required": ["source", "githubState", "githubStateReason", "evidence"],
+            "properties": {
+              "source": { "enum": ["external"] },
+              "reconciledAt": { "type": "string", "minLength": 1 },
+              "githubState": { "const": "CLOSED" },
+              "githubStateReason": { "type": "string", "minLength": 1 },
+              "evidence": {
+                "type": "object",
+                "required": ["manifestStatus", "maestroHistory"],
+                "properties": {
+                  "manifestStatus": { "const": "complete" },
+                  "maestroHistory": { "type": "boolean" }
+                },
+                "additionalProperties": true
+              }
+            },
+            "additionalProperties": false
+          },
           "github": {
             "type": "object",
             "required": ["state", "labels", "blockedBy"],

@@ -7,6 +7,7 @@ const { spawnSync } = require("node:child_process");
 const { proposeDraft, formatDraftSummary, formatDraftVerbose, formatDraftJson, writeManifest, detectExecutionDrift } = require("../src/draft");
 const { loadGitHubIssues } = require("../src/github");
 const { normalizeProviderOutput } = require("../src/agent-planner");
+const { saveRunState } = require("../src/run-store");
 
 function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "maestro-draft-test-"));
@@ -272,6 +273,105 @@ test("open to closed reconciliation makes work inactive while preserving history
   assert.deepEqual(result.manifest.work["7"].reconciliationHistory, [{ from: "ready", to: "inactive", reason: "GitHub issue closed (NOT_PLANNED)." }]);
   assert.equal(result.drift[0].classification, "safe");
   assert.equal(result.planning.waves.length, 0);
+});
+
+test("closed completed work adopts external completion while preserving historical Maestro evidence", () => {
+  const existing = {
+    repository: "owner/repo",
+    work: { "13": { status: "complete", note: "retain history" } }
+  };
+  const historical = {
+    runId: "legacy-run",
+    mode: "execute",
+    plan: { selected: [{ id: "13" }] },
+    workers: [{ issue: "13", exitCode: 0, headSha: "old-attempt" }],
+    validations: [{ issue: "13", verdict: "approve" }],
+    reviews: { "13": { disposition: "approve" } },
+    integration: []
+  };
+  const closed = { ...issue(13, "CLOSED"), stateReason: "COMPLETED", closedAt: "2026-09-11T12:00:00Z" };
+
+  const first = proposeDraft({ repository: "owner/repo", existingConfig: existing, issues: [closed], executionStates: [historical] });
+  assert.equal(first.conflicts.length, 0);
+  assert.deepEqual(first.manifest.work["13"].completion, {
+    source: "external",
+    reconciledAt: "2026-09-11T12:00:00Z",
+    githubState: "CLOSED",
+    githubStateReason: "completed",
+    evidence: { manifestStatus: "complete", maestroHistory: true }
+  });
+  assert.equal(first.manifest.work["13"].note, "retain history");
+
+  const second = proposeDraft({ repository: "owner/repo", existingConfig: first.manifest, issues: [closed], executionStates: [historical] });
+  assert.equal(second.changed, false);
+});
+
+test("external completion adoption works without Maestro history and satisfies dependencies", () => {
+  const closed = { ...issue(1, "CLOSED"), stateReason: "completed", closedAt: "2026-09-11T12:00:00Z" };
+  const result = proposeDraft({
+    repository: "owner/repo",
+    existingConfig: {
+      repository: "owner/repo",
+      work: { "1": { status: "complete" }, "2": { status: "ready", blockedBy: ["1"] } }
+    },
+    issues: [closed]
+  });
+
+  assert.equal(result.manifest.work["1"].completion.source, "external");
+  assert.equal(result.manifest.work["1"].completion.evidence.maestroHistory, false);
+  assert.deepEqual(result.planning.waves, [["2"]]);
+});
+
+test("active Maestro lifecycle conflicts with external completion instead of being superseded", () => {
+  const existing = { repository: "owner/repo", work: { "7": { status: "complete" } } };
+  const active = {
+    runId: "run-1",
+    status: "awaiting-review",
+    mode: "execute",
+    plan: { selected: [{ id: "7" }] },
+    workers: [{ issue: "7", exitCode: 0, headSha: "candidate" }],
+    validations: [{ issue: "7", verdict: "approve" }],
+    reviews: {},
+    integration: []
+  };
+  const result = proposeDraft({
+    repository: "owner/repo",
+    existingConfig: existing,
+    issues: [{ ...issue(7, "CLOSED"), stateReason: "COMPLETED" }],
+    executionStates: [active]
+  });
+
+  assert.equal(result.manifest.work["7"].completion, undefined);
+  assert.equal(result.conflicts.length, 1);
+  assert.match(result.conflicts[0].reason, /adopt external completion.*preserve Maestro ownership/i);
+});
+
+test("not-planned closure remains inactive and reopening removes adopted external completion", () => {
+  const notPlanned = proposeDraft({
+    repository: "owner/repo",
+    existingConfig: { repository: "owner/repo", work: { "7": { status: "ready" } } },
+    issues: [{ ...issue(7, "CLOSED"), stateReason: "NOT_PLANNED" }]
+  });
+  assert.equal(notPlanned.manifest.work["7"].status, "inactive");
+  assert.equal(notPlanned.manifest.work["7"].completion, undefined);
+
+  const formerlyComplete = proposeDraft({
+    repository: "owner/repo",
+    existingConfig: { repository: "owner/repo", work: { "9": { status: "complete" }, "10": { status: "ready", blockedBy: ["9"] } } },
+    issues: [{ ...issue(9, "CLOSED"), stateReason: "DUPLICATE" }]
+  });
+  assert.equal(formerlyComplete.manifest.work["9"].status, "inactive");
+  assert.deepEqual(formerlyComplete.planning.waves, []);
+
+  const adopted = proposeDraft({
+    repository: "owner/repo",
+    existingConfig: { repository: "owner/repo", work: { "8": { status: "complete" } } },
+    issues: [{ ...issue(8, "CLOSED"), stateReason: "COMPLETED" }]
+  }).manifest;
+  const reopened = proposeDraft({ repository: "owner/repo", existingConfig: adopted, issues: [issue(8)] });
+  assert.equal(reopened.manifest.work["8"].status, "ready");
+  assert.equal(reopened.manifest.work["8"].completion, undefined);
+  assert.match(reopened.manifest.work["8"].reconciliationHistory.at(-1).reason, /reopened after externally reconciled completion/);
 });
 
 test("closed to reopened reconciliation restores inactive work but preserves integrated completion", () => {
@@ -701,6 +801,62 @@ if (args[0] === "repo" && args[1] === "view") {
   assert.match(repeated.stdout, /Added 0, updated 0, unchanged 2/);
   assert.match(repeated.stdout, /No-op/);
   assert.equal(fs.readFileSync(path.join(repoPath, ".maestro.json"), "utf8"), firstContents);
+});
+
+test("draft --write adopts external completion and keeps historical runs inspectable", async () => {
+  const repoPath = tempDir();
+  const binPath = path.join(repoPath, "bin");
+  fs.mkdirSync(binPath);
+  assert.equal(spawnSync("git", ["init", "-q"], { cwd: repoPath }).status, 0);
+  fs.writeFileSync(path.join(repoPath, ".maestro.json"), `${JSON.stringify({
+    repository: "owner/repo",
+    work: { "13": { status: "complete", note: "preserved" } }
+  }, null, 2)}\n`);
+  fs.writeFileSync(path.join(binPath, "gh"), `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "repo") process.stdout.write('{"nameWithOwner":"owner/repo"}');
+else if (args[0] === "issue" && args[1] === "view") process.stdout.write(process.env.MAESTRO_TEST_ISSUE);
+else process.exit(3);
+`, { mode: 0o755 });
+  const historical = {
+    runId: "20260910010101-aaaaaa",
+    mode: "execute",
+    plan: { selected: [{ id: "13", title: "Completed elsewhere" }] },
+    workers: [{ issue: "13", exitCode: 0, headSha: "historical-attempt" }],
+    validations: [{ issue: "13", verdict: "rework", report: "VERDICT: REWORK" }],
+    reviews: {},
+    integration: []
+  };
+  await saveRunState(repoPath, historical.runId, historical);
+  const cliPath = path.resolve(__dirname, "../bin/maestro.js");
+  const env = {
+    ...process.env,
+    PATH: `${binPath}${path.delimiter}${process.env.PATH}`,
+    MAESTRO_TEST_ISSUE: JSON.stringify({
+      ...issue(13, "CLOSED"),
+      stateReason: "COMPLETED",
+      closedAt: "2026-09-11T12:00:00Z",
+      updatedAt: "2026-09-11T12:00:00Z"
+    })
+  };
+
+  const write = spawnSync(process.execPath, [cliPath, "draft", "13", "--write"], { cwd: repoPath, env, encoding: "utf8" });
+  assert.equal(write.status, 0, write.stderr);
+  const manifest = JSON.parse(fs.readFileSync(path.join(repoPath, ".maestro.json"), "utf8"));
+  assert.equal(manifest.work["13"].completion.source, "external");
+  assert.equal(manifest.work["13"].note, "preserved");
+
+  const repeated = spawnSync(process.execPath, [cliPath, "draft", "13", "--write"], { cwd: repoPath, env, encoding: "utf8" });
+  assert.equal(repeated.status, 0, repeated.stderr);
+  assert.match(repeated.stdout, /No-op/);
+
+  const status = spawnSync(process.execPath, [cliPath, "status", "13"], { cwd: repoPath, env, encoding: "utf8" });
+  assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, /complete \(external\)/);
+  const details = spawnSync(process.execPath, [cliPath, "details", "13"], { cwd: repoPath, env, encoding: "utf8" });
+  assert.equal(details.status, 0, details.stderr);
+  assert.match(details.stdout, /Completion provenance: external/);
+  assert.match(details.stdout, /Verdict: rework/);
 });
 
 test("draft CLI JSON mode is commentary-free and reports preview, blocked, and successful writes", () => {

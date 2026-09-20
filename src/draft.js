@@ -2,6 +2,7 @@ const fs = require("node:fs");
 const crypto = require("node:crypto");
 const { validateRepositoryConfig } = require("./config-validator");
 const { unresolvedWork } = require("./work-state");
+const { currentIssueEvidenceFromStates, effectiveIssueStates } = require("./run-resolver");
 const { validateAgentOutput } = require("./agent-planner");
 const {
   configuredAnalyzers,
@@ -98,6 +99,47 @@ function recordTransition(item, from, to, reason) {
   item.reconciliationHistory = [...(item.reconciliationHistory || []), { from, to, reason }];
 }
 
+function closureOutcome(stateReason) {
+  const reason = String(stateReason || "").toUpperCase().replace(/[ -]+/g, "_");
+  if (reason === "COMPLETED") return "completed";
+  if (["NOT_PLANNED", "DUPLICATE", "CANCELLED", "CANCELED"].includes(reason)) return "inactive";
+  return "unverified";
+}
+
+function hasCurrentLifecycle(entry) {
+  if (!entry?.state?.status) return false;
+  return new Set([
+    "running",
+    "rework-running",
+    "awaiting-validation-or-review",
+    "awaiting-review",
+    "awaiting-human-review",
+    "awaiting-rework",
+    "awaiting-integration",
+    "integrating"
+  ]).has(entry.evidence?.state || entry.state.status);
+}
+
+function externalCompletion(snapshot, executionStates, issue) {
+  const hasHistory = executionStates.some((state) => (
+    (state.plan?.selected || []).some((entry) => String(entry.id) === issue) ||
+    (state.workers || []).some((entry) => String(entry.issue) === issue) ||
+    (state.validations || []).some((entry) => String(entry.issue) === issue) ||
+    Object.hasOwn(state.reviews || {}, issue) ||
+    (state.integration || []).some((entry) => String(entry.issue) === issue)
+  ));
+  return {
+    source: "external",
+    ...(snapshot.closedAt || snapshot.updatedAt ? { reconciledAt: snapshot.closedAt || snapshot.updatedAt } : {}),
+    githubState: "CLOSED",
+    githubStateReason: String(snapshot.stateReason).toLowerCase(),
+    evidence: {
+      manifestStatus: "complete",
+      maestroHistory: hasHistory
+    }
+  };
+}
+
 function applyMappedMetadata(item, priorGitHub = {}, mapped = {}, manual = {}) {
   const priorMapped = priorGitHub.mapped || {};
   for (const field of ["priority", "mode", "humanGate"]) {
@@ -174,6 +216,8 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
   const conflicts = [];
   const preserved = [];
   const lifecycle = unresolvedWork(executionStates, manifest);
+  const currentLifecycle = new Map(currentIssueEvidenceFromStates(executionStates).map((entry) => [entry.issue, entry]));
+  const effectiveBeforeDraft = effectiveIssueStates(manifest, executionStates);
 
   for (const issue of issues) {
     const id = issueId(issue);
@@ -246,9 +290,24 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
     else delete proposed.blockedBy;
     applyMappedMetadata(proposed, original.github || {}, mapped, manual);
 
-    if (state === "CLOSED" && ["ready", "blocked", "human_gate"].includes(proposed.status)) {
+    const outcome = state === "CLOSED" ? closureOutcome(snapshot.stateReason) : null;
+    const hasMaestroIntegration = Boolean(effectiveBeforeDraft.get(id)?.integration);
+    let adoptingExternalCompletion = false;
+
+    if (state === "CLOSED" && outcome === "completed" && proposed.status === "complete" && !hasMaestroIntegration) {
+      adoptingExternalCompletion = true;
+      proposed.completion = externalCompletion(snapshot, executionStates, id);
+    } else if (state === "CLOSED" && outcome !== "completed" && proposed.status === "complete" && !hasMaestroIntegration) {
+      recordTransition(proposed, "complete", "inactive", `GitHub closure is no longer verified as completed${snapshot.stateReason ? ` (${snapshot.stateReason})` : ""}.`);
+      proposed.status = "inactive";
+      delete proposed.completion;
+    } else if (state === "CLOSED" && ["ready", "blocked", "human_gate"].includes(proposed.status)) {
       recordTransition(proposed, proposed.status, "inactive", `GitHub issue closed${snapshot.stateReason ? ` (${snapshot.stateReason})` : ""}.`);
       proposed.status = "inactive";
+    } else if (state === "OPEN" && proposed.status === "complete" && proposed.completion?.source === "external") {
+      recordTransition(proposed, proposed.status, mapped.humanGate ? "human_gate" : "ready", "GitHub issue reopened after externally reconciled completion.");
+      proposed.status = mapped.humanGate ? "human_gate" : "ready";
+      delete proposed.completion;
     } else if (state === "OPEN" && proposed.status === "inactive" && original.github?.state === "CLOSED") {
       recordTransition(proposed, proposed.status, "ready", "GitHub issue reopened.");
       proposed.status = mapped.humanGate ? "human_gate" : "ready";
@@ -268,9 +327,15 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
       const material = original.status !== proposed.status
         || (original.github?.state != null && original.github.state !== proposed.github.state)
         || !same(original.blockedBy || [], proposed.blockedBy || [])
-        || !same(original.github?.mapped || {}, proposed.github?.mapped || {});
-      if (material && lifecycle.has(id)) {
-        conflicts.push({ issue: id, type: "lifecycle", before: original, proposed, reason: `GitHub changed while Maestro run ${lifecycle.get(id).runId} is ${lifecycle.get(id).state}; the manifest entry was preserved.` });
+        || !same(original.github?.mapped || {}, proposed.github?.mapped || {})
+        || !same(original.completion || null, proposed.completion || null);
+      const activeExternalLifecycle = hasCurrentLifecycle(currentLifecycle.get(id));
+      if (material && ((adoptingExternalCompletion && activeExternalLifecycle) || (!adoptingExternalCompletion && lifecycle.has(id)))) {
+        const active = adoptingExternalCompletion ? currentLifecycle.get(id) : lifecycle.get(id);
+        const options = adoptingExternalCompletion
+          ? "Choose whether to adopt external completion and supersede the Maestro implementation, or preserve Maestro ownership and investigate/reopen the issue."
+          : "The manifest entry was preserved.";
+        conflicts.push({ issue: id, type: "lifecycle", before: original, proposed, reason: `GitHub changed while Maestro run ${active.runId} is ${active.evidence?.state || active.state}; ${options}` });
       } else {
         manifest.work[id] = proposed;
         changedIssues.add(id);

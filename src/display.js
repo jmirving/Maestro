@@ -56,8 +56,9 @@ function describeIssue(config, issue, evidence, plan, effective = null) {
     state = "consistency conflict: manifest says complete, but execution history has no integration record";
     integrationState = "blocked pending manifest/run reconciliation";
   } else if (effective?.terminal || manifest?.status === "complete" || integration) {
-    state = "integrated/complete";
-    integrationState = "integrated";
+    const external = effective?.completion?.source === "external";
+    state = external ? "complete (external)" : "integrated/complete";
+    integrationState = external ? "external completion adopted during reconciliation" : "integrated";
   } else if (review?.disposition === "discard") {
     state = discardedManifestState(issue, manifest, plan, selected);
     integrationState = "discarded; branch/worktree preserved and excluded from integration";
@@ -143,6 +144,7 @@ function describeIssue(config, issue, evidence, plan, effective = null) {
     autoReworkStatus: evidence?.autoRework?.status || null,
     correctionAttempt: evidence?.correction?.number || null,
     integrationState,
+    completionSource: effective?.completion?.source || null,
     runId: evidence?.runId || null,
     terminal: Boolean(effective?.terminal),
     consistencyConflict: effective?.consistencyConflict || null,

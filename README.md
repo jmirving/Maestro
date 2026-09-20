@@ -56,6 +56,8 @@ maestro commit
 maestro next
 ```
 
+`maestro draft` also reconciles work completed outside Maestro. When GitHub records a completed closure, the manifest already says `complete`, and no current Maestro lifecycle conflicts, `maestro draft --write` records external completion provenance. `maestro status` then reports `complete (external)`, while `maestro details <issue>` continues to show older Maestro execution evidence. Not-planned or ambiguous closures remain inactive rather than satisfying dependencies.
+
 Concurrency defaults to two when `defaultConcurrency` is absent. Use `-j` (or
 `--concurrency`) on a scheduling command to change only that invocation:
 

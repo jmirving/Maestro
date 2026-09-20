@@ -219,6 +219,20 @@ test("effective issue state makes integration terminal across runs and diagnoses
   assert.equal(completed.integrationRunId, reconciliation.runId);
 });
 
+test("effective issue state accepts reconciled external completion without erasing run history", () => {
+  const historical = run("20260910010101-aaaaaa", "13", { verdict: "rework" });
+  const effective = effectiveIssueStates({ work: { "13": {
+    status: "complete",
+    completion: { source: "external", githubState: "CLOSED", githubStateReason: "completed" }
+  } } }, [historical]).get("13");
+
+  assert.equal(effective.state, "complete-external");
+  assert.equal(effective.terminal, true);
+  assert.equal(effective.consistencyConflict, null);
+  assert.equal(effective.completion.source, "external");
+  assert.equal(effective.current.runId, historical.runId);
+});
+
 test("current issue resolution cannot resurrect work recorded after integration", () => {
   const integrated = run("20260910010101-aaaaaa", "13", { integrated: true });
   const stale = run("20260910020202-bbbbbb", "13", { disposition: "approve" });

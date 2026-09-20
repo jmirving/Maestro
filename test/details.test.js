@@ -75,6 +75,41 @@ test("original issue details resolve the latest relevant run and render persiste
   assert.doesNotMatch(text, /# Issue #12/);
 });
 
+test("details shows external completion provenance alongside preserved historical evidence", async (t) => {
+  const { repoPath } = await fixture(t);
+  const historical = persistedRun("20260910010101-aaaaaa", "13", { verdict: "rework" });
+  await saveRunState(repoPath, historical.runId, historical);
+  const config = { work: { "13": {
+    status: "complete",
+    completion: {
+      source: "external",
+      reconciledAt: "2026-09-11T12:00:00Z",
+      githubState: "CLOSED",
+      githubStateReason: "completed"
+    }
+  } } };
+
+  const text = formatDetails(await loadIssueDetails(repoPath, ["13"], { config }));
+  assert.match(text, /Completion provenance: external/);
+  assert.match(text, /GitHub evidence: CLOSED \/ completed/);
+  assert.match(text, /Resolved run: 20260910010101-aaaaaa/);
+  assert.match(text, /Verdict: rework/);
+});
+
+test("details shows external completion even when no Maestro run exists", async (t) => {
+  const { repoPath } = await fixture(t);
+  const config = { work: { "14": {
+    status: "complete",
+    github: { title: "Completed elsewhere" },
+    completion: { source: "external", githubState: "CLOSED", githubStateReason: "completed" }
+  } } };
+
+  const text = formatDetails(await loadIssueDetails(repoPath, ["14"], { config }));
+  assert.match(text, /# Issue #14 — Completed elsewhere/);
+  assert.match(text, /Completion provenance: external/);
+  assert.match(text, /Maestro execution history: none/);
+});
+
 test("rework details relate the correction to source worker and validator evidence", async (t) => {
   const { repoPath } = await fixture(t);
   const source = persistedRun("20260910010101-aaaaaa", "7", {
