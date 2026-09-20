@@ -42,6 +42,11 @@ async function temporaryNames(repoPath) {
   return names.filter((name) => name.startsWith(prefix) && name.endsWith(".tmp"));
 }
 
+async function ageFile(file, ageMs = 5_000) {
+  const old = new Date(Date.now() - ageMs);
+  await fs.utimes(file, old, old);
+}
+
 test("concurrent run-state readers observe only complete generations", async (t) => {
   const { repoPath } = await fixture(t);
   const state = runState();
@@ -165,6 +170,58 @@ test("abandoned temporary files are removed safely and existing permissions are 
   assert.deepEqual(await temporaryNames(repoPath), []);
   assert.equal((await fs.stat(file)).mode & 0o777, 0o640);
   assert.equal((await loadRunState(repoPath, runId)).generation, 1);
+});
+
+test("abandoned empty, malformed, and dead-owner locks are reclaimed after the stale grace period", async (t) => {
+  const cases = ["", "not-a-pid\n", "2147483647\n"];
+
+  for (const contents of cases) {
+    const { repoPath } = await fixture(t);
+    const file = statePath(repoPath, runId);
+    const lock = `${file}.lock`;
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(lock, contents, "utf8");
+    await ageFile(lock);
+
+    await saveRunState(repoPath, runId, runState(), { retryMs: 0 });
+
+    assert.equal((await loadRunState(repoPath, runId)).generation, 0);
+    await assert.rejects(fs.stat(lock), { code: "ENOENT" });
+  }
+});
+
+test("young incomplete locks and changed lock identities are never reclaimed", async (t) => {
+  const { repoPath } = await fixture(t);
+  const file = statePath(repoPath, runId);
+  const lock = `${file}.lock`;
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(lock, "", "utf8");
+
+  await assert.rejects(
+    saveRunState(repoPath, runId, runState(), { retryMs: 0, timeoutMs: 0 }),
+    /Timed out waiting for Maestro's run-state lock/
+  );
+  assert.equal(await fs.readFile(lock, "utf8"), "");
+
+  await ageFile(lock);
+  let replacementIdentity;
+  await assert.rejects(
+    saveRunState(repoPath, runId, runState(), {
+      retryMs: 0,
+      timeoutMs: 0,
+      beforeStaleLockRemoval: async () => {
+        await fs.unlink(lock);
+        await fs.writeFile(lock, `${process.pid}\n`, "utf8");
+        replacementIdentity = await fs.stat(lock, { bigint: true });
+      }
+    }),
+    /Timed out waiting for Maestro's run-state lock/
+  );
+
+  const retainedIdentity = await fs.stat(lock, { bigint: true });
+  assert.equal(retainedIdentity.dev, replacementIdentity.dev);
+  assert.equal(retainedIdentity.ino, replacementIdentity.ino);
+  assert.equal(await fs.readFile(lock, "utf8"), `${process.pid}\n`);
 });
 
 test("genuinely corrupt state still fails clearly", async (t) => {

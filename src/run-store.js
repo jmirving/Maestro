@@ -6,6 +6,7 @@ const { runChecked } = require("./process");
 
 const LOCK_RETRY_MS = 20;
 const LOCK_TIMEOUT_MS = 10_000;
+const LOCK_STALE_GRACE_MS = 1_000;
 const stateRevisions = new WeakMap();
 
 class RunStateConflictError extends Error {
@@ -34,38 +35,112 @@ async function readFileIfPresent(file) {
   }
 }
 
-async function removeStaleLock(lock) {
+function sameFileIdentity(left, right) {
+  return left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs;
+}
+
+async function lockIdentity(lock) {
   try {
-    const owner = Number((await fs.readFile(lock, "utf8")).trim());
-    if (!Number.isInteger(owner) || owner <= 0) return false;
-    process.kill(owner, 0);
-    return false;
+    return await fs.stat(lock, { bigint: true });
   } catch (error) {
-    if (error.code !== "ESRCH") return false;
-    await fs.unlink(lock).catch((unlinkError) => {
-      if (unlinkError.code !== "ENOENT") throw unlinkError;
-    });
-    return true;
+    if (error.code === "ENOENT") return null;
+    throw error;
   }
+}
+
+async function inspectLock(lock) {
+  let handle;
+  try {
+    handle = await fs.open(lock, "r");
+    const contents = await handle.readFile("utf8");
+    const identity = await handle.stat({ bigint: true });
+    return { contents, identity };
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  } finally {
+    await handle?.close();
+  }
+}
+
+async function removeLockIfUnchanged(lock, expectedIdentity) {
+  const currentIdentity = await lockIdentity(lock);
+  if (currentIdentity == null) return true;
+  if (!sameFileIdentity(currentIdentity, expectedIdentity)) return false;
+  try {
+    await fs.unlink(lock);
+    return true;
+  } catch (error) {
+    if (error.code === "ENOENT") return true;
+    throw error;
+  }
+}
+
+async function removeStaleLock(lock, {
+  now = Date.now,
+  staleLockMs = LOCK_STALE_GRACE_MS,
+  beforeStaleLockRemoval = null
+} = {}) {
+  const inspected = await inspectLock(lock);
+  if (inspected == null) return true;
+  const { contents, identity } = inspected;
+
+  // A live writer can be paused between exclusive creation and its PID write.
+  // Never interpret an incomplete (or even partially numeric) lock as abandoned
+  // until it has remained unchanged for a grace period.
+  const ageMs = now() - Number(identity.mtimeNs / 1_000_000n);
+  if (ageMs < staleLockMs) return false;
+
+  const owner = Number(contents.trim());
+  if (Number.isInteger(owner) && owner > 0) {
+    try {
+      process.kill(owner, 0);
+      return false;
+    } catch (error) {
+      if (error.code !== "ESRCH") return false;
+    }
+  }
+
+  if (beforeStaleLockRemoval) await beforeStaleLockRemoval({ lock, identity });
+  return removeLockIfUnchanged(lock, identity);
 }
 
 async function withRunStateLock(file, operation, {
   retryMs = LOCK_RETRY_MS,
-  timeoutMs = LOCK_TIMEOUT_MS
+  timeoutMs = LOCK_TIMEOUT_MS,
+  now = Date.now,
+  staleLockMs = LOCK_STALE_GRACE_MS,
+  beforeStaleLockRemoval = null
 } = {}) {
   const lock = `${file}.lock`;
   await fs.mkdir(path.dirname(file), { recursive: true });
-  const started = Date.now();
+  const started = now();
   let handle;
+  let acquiredIdentity;
   for (;;) {
     try {
       handle = await fs.open(lock, "wx");
-      await handle.writeFile(`${process.pid}\n`);
+      try {
+        await handle.writeFile(`${process.pid}\n`);
+        acquiredIdentity = await handle.stat({ bigint: true });
+      } catch (error) {
+        const incompleteIdentity = await handle.stat({ bigint: true }).catch(() => null);
+        await handle.close().catch(() => {});
+        handle = null;
+        if (incompleteIdentity != null) {
+          await removeLockIfUnchanged(lock, incompleteIdentity).catch(() => {});
+        }
+        throw error;
+      }
       break;
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
-      if (await removeStaleLock(lock)) continue;
-      if (Date.now() - started >= timeoutMs) {
+      if (await removeStaleLock(lock, { now, staleLockMs, beforeStaleLockRemoval })) continue;
+      if (now() - started >= timeoutMs) {
         throw new Error(`Timed out waiting for Maestro's run-state lock at ${lock}.`);
       }
       await sleep(retryMs);
@@ -75,9 +150,7 @@ async function withRunStateLock(file, operation, {
     return await operation();
   } finally {
     await handle.close();
-    await fs.unlink(lock).catch((error) => {
-      if (error.code !== "ENOENT") throw error;
-    });
+    await removeLockIfUnchanged(lock, acquiredIdentity);
   }
 }
 
