@@ -684,6 +684,19 @@
         "labels": [],
         "blockedBy": []
       }
+    },
+    "33": {
+      "status": "ready",
+      "priority": 5,
+      "github": {
+        "state": "OPEN",
+        "stateReason": null,
+        "closedAt": null,
+        "updatedAt": "2026-09-20T16:09:28Z",
+        "title": "Serialize lifecycle transitions with scheduler reservations",
+        "labels": [],
+        "blockedBy": []
+      }
     }
   }
 }
