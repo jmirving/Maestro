@@ -63,7 +63,7 @@ const COMMANDS = [
       "--auto-rework": { description: "Automatically correct and revalidate REWORK results, up to three attempts within a 30-minute session." }
     },
     prerequisites: "Ready reconciled work, a clean usable repository, current GitHub issue facts, and every capability required by the selected items.",
-    effects: "Atomically reserves repository worker slots, persists a run, creates isolated branches/worktrees, and validates changed branches. --auto-rework shares freed slots between bounded corrections and authorized ready backfill.",
+    effects: "Atomically reserves repository worker slots, persists a run, creates isolated branches/worktrees, validates changed branches, and backfills authorized ready work as original workers settle. --auto-rework also shares freed slots with bounded corrections.",
     cautions: "GitHub or saved-workset scope drift blocks launch. Does not approve, integrate, push the default branch, or close issues. Successful automatic rework still requires human review. --rerun is an explicit retry, not normal resume behavior or a drift bypass, and cannot be combined with --workset.",
     next: ["maestro status", "maestro details <issue>", "maestro output"],
     examples: [["start"], ["start", "--auto-rework"]],
@@ -85,7 +85,7 @@ const COMMANDS = [
       "--auto-rework": { description: "Automatically correct and revalidate REWORK results, up to three attempts within a 30-minute session." }
     },
     prerequisites: "The same requirements as start. Existing running, review, rework, and integration states remain deferred.",
-    effects: "Runs workers and validators for newly eligible work; --auto-rework may resume corrections and backfill freed slots from the authorized manifest scope. It does not integrate work.",
+    effects: "Runs workers and validators for newly eligible work and backfills freed original-worker slots from the authorized manifest scope; --auto-rework may also resume corrections. It does not integrate work.",
     cautions: "No ready work is not proof that all repository or workset work is complete; inspect status for outside prerequisites, gates, and deferred items. Automatic correction never satisfies human review or integration gates. --rerun cannot be combined with --workset.",
     next: ["maestro status", "maestro output"],
     examples: [["next"], ["next", "--auto-rework"]],

@@ -563,15 +563,38 @@ async function main() {
       throw new Error(`Cannot reserve worker capacity for rerun: ${reservation.reason}.`);
     }
     const plan = reservation.plan || { ...candidatePlan, selected: [] };
+    const authorizedIssueIds = scope?.issueIds?.map(String) || Object.keys(config.work || {});
+    const lifecycleBackfill = [];
+    const backfillOnOriginalSettlement = !args.includes("--rerun") && !args.includes("--auto-rework")
+      ? async () => {
+          const outcomes = await runLifecycleBackfill(config, {
+            repoPath,
+            authorizedIssueIds,
+            planOptions,
+            verifySelection: (issueIds) => verifyExecutionSelection(config, repoPath, issueIds),
+            runIdFactory: newRunId,
+            extraState: authorization ? { scope: authorization } : {},
+            executeReserved: ({ runId, reservation: backfillReservation }) => executeRun(config, {
+              repoPath,
+              runId,
+              plan: backfillReservation.plan,
+              scope: authorization,
+              reservedState: backfillReservation.state
+            })
+          });
+          lifecycleBackfill.push(...outcomes);
+        }
+      : undefined;
     const result = await executeRun(config, {
       repoPath,
       plan,
       runId: requestedRunId,
       scope: authorization,
+      ...(backfillOnOriginalSettlement ? { onIssueSettled: backfillOnOriginalSettlement } : {}),
       ...(reservation.reserved ? { reservedState: reservation.state } : {})
     });
     let automatic = null;
-    let backfill = [];
+    let backfill = lifecycleBackfill;
     if (args.includes("--auto-rework")) {
       const newlyExecuted = result.plan?.selected?.map((item) => String(item.id)) || [];
       const resumable = plan.deferred
@@ -581,7 +604,6 @@ async function main() {
       const correctionIssues = currentStates
         .filter((entry) => entry.evidence?.verdict === "rework" && !entry.evidence?.review)
         .map((entry) => entry.issue);
-      const authorizedIssueIds = scope?.issueIds?.map(String) || Object.keys(config.work || {});
       const outcomes = await runLifecycleBackfill(config, {
         repoPath,
         authorizedIssueIds,
@@ -628,7 +650,10 @@ async function main() {
         issues: corrections.flatMap((entry) => entry.issues || [])
       };
     }
-    process.stdout.write(`${JSON.stringify(automatic ? { ...result, autoRework: automatic, backfill } : result, null, 2)}\n`);
+    const output = automatic
+      ? { ...result, autoRework: automatic, backfill }
+      : backfill.length ? { ...result, backfill } : result;
+    process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
     process.stdout.write(await workflowFooter(config, repoPath));
     if (automatic) setAutoReworkExitCode(automatic);
     else setResultExitCode(result);
