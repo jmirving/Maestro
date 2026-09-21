@@ -177,11 +177,15 @@ async function executeReconcileRun(config, {
     await runner("git", ["fetch", "origin", defaultBranch], { cwd: original.worktreePath });
     const baseSha = (await runner("git", ["rev-parse", `origin/${defaultBranch}`], { cwd: original.worktreePath })).stdout.trim();
     const sourceSha = (await runner("git", ["rev-parse", "HEAD"], { cwd: original.worktreePath })).stdout.trim();
+    const issue = String(original.issue);
     let conflicted = false;
-    let conflict = source.conflicts?.[String(original.issue)]
-      ? { ...source.conflicts[String(original.issue)] }
+    const persistedConflict = resuming
+      ? result.conflicts?.[issue]
+      : source.conflicts?.[issue];
+    let conflict = persistedConflict
+      ? { ...persistedConflict }
       : null;
-    if (conflict) result.conflicts[String(original.issue)] = conflict;
+    if (conflict) result.conflicts[issue] = conflict;
     try {
       await runner("git", ["rebase", `origin/${defaultBranch}`], { cwd: original.worktreePath });
     } catch (error) {

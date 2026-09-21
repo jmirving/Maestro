@@ -13,7 +13,7 @@ function git(cwd, ...args) {
   return result.stdout.trim();
 }
 
-async function conflictFixture(t) {
+async function conflictFixture(t, { sourceConflict = true } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-reconcile-conflict-"));
   const originPath = path.join(root, "origin.git");
   const repoPath = path.join(root, "target");
@@ -38,6 +38,7 @@ async function conflictFixture(t) {
   await fs.writeFile(path.join(repoPath, "shared.txt"), "main\n");
   git(repoPath, "commit", "-qam", "main change");
   git(repoPath, "push", "-q", "origin", "main");
+  const targetSha = git(repoPath, "rev-parse", "HEAD");
 
   const conflict = {
     contractVersion: 1,
@@ -49,13 +50,13 @@ async function conflictFixture(t) {
   };
   await saveRunState(repoPath, sourceRunId, {
     runId: sourceRunId,
-    status: "technical-conflict",
+    status: sourceConflict ? "technical-conflict" : "awaiting-review",
     workers: [{ issue: "19", branch: "worker/19", worktreePath: workerPath, baseSha, headSha: originalHead, exitCode: 0 }],
     validations: [{ issue: "19", verdict: "approve", exitCode: 0 }],
     reviews: { "19": { disposition: "approve" } },
-    conflicts: { "19": conflict }
+    conflicts: sourceConflict ? { "19": conflict } : {}
   });
-  return { root, repoPath, workerPath, sourceRunId, baseSha, originalHead };
+  return { root, repoPath, workerPath, sourceRunId, baseSha, originalHead, targetSha };
 }
 
 test("reconcile prompt bounds the agent to approved integration-conflict repair", () => {
@@ -164,8 +165,11 @@ test("reconcile rejects manual recovery that resets away the implementation", as
 });
 
 test("a reconciliation-created conflict persists the shared recoverable contract", async (t) => {
-  const { repoPath, workerPath, sourceRunId, originalHead } = await conflictFixture(t);
+  const { repoPath, workerPath, sourceRunId, baseSha, originalHead, targetSha } = await conflictFixture(t, {
+    sourceConflict: false
+  });
   const runId = "20260910020202-bbbbbb";
+  assert.equal((await loadRunState(repoPath, sourceRunId)).conflicts["19"], undefined);
 
   await assert.rejects(
     executeReconcileRun({ repository: "example/repo", defaultBranch: "main", work: { "19": { status: "ready" } } }, {
@@ -187,10 +191,24 @@ test("a reconciliation-created conflict persists the shared recoverable contract
   assert.equal(conflict.operationOwner, "maestro");
   assert.equal(conflict.operationState, "aborted");
   assert.deepEqual(conflict.conflictedFiles, ["shared.txt"]);
+  assert.equal(conflict.parentRunId, sourceRunId);
+  assert.equal(conflict.originalBaseSha, baseSha);
   assert.equal(conflict.sourceSha, originalHead);
+  assert.equal(conflict.targetSha, targetSha);
   assert.equal(conflict.continuationAction, "maestro reconcile 19");
+  assert.equal(state.runId, runId);
   assert.equal(git(workerPath, "rev-parse", "HEAD"), originalHead);
   assert.equal(git(workerPath, "status", "--porcelain"), "");
+
+  const originalProvenance = {
+    interruptedStage: conflict.interruptedStage,
+    sourceRunId: conflict.sourceRunId,
+    parentRunId: conflict.parentRunId,
+    originalBaseSha: conflict.originalBaseSha,
+    sourceSha: conflict.sourceSha,
+    targetSha: conflict.targetSha,
+    conflictedFiles: conflict.conflictedFiles
+  };
 
   const runCount = (await loadPersistedRunStates(repoPath)).length;
   const attempted = spawnSync("git", ["rebase", "origin/main"], { cwd: workerPath, encoding: "utf8" });
@@ -198,6 +216,11 @@ test("a reconciliation-created conflict persists the shared recoverable contract
   await fs.writeFile(path.join(workerPath, "shared.txt"), "main and retained worker\n");
   git(workerPath, "add", "shared.txt");
   git(workerPath, "-c", "core.editor=true", "rebase", "--continue");
+  await fs.writeFile(path.join(repoPath, "later.txt"), "target moved after conflict\n");
+  git(repoPath, "add", "later.txt");
+  git(repoPath, "commit", "-qm", "move target after reconciliation conflict");
+  git(repoPath, "push", "-q", "origin", "main");
+  const movedTargetSha = git(repoPath, "rev-parse", "HEAD");
 
   const resumed = await executeReconcileRun({
     repository: "example/repo",
@@ -213,5 +236,23 @@ test("a reconciliation-created conflict persists the shared recoverable contract
   assert.equal(resumed.runId, runId);
   assert.equal(resumed.status, "awaiting-review");
   assert.equal(resumed.validations[0].verdict, "approve");
+  assert.deepEqual({
+    interruptedStage: resumed.conflicts["19"].interruptedStage,
+    sourceRunId: resumed.conflicts["19"].sourceRunId,
+    parentRunId: resumed.conflicts["19"].parentRunId,
+    originalBaseSha: resumed.conflicts["19"].originalBaseSha,
+    sourceSha: resumed.conflicts["19"].sourceSha,
+    targetSha: resumed.conflicts["19"].targetSha,
+    conflictedFiles: resumed.conflicts["19"].conflictedFiles
+  }, originalProvenance);
+  assert.equal(resumed.conflicts["19"].operationState, "completed");
+  assert.equal(resumed.conflicts["19"].resolvedHeadSha, resumed.workers[0].headSha);
+  assert.equal(resumed.conflicts["19"].resolutionVerifiedAgainstSha, movedTargetSha);
+  const persisted = await loadRunState(repoPath, runId);
+  assert.equal(persisted.conflicts["19"].interruptedStage, "reconciliation-refresh");
+  assert.equal(persisted.conflicts["19"].sourceSha, originalHead);
+  assert.equal(persisted.conflicts["19"].targetSha, targetSha);
+  assert.deepEqual(persisted.conflicts["19"].conflictedFiles, ["shared.txt"]);
+  assert.equal(persisted.conflicts["19"].resolutionVerifiedAgainstSha, movedTargetSha);
   assert.equal((await loadPersistedRunStates(repoPath)).length, runCount);
 });
