@@ -16,7 +16,7 @@ const {
   executeReworkRun,
   autoRework
 } = require("../src/rework");
-const { executeReconcileRun } = require("../src/reconcile");
+const { resolveReconcileSource, executeReconcileRun } = require("../src/reconcile");
 const { latestRunId, loadRunState } = require("../src/run-store");
 const { resolveCurrentIssueStates } = require("../src/run-resolver");
 const { isRecoverableValidatorRework } = require("../src/run-lifecycle");
@@ -165,18 +165,18 @@ function statusIssuePositionals(rest) {
   return [...new Set(issues)];
 }
 
-function reworkPositionals(rest) {
+function reworkPositionals(rest, { reconcile = false } = {}) {
   const issues = [];
   const manifests = [];
   for (let index = 0; index < rest.length; index += 1) {
     const value = rest[index];
-    if (["--repo-path", "--run", "-j", "--concurrency"].includes(value)) {
+    if (["--repo-path", "--run", "-j", "--concurrency", ...(reconcile ? ["--issue"] : [])].includes(value)) {
       if (!rest[index + 1] || rest[index + 1].startsWith("--")) throw new Error(`${value} requires a value.`);
       index += 1;
       continue;
     }
     if (value === "--allow-failing-baseline") continue;
-    if (value.startsWith("--")) throw new Error(`Unknown maestro rework option: ${value}`);
+    if (value.startsWith("--")) throw new Error(`Unknown maestro ${reconcile ? "reconcile" : "rework"} option: ${value}`);
     if (looksLikeManifest(value)) {
       manifests.push(value);
       continue;
@@ -185,7 +185,7 @@ function reworkPositionals(rest) {
     issues.push(value);
   }
   if (manifests.length > 1) {
-    throw new Error(`maestro rework received multiple manifest paths: ${manifests.join(", ")}.`);
+    throw new Error(`maestro ${reconcile ? "reconcile" : "rework"} received multiple manifest paths: ${manifests.join(", ")}.`);
   }
   return { manifest: manifests[0] || null, issues: [...new Set(issues)] };
 }
@@ -518,10 +518,11 @@ async function main() {
   }
 
   const reworkArgs = command === "rework" ? reworkPositionals(rest) : null;
+  const reconcileArgs = command === "reconcile" ? reworkPositionals(rest, { reconcile: true }) : null;
   let context;
-  if (reworkArgs) {
+  if (reworkArgs || reconcileArgs) {
     const repoPath = resolveRepoPath(option(args, "--repo-path"));
-    context = { repoPath, manifestPath: resolveManifestPath(reworkArgs.manifest, repoPath) };
+    context = { repoPath, manifestPath: resolveManifestPath((reworkArgs || reconcileArgs).manifest, repoPath) };
   } else {
     context = resolveContext(rest, args);
   }
@@ -786,15 +787,18 @@ async function main() {
       planOptions,
       initialTasks: correctionTasks,
       reserveInitial: async (source) => {
-        const runId = newRunId();
+        const runId = source.resumeRunId || newRunId();
         const items = source.issueIds.map((id) => ({ id, ...(config.work?.[id] || {}), mode: "rework" }));
+        const resumeState = source.resumeRunId ? await loadRunState(repoPath, source.resumeRunId) : null;
         const reservation = await reserveExplicitWork(config, {
           repoPath,
           runId,
           mode: "rework",
           items,
           planOptions,
-          extraState: { parentRunId: source.parentRunId }
+          expectedCurrent: source.resumeRunId ? [{ issue: source.issueIds[0], runId: source.resumeRunId }] : [],
+          existingState: resumeState,
+          extraState: resumeState ? { ...resumeState, status: "running" } : { parentRunId: source.parentRunId }
         });
         return { ...reservation, runId };
       },
@@ -826,9 +830,20 @@ async function main() {
   }
 
   if (command === "reconcile") {
-    const sourceRunId = option(args, "--run");
-    const issue = option(args, "--issue");
-    const result = await executeReconcileRun(config, { repoPath, sourceRunId, issueIds: issue ? [issue] : null, reserveCapacity: true });
+    const positionalIssues = reconcileArgs.issues;
+    const optionIssue = option(args, "--issue");
+    if (positionalIssues.length > 1) throw new Error("maestro reconcile accepts one issue number.");
+    if (optionIssue && positionalIssues.length && optionIssue !== positionalIssues[0]) {
+      throw new Error("maestro reconcile received different positional and --issue values.");
+    }
+    const issue = positionalIssues[0] || optionIssue;
+    const source = await resolveReconcileSource(repoPath, issue, option(args, "--run"));
+    const result = await executeReconcileRun(config, {
+      repoPath,
+      ...source,
+      ...(source.resumeRunId ? { runId: source.resumeRunId } : {}),
+      reserveCapacity: true
+    });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     setResultExitCode(result);
     return;

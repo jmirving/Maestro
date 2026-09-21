@@ -128,6 +128,7 @@ async function reserveExplicitWork(config, {
   currentEligibility = null,
   planOptions = {},
   extraState = {},
+  existingState = null,
   beforePersist = async () => {}
 } = {}) {
   const requested = items.map((item) => ({ ...item, id: String(item.id) }));
@@ -202,7 +203,8 @@ async function reserveExplicitWork(config, {
       };
     }
     const plan = { ...capacity.plan, selected: requested };
-    const state = reservedRunState({ repoPath, runId, mode, plan, capacity, extraState });
+    const reserved = reservedRunState({ repoPath, runId, mode, plan, capacity, extraState });
+    const state = existingState ? Object.assign(existingState, reserved) : reserved;
     await beforePersist({ state, states, current });
     await stateSaver(repoPath, runId, state);
     return {

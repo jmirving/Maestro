@@ -82,12 +82,12 @@ async function inspectGitOperation(worktreePath, { runner = runChecked, timeoutM
 function conflictContinuation({ stage, issue, sourceRunId }) {
   if (issue == null) return null;
   if (stage === "integration-refresh") {
-    return sourceRunId == null ? null : `maestro reconcile --run ${sourceRunId} --issue ${issue}`;
+    return `maestro reconcile ${issue}`;
   }
   if (stage === "reconciliation-refresh") {
-    return sourceRunId == null ? null : `maestro reconcile --run ${sourceRunId} --issue ${issue}`;
+    return `maestro reconcile ${issue}`;
   }
-  return sourceRunId ? `maestro rework ${issue} --run ${sourceRunId}` : `maestro rework ${issue}`;
+  return `maestro rework ${issue}`;
 }
 
 function isUnresolvedConflict(conflict) {

@@ -148,7 +148,7 @@ test("aliases and important documented flags are accepted by the shared registry
   assert.throws(() => parseInvocation(["plan", "--repo-path", "../target", "config.json"]), /manifest path.*first argument/);
   assert.throws(() => parseInvocation(["details"]), /requires at least 1 issue number/);
   assert.throws(() => parseInvocation(["discard"]), /explicit issue number/);
-  assert.throws(() => parseInvocation(["reconcile"]), /requires --run/);
+  assert.equal(parseInvocation(["reconcile", "57"]).positionals[0], "57");
   assert.throws(() => parseInvocation(["review", "--run", "run-1", "--issue", "not-an-issue", "--disposition", "approve"]), /positive issue number/);
 });
 

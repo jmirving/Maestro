@@ -12,6 +12,22 @@ const { commitLifecycleTransition } = require("./lifecycle-coordination");
 const { resolveCurrentIssueStates, runDescendsFrom } = require("./run-resolver");
 const { inspectGitOperation, captureConflict, contentConflictError, isAncestor } = require("./git-conflict");
 
+async function resolveReconcileSource(repoPath, issue, explicitRunId = null) {
+  if (explicitRunId) return { sourceRunId: String(explicitRunId), issueIds: issue ? [String(issue)] : null };
+  if (!issue) throw new Error("Issue-oriented reconciliation requires an issue number unless --run selects historical evidence.");
+  const [current] = await resolveCurrentIssueStates(repoPath, [String(issue)]);
+  const conflict = current.evidence?.conflict;
+  if (current.evidence?.state !== "technical-conflict" ||
+      !["integration-refresh", "reconciliation-refresh"].includes(conflict?.interruptedStage)) {
+    throw new Error(`Issue #${issue} has no current integration conflict to reconcile.`);
+  }
+  return {
+    sourceRunId: String(conflict.sourceRunId || current.runId),
+    issueIds: [String(issue)],
+    ...(current.state.mode === "reconcile" ? { resumeRunId: current.runId } : {})
+  };
+}
+
 async function ensureCleanWorktree(worker, runner = runChecked) {
   const status = (await runner("git", ["status", "--porcelain"], { cwd: worker.worktreePath })).stdout.trim();
   if (status) throw new Error(`Reconcile branch for issue #${worker.issue} is not clean before rebase:\n${status}`);
@@ -95,6 +111,10 @@ async function executeReconcileRun(config, {
   }
 
   const items = candidates.map((worker) => ({ id: String(worker.issue), ...(config.work?.[String(worker.issue)] || {}), mode: "reconcile" }));
+  const resumeState = runId && String(runId) !== String(sourceRunId)
+    ? await loadRunState(repoPath, runId).catch((error) => /No Maestro run/.test(error.message) ? null : Promise.reject(error))
+    : null;
+  const resuming = resumeState?.mode === "reconcile" && resumeState?.status === "technical-conflict";
   let reservation = null;
   if (reserveCapacity) {
     reservation = await capacityReserver(config, {
@@ -102,13 +122,14 @@ async function executeReconcileRun(config, {
       runId,
       mode: "reconcile",
       items,
-      extraState: { parentRunId: sourceRunId }
+      existingState: resumeState,
+      extraState: resuming ? { ...resumeState, status: "running" } : { parentRunId: sourceRunId }
     });
     if (!reservation.reserved) {
       throw new Error(`Cannot reserve worker capacity for conflict resolution: ${reservation.reason}.`);
     }
   }
-  const result = Object.assign(reservation?.state || {}, {
+  const result = Object.assign(reservation?.state || resumeState || {}, {
     runId,
     parentRunId: sourceRunId,
     mode: "reconcile",
@@ -119,9 +140,14 @@ async function executeReconcileRun(config, {
     preflights: [],
     workers: [],
     validations: [],
-    reviews: reservation?.state?.reviews || {},
-    conflicts: {}
+    reviews: reservation?.state?.reviews || resumeState?.reviews || {},
+    conflicts: resumeState?.conflicts || {}
   });
+  if (resuming) {
+    result.workers = [];
+    result.validations = [];
+    delete result.failure;
+  }
   if (!reservation) await stateSaver(repoPath, runId, result);
   try {
   console.error(`[Maestro] reconcile ${runId} from ${sourceRunId}: capability preflight`);
@@ -281,4 +307,4 @@ async function executeReconcileRun(config, {
   }
 }
 
-module.exports = { buildReconcilePrompt, rebaseInProgress, executeReconcileRun };
+module.exports = { buildReconcilePrompt, rebaseInProgress, resolveReconcileSource, executeReconcileRun };

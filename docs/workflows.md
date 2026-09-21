@@ -95,19 +95,22 @@ maestro status
 
 Then run its recommended issue-oriented action or `maestro next`. Resuming does not mean discarding or rerunning completed work. `start` and `next` defer issues already running, awaiting review, awaiting rework, or awaiting integration. Use `--rerun` only to intentionally bypass that protection for manifest-ready work.
 
+For a preserved Git conflict, `maestro details <issue>` prints the exact worktree and commands. If the operation is **active**, keep it in place: resolve the listed files, run `git add -A -- <files>`, finish it with `GIT_EDITOR=true git rebase --continue` (or the displayed merge equivalent), then run the issue-only continuation, such as `maestro rework 57` or `maestro reconcile 57`. If Maestro reports the operation as **aborted**, first `cd` to the displayed worktree, run `git fetch origin <target>` and `git rebase origin/<target>`, resolve and continue that operation, then run the same issue-only Maestro command. Maestro verifies the completed operation, retained implementation, and current target ancestry before resuming the interrupted worker/validator or fresh-validation stage. A rework-refresh recovery updates the existing charged attempt and run; it does not create another generation. Use `--run` only to deliberately select historical evidence, never as the normal continuation.
+
 No ready work is not proof that all scoped work is complete. Check status for dependency blocks, human gates, active worktrees, review decisions, integration readiness, and integrated work whose manifest bookkeeping is still pending.
 
 ## Integration conflict recovery
 
-If integration reports a rebase conflict, use the retained source run it names:
+If integration reports a rebase conflict, recover the authoritative current issue state:
 
 ```bash
-maestro reconcile --run 20260910010101-aaaaaa --issue 57
-maestro status
 maestro details 57
+# resolve and finish the displayed active or aborted Git operation
+maestro reconcile 57
+maestro status
 ```
 
-`reconcile` is a narrow Git conflict-recovery path for an approved, unintegrated implementation. It rebases the retained worktree, delegates conflict-only repair when necessary, and runs a fresh validator. Git conflict recovery is not GitHub/manifest reconciliation, and a resolved conflict is not automatically human-approved, completed, or integrated.
+`reconcile` is a narrow Git conflict-recovery path for an approved, unintegrated implementation. It resolves the current conflict by issue, rebases the retained worktree, delegates conflict-only repair when necessary, and runs a fresh validator. A conflict interrupted inside reconciliation resumes that same persisted reconciliation run. `maestro reconcile --run <id> --issue <issue>` remains available only for deliberate historical selection. Git conflict recovery is not GitHub/manifest reconciliation, and a resolved conflict is not automatically human-approved, completed, or integrated.
 
 ## Advanced explicit runner
 

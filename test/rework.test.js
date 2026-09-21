@@ -851,7 +851,7 @@ test("semantic rebase ambiguity preserves active conflict evidence and supports 
   assert.equal(attempt.conflict.operation, "rebase");
   assert.equal(attempt.conflict.operationState, "active");
   assert.equal(attempt.conflict.interruptedStage, "rework-refresh");
-  assert.equal(attempt.conflict.continuationAction, `maestro rework 7 --run ${sourceRunId}`);
+  assert.equal(attempt.conflict.continuationAction, "maestro rework 7");
   assert.match(attempt.conflict.stderr, /could not apply.*worker change/s);
   assert.equal(attempt.conflict.resolution.status, "human-required");
   assert.match(attempt.conflict.resolution.report, /product decision/);
@@ -891,6 +891,7 @@ if (process.argv.includes("read-only")) {
 `);
   await fs.chmod(path.join(binPath, "codex"), 0o755);
 
+  const runCountBeforeRecovery = (await loadPersistedRunStates(repoPath)).length;
   const [displayedExecutable, ...displayedArgs] = attempt.conflict.continuationAction.split(" ");
   assert.equal(displayedExecutable, "maestro");
   const recovery = spawnSync(process.execPath, [
@@ -903,19 +904,22 @@ if (process.argv.includes("read-only")) {
 
   assert.equal(recovery.status, 0, recovery.stderr);
   const recovered = parseLeadingJson(recovery.stdout);
-  assert.equal(recovered.parentRunId, result.issues[0].finalRunId);
+  assert.equal(recovered.runId, result.issues[0].finalRunId);
+  assert.equal(recovered.parentRunId, sourceRunId);
   assert.equal(recovered.status, "awaiting-review");
   assert.equal(recovered.workers.length, 1);
   assert.equal(recovered.validations[0].verdict, "approve");
   assert.deepEqual(recovered.reviews, {});
   assert.deepEqual(recovered.integration || [], []);
-  assert.equal(recovered.correction.attempts["7"].number, 2);
+  assert.equal(recovered.correction.attempts["7"].number, 1);
   assert.equal(recovered.correction.attempts["7"].sourceRunId, sourceRunId);
   assert.match(recovery.stdout, /Recommended: `maestro approve 7`/);
+  assert.equal((await loadPersistedRunStates(repoPath)).length, runCountBeforeRecovery);
 
   const preservedConflict = await loadRunState(repoPath, result.issues[0].finalRunId);
-  assert.equal(preservedConflict.correction.attempts["7"].outcome, "human-required");
-  assert.equal(preservedConflict.autoRework["7"].attemptsUsed, 1);
+  assert.equal(preservedConflict.correction.attempts["7"].outcome, "approved");
+  assert.equal(preservedConflict.correction.attempts["7"].conflict.operationState, "manually-resolved");
+  assert.equal(preservedConflict.autoRework?.["7"], undefined);
 
   const runCountAfterRecovery = (await loadPersistedRunStates(repoPath)).length;
   const replay = spawnSync(process.execPath, [
@@ -926,7 +930,7 @@ if (process.argv.includes("read-only")) {
     env: { ...process.env, PATH: `${binPath}${path.delimiter}${process.env.PATH}` }
   });
   assert.equal(replay.status, 1);
-  assert.match(replay.stderr, /Cannot rework superseded implementation evidence/);
+  assert.match(replay.stderr, /Cannot rework the current workflow state/);
   assert.equal((await loadPersistedRunStates(repoPath)).length, runCountAfterRecovery);
 });
 

@@ -93,7 +93,7 @@ test("shared conflict contract captures exact content provenance before a safe a
   assert.equal(conflict.operationHeadSha, fixture.sourceSha);
   assert.equal(conflict.operationOntoSha, fixture.targetSha);
   assert.deepEqual(conflict.conflictedFiles, ["shared.txt"]);
-  assert.equal(conflict.continuationAction, "maestro reconcile --run run-1 --issue 7");
+  assert.equal(conflict.continuationAction, "maestro reconcile 7");
 
   await safelyAbortConflict(conflict);
   assert.equal(conflict.operationState, "aborted");

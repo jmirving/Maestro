@@ -95,7 +95,17 @@ async function resolveIssueReworkSources(repoPath, issueIds) {
     }];
   }
 
-  const refused = resolved.filter((entry) => !isRecoverableValidatorRework(entry.evidence));
+  const resumable = (entry) => {
+    const correction = entry.evidence?.correction;
+    const conflict = entry.evidence?.conflict;
+    return entry.state?.mode === "rework" &&
+      entry.state?.status === "failed" &&
+      correction &&
+      ["technical-conflict", "human-required"].includes(correction.outcome) &&
+      conflict?.interruptedStage === "rework-refresh" &&
+      !["completed", "resolved", "manually-resolved"].includes(conflict.operationState);
+  };
+  const refused = resolved.filter((entry) => !isRecoverableValidatorRework(entry.evidence) && !resumable(entry));
   if (refused.length) {
     const details = refused
       .map((entry) => `#${entry.issue} (${entry.evidence.state || "unknown"} in run ${entry.runId})`)
@@ -105,10 +115,17 @@ async function resolveIssueReworkSources(repoPath, issueIds) {
 
   const grouped = new Map();
   for (const entry of resolved) {
-    if (!grouped.has(entry.runId)) grouped.set(entry.runId, []);
-    grouped.get(entry.runId).push(entry.issue);
+    const correction = entry.evidence?.correction;
+    const sourceRunId = resumable(entry) ? String(correction.sourceRunId) : entry.runId;
+    const key = resumable(entry) ? `resume:${entry.runId}` : `source:${sourceRunId}`;
+    if (!grouped.has(key)) grouped.set(key, {
+      sourceRunId,
+      ...(resumable(entry) ? { parentRunId: entry.state.parentRunId, resumeRunId: entry.runId } : {}),
+      issueIds: []
+    });
+    grouped.get(key).issueIds.push(entry.issue);
   }
-  return [...grouped.entries()].map(([sourceRunId, issues]) => ({ sourceRunId, issueIds: issues }));
+  return [...grouped.values()];
 }
 
 async function resolveReworkParentRunId(repoPath, sourceRunId, issueIds) {
@@ -124,7 +141,10 @@ async function resolveReworkParentRunId(repoPath, sourceRunId, issueIds) {
     ["technical-conflict", "human-required"].includes(correction?.outcome) &&
     String(correction.sourceRunId) === String(sourceRunId)
   ) {
-    return current.runId;
+    throw new Error(
+      `Run ${sourceRunId} has a current interrupted correction for issue #${current.issue} in ${current.runId}. ` +
+      `Resume authoritative current state with \`maestro rework ${current.issue}\`; --run is only for explicit historical selection.`
+    );
   }
   if (String(current?.runId) !== String(sourceRunId)) {
     throw new Error(
@@ -232,9 +252,7 @@ function assessExpectedRebase(conflict, actual) {
 }
 
 function resolutionFailure(worker, conflict, resolution, sourceRunId) {
-  const continuationAction = sourceRunId
-    ? `maestro rework ${worker.issue} --run ${sourceRunId}`
-    : `maestro rework ${worker.issue}`;
+  const continuationAction = `maestro rework ${worker.issue}`;
   const semantic = resolution.status === "human-required";
   const reason = semantic
     ? "reported a semantic ambiguity that requires a human decision"
@@ -321,9 +339,7 @@ async function refreshWorker(worker, {
       conflictedFiles = unmerged.stdout.split("\n").map((entry) => entry.trim()).filter(Boolean);
     } catch {}
     if (!conflictedFiles.length) throw error;
-    const continuationAction = sourceRunId
-      ? `maestro rework ${worker.issue} --run ${sourceRunId}`
-      : `maestro rework ${worker.issue}`;
+    const continuationAction = `maestro rework ${worker.issue}`;
     const targetDiff = await captureOptionalGitOutput(runner, ["diff", "--binary", originalBaseSha, targetSha, "--", ...conflictedFiles], options);
     const conflict = {
       contractVersion: 1,
@@ -454,6 +470,9 @@ async function executeReworkRun(config, {
   reservedState = null,
   concurrency = null
 } = {}) {
+  const resumedState = reservedState?.runId === runId && reservedState?.correction?.attempts
+    ? reservedState
+    : null;
   const source = await loadRunState(repoPath, sourceRunId);
   const workersByIssue = new Map();
   for (const worker of source.workers || []) {
@@ -530,9 +549,14 @@ async function executeReworkRun(config, {
   const candidates = eligibleCandidates.filter((worker) => selectedIds.has(String(worker.issue)));
   const items = candidates.map((worker) => selectedItems.find((item) => item.id === String(worker.issue)));
 
-  const attempts = {};
+  const attempts = resumedState?.correction?.attempts || {};
   for (const worker of candidates) {
     const issue = String(worker.issue);
+    if (attempts[issue]) {
+      attempts[issue].phase = "preparing-resume";
+      delete attempts[issue].finalVerdict;
+      continue;
+    }
     const lineage = await loadCorrectionLineage(repoPath, parentRunId, issue, stateLoader);
     attempts[issue] = {
       number: lineage.attempts.length + 1,
@@ -595,6 +619,15 @@ async function executeReworkRun(config, {
   const result = reservedState
     ? Object.assign(reservedState, { parentRunId, correction: { attempts } })
     : initialState;
+  result.status = "running";
+  delete result.failure;
+  if (resumedState) {
+    result.workers = [];
+    result.validations = [];
+    for (const issue of Object.keys(attempts)) {
+      if (result.autoRework) delete result.autoRework[issue];
+    }
+  }
   if (!reservedState) await stateSaver(repoPath, runId, result);
 
   async function persistTerminalState() {
@@ -635,9 +668,43 @@ async function executeReworkRun(config, {
         body: selectedIssue.body || configuredIssue.body || null
       };
       const priorValidation = validationByIssue.get(issue);
+      const persistedConflict = resumedState?.correction?.attempts?.[issue]?.conflict || null;
+      let refreshInput = worker;
+      if (persistedConflict) {
+        currentStage = "manual-recovery-verification";
+        console.error(`[Maestro] rework #${worker.issue}: verifying completed manual conflict recovery`);
+        let verification;
+        try {
+          verification = await verifyResolvedRebase(worker, persistedConflict, { runner, deadlineAt });
+        } catch (verificationError) {
+          persistedConflict.resolutionState = "awaiting-manual-completion";
+          persistedConflict.manualVerificationFailure = verificationError.message;
+          const recoveryError = new Error(
+            `Manual conflict recovery for issue #${worker.issue} is not complete or valid: ${verificationError.message}. ` +
+            `Inspect \`maestro details ${worker.issue}\`, finish the recorded Git operation, and retry \`maestro rework ${worker.issue}\`.`
+          );
+          recoveryError.code = "REWORK_REFRESH_CONFLICT";
+          recoveryError.outcome = persistedConflict.requiresSemanticHumanDecision ? "human-required" : "technical-conflict";
+          recoveryError.issue = issue;
+          recoveryError.conflict = persistedConflict;
+          throw recoveryError;
+        }
+        result.correction.attempts[issue].outcome = null;
+        persistedConflict.operationState = "manually-resolved";
+        persistedConflict.resolutionState = "verified-awaiting-refresh";
+        persistedConflict.resolvedHeadSha = verification.headSha;
+        persistedConflict.resolutionVerifiedAgainstSha = persistedConflict.targetSha;
+        persistedConflict.resolution = {
+          ...(persistedConflict.resolution || {}),
+          verification,
+          resumedBy: "manual-recovery"
+        };
+        refreshInput = { ...worker, baseSha: persistedConflict.targetSha, headSha: verification.headSha };
+        await stateSaver(repoPath, runId, result);
+      }
       currentStage = "refresh";
       console.error(`[Maestro] rework #${worker.issue}: rebasing existing implementation onto current ${config.defaultBranch || "main"}`);
-      refreshed.push(await refreshWorker(worker, {
+      refreshed.push(await refreshWorker(refreshInput, {
         repository: config.repository,
         issueContext,
         priorWorkerReport: worker.report || "",

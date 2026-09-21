@@ -328,7 +328,7 @@ test("status distinguishes a rework refresh conflict and shows its continuation"
     outcome: "technical-conflict",
     conflict: {
       operationState: "aborted",
-      continuationAction: "maestro rework 7 --run 20260910010101-aaaaaa"
+      continuationAction: "maestro rework 7"
     }
   } } };
   run.autoRework = { "7": {
@@ -341,7 +341,7 @@ test("status distinguishes a rework refresh conflict and shows its continuation"
   const text = formatStatus(await statusSnapshot(config, "/unused", ["7"], {
     stateLoader: async () => [run]
   }));
-  assert.match(text, /charged attempt 1: rebase content conflict \(aborted\); resolve safely, then run maestro rework 7 --run 20260910010101-aaaaaa/);
+  assert.match(text, /charged attempt 1: rebase content conflict \(aborted\); resolve safely, then run maestro rework 7/);
   assert.match(text, /Recommended: `maestro details 7`/);
   assert.doesNotMatch(text, /validator requested rework/);
   assert.doesNotMatch(text, /human decision/);

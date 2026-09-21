@@ -293,6 +293,6 @@ test("integration refresh persists the shared conflict contract before aborting"
   assert.equal(persisted.operationState, "aborted");
   assert.equal(persisted.interruptedStage, "integration-refresh");
   assert.deepEqual(persisted.conflictedFiles, ["shared.txt"]);
-  assert.equal(persisted.continuationAction, "maestro reconcile --run run-source --issue 19");
+  assert.equal(persisted.continuationAction, "maestro reconcile 19");
   assert.equal(git(workerPath, "status", "--porcelain"), "");
 });
