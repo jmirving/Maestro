@@ -105,12 +105,24 @@ If integration reports a rebase conflict, recover the authoritative current issu
 
 ```bash
 maestro details 57
-# resolve and finish the displayed active or aborted Git operation
-maestro reconcile 57
+# let the bounded resolver finish the current managed operation
+maestro resolve 57 --agent
 maestro status
 ```
 
 `reconcile` is a narrow Git conflict-recovery path for an approved, unintegrated implementation. It resolves the current conflict by issue, rebases the retained worktree, delegates conflict-only repair when necessary, and runs a fresh validator. A conflict interrupted inside reconciliation resumes that same persisted reconciliation run. `maestro reconcile --run <id> --issue <issue>` remains available only for deliberate historical selection. Git conflict recovery is not GitHub/manifest reconciliation, and a resolved conflict is not automatically human-approved, completed, or integrated.
+
+For a merge or rebase already started outside Maestro, use the explicit adoption form from that checkout:
+
+```bash
+maestro resolve --adopt --agent
+# if the resolver or a human gate stops with the operation preserved:
+maestro resolve --continue --agent
+```
+
+Standalone adoption requires `resolution.commands` in `.maestro.json`, or falls back to `integration.commands`. It snapshots the active operation, branch, index, staged/unstaged diffs, conflict paths, and untracked-file status into the reported recovery artifact before the agent runs. Existing partial resolutions are not reset. Only merge and rebase are supported; cherry-pick, revert, non-conflict Git failures, semantic ambiguity, and changed unrelated state stop with actionable evidence. Passing checks validate the adopted result but do not grant approval, push, integrate, close an issue, or continue another lifecycle.
+
+If a clean integration refresh instead fails a configured pre-merge check, `commit` records the failure and enters bounded code correction on the refreshed branch. Every attempt is charged before work, uses the same repository capacity pool, and is freshly validated. Approval is deliberately stale after correction: inspect and approve the new run before retrying integration.
 
 ## Delegated bounded execution
 

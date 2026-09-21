@@ -107,6 +107,15 @@
       },
       "additionalProperties": false
     },
+    "resolution": {
+      "type": "object",
+      "properties": {
+        "commands": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
+        "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 10, "default": 3 },
+        "timeoutMs": { "type": "integer", "minimum": 1000, "maximum": 3600000, "default": 600000 }
+      },
+      "additionalProperties": false
+    },
     "github": {
       "type": "object",
       "properties": {

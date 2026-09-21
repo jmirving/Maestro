@@ -153,6 +153,8 @@ async function runIntegrationCommand(command, { cwd, baseline, shellRunner = run
 
   const prior = baselineResultForCommand(baseline, command);
   const error = new Error(`integration validation failed: ${command}`);
+  error.code = "INTEGRATION_CHECK_FAILED";
+  error.command = command;
   error.result = result;
   error.baselineComparison = prior ? {
     baselineSignatures: failureSignatures(`${prior.stdout || ""}\n${prior.stderr || ""}`),
@@ -174,6 +176,7 @@ async function integrateApproved({
   onIntegrated = null,
   sourceRunId = null,
   onConflict = null,
+  onCheckFailure = null,
   revalidateDelegated = null,
   coordinate = withRepositoryCoordination
 }) {
@@ -277,7 +280,21 @@ async function integrateApproved({
 
       const validationResults = [];
       for (const command of integration.commands || []) {
-        validationResults.push({ command, ...(await runIntegrationCommand(command, { cwd: worker.worktreePath, baseline, shellRunner })) });
+        try {
+          validationResults.push({ command, ...(await runIntegrationCommand(command, { cwd: worker.worktreePath, baseline, shellRunner })) });
+        } catch (error) {
+          if (error.code !== "INTEGRATION_CHECK_FAILED") throw error;
+          Object.assign(error, {
+            issue: String(worker.issue),
+            worker,
+            sourceRunId,
+            targetSha,
+            sourceSha: (await runner("git", ["rev-parse", "HEAD"], { cwd: worker.worktreePath })).stdout.trim(),
+            validationResults
+          });
+          if (onCheckFailure) await onCheckFailure(error);
+          throw error;
+        }
       }
 
       await coordinate(repoPath, async () => {
@@ -300,11 +317,27 @@ async function integrateApproved({
         try {
           await runner("git", ["merge", "--ff-only", worker.branch], { cwd: repoPath });
           for (const command of integration.postMergeCommands || []) {
-            await runIntegrationCommand(command, { cwd: repoPath, baseline, shellRunner });
+            try {
+              await runIntegrationCommand(command, { cwd: repoPath, baseline, shellRunner });
+            } catch (error) {
+              if (error.code === "INTEGRATION_CHECK_FAILED") {
+                Object.assign(error, {
+                  issue: String(worker.issue),
+                  worker,
+                  sourceRunId,
+                  targetSha,
+                  sourceSha: (await runner("git", ["rev-parse", "HEAD"], { cwd: worker.worktreePath })).stdout.trim(),
+                  validationResults,
+                  checkStage: "post-merge"
+                });
+              }
+              throw error;
+            }
           }
           await runner("git", ["push", "origin", defaultBranch], { cwd: repoPath });
         } catch (error) {
           try { await runner("git", ["reset", "--hard", before], { cwd: repoPath }); } catch {}
+          if (error.code === "INTEGRATION_CHECK_FAILED" && onCheckFailure) await onCheckFailure(error);
           throw error;
         }
 

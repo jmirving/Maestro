@@ -323,3 +323,32 @@ test("integration refresh persists the shared conflict contract before aborting"
   assert.equal(persisted.continuationAction, "maestro reconcile 19");
   assert.equal(git(workerPath, "status", "--porcelain"), "");
 });
+
+test("a clean refresh exposes integration-check evidence before any merge or push", async () => {
+  const calls = [];
+  let captured = null;
+  const runner = async (_command, args, options) => {
+    calls.push({ args, cwd: options.cwd });
+    if (args[0] === "status") return { code: 0, stdout: "", stderr: "" };
+    if (args[0] === "branch") return { code: 0, stdout: "worker/26\n", stderr: "" };
+    if (args[0] === "rev-parse") return { code: 0, stdout: args[1] === "origin/main" ? "target\n" : "refreshed\n", stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  await assert.rejects(integrateApproved({
+    config: { repository: "example/repo", defaultBranch: "main", integration: { enabled: true, commands: ["npm test"] } },
+    repoPath: "/target",
+    workers: [{ issue: "26", branch: "worker/26", worktreePath: "/worker", baseSha: "base", headSha: "source", exitCode: 0 }],
+    validations: [{ issue: "26", verdict: "approve" }],
+    runner,
+    shellRunner: async () => ({ code: 1, stdout: "not ok 1 - combined behavior", stderr: "" }),
+    onCheckFailure: async (failure) => { captured = failure; }
+  }), (error) => error.code === "INTEGRATION_CHECK_FAILED");
+
+  assert.equal(captured.issue, "26");
+  assert.equal(captured.command, "npm test");
+  assert.equal(captured.targetSha, "target");
+  assert.equal(captured.sourceSha, "refreshed");
+  assert.match(captured.result.stdout, /combined behavior/);
+  assert.equal(calls.some((call) => call.args[0] === "merge"), false);
+  assert.equal(calls.some((call) => call.args[0] === "push"), false);
+});

@@ -249,6 +249,28 @@ const COMMANDS = [
     minIssues: 1
   },
   {
+    name: "resolve",
+    category: "Execution",
+    summary: "Hand the current merge/rebase conflict to a bounded agent and validate it.",
+    when: "Use for the current managed issue conflict, or add --adopt to explicitly hand Maestro an already-active user merge/rebase.",
+    usages: ["maestro resolve <issue> [manifest.json] --agent", "maestro resolve [<issue>] [manifest.json] --adopt --agent [--continue]"],
+    positionals: "At most one issue number and one optional manifest path. --adopt does not require prior Maestro evidence; --continue resumes the current checkout's persisted adopted operation.",
+    options: {
+      "--repo-path": COMMON_REPO_OPTION,
+      "--agent": { description: "Authorize one bounded code-changing resolver under persisted attempt/time limits.", required: true },
+      "--adopt": { description: "Explicitly adopt only the merge/rebase already active in the selected checkout." },
+      "--continue": { description: "Resume or validate the persisted adopted operation for this checkout without creating a duplicate run." },
+      "--allow-failing-baseline": { description: "Explicitly continue despite a failing configured baseline for managed recovery." }
+    },
+    prerequisites: "Managed use requires current eligible conflict evidence. Adoption requires an active merge/rebase and resolution.commands (or integration.commands) in the manifest.",
+    effects: "Preserves operation/user-state evidence, lets the agent finish only that operation, independently verifies Git state, and runs configured checks. Managed recovery returns to fresh validation/review.",
+    cautions: "Adoption authorizes no push, default-branch integration, issue closure, unrelated edits, or stale approval. Unsupported operations and semantic ambiguity stop with recoverable evidence.",
+    next: ["maestro status", "maestro details <issue>", "maestro resolve --continue --agent"],
+    examples: [["resolve", "57", "--agent"], ["resolve", "--adopt", "--agent"]],
+    positionalKind: "loose-manifest-issues",
+    conflicts: [["--continue", "$issues"]]
+  },
+  {
     name: "commit",
     aliases: ["c"],
     category: "Integration",
@@ -359,6 +381,7 @@ const WALKTHROUGHS = [
 4. Inspect:     maestro status            Read states and the recommended next command.
                 maestro details 57        Review issue-level evidence when needed.
 5. Resolve:     maestro rework 57         Correct rejected work, then inspect again.
+                maestro resolve 57 --agent  Repair the current managed Git conflict.
                 maestro approve 57        Record human approval of passing work.
 6. Integrate:   maestro commit            Serialize integration and persist completion.
 7. Continue:    maestro next              Execute newly unblocked work.
@@ -383,6 +406,8 @@ Boundaries
   HUMAN_GATE, technical failure/conflict, invalid validation, and retry exhaustion stop
   automatic correction for that issue while independent passing siblings stay usable.
   Rework and Git-conflict reconciliation create new evidence; neither completes work.
+  Explicit adoption (maestro resolve --adopt --agent) is limited to the active
+  merge/rebase and configured checks; it never grants push or integration authority.
   Resume with status/next. Use --rerun only to intentionally retry deferred work.
   "No ready work" can still mean blocked, human-gated, or bookkeeping-pending work.
 

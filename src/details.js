@@ -98,6 +98,16 @@ function appendEvidence(lines, state, evidence, { heading = null } = {}) {
   }
 
   lines.push(`Issue state: ${valueOrNone(evidence.state)}`);
+  if (state.integrationCorrection && String(state.integrationCorrection.issue) === String(evidence.issue)) {
+    const correction = state.integrationCorrection;
+    lines.push("Integration regression correction:");
+    lines.push(`  Source run: ${valueOrNone(correction.sourceRunId)}`);
+    lines.push(`  Failed command: ${valueOrNone(correction.trigger?.command)}`);
+    lines.push(`  Failed exit code: ${valueOrNone(correction.trigger?.code)}`);
+    lines.push(`  Refreshed target: ${valueOrNone(correction.trigger?.targetSha)}`);
+    lines.push(`  Outcome: ${valueOrNone(correction.outcome)}`);
+    lines.push(`  Attempts: ${correction.attempts?.length || 0}`);
+  }
   if (evidence.conflict && evidence.conflict !== evidence.correction?.conflict) {
     appendConflict(lines, evidence.conflict);
   }

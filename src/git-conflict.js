@@ -24,13 +24,16 @@ function parseUnmerged(text) {
 
 async function inspectGitOperation(worktreePath, { runner = runChecked, timeoutMs = null } = {}) {
   const options = { cwd: worktreePath, ...(timeoutMs ? { timeoutMs } : {}) };
-  const [rebaseMergePath, rebaseApplyPath, mergePath, unmerged, status, head, originalHead, rebaseHead, mergeHead] = await Promise.all([
+  const [rebaseMergePath, rebaseApplyPath, mergePath, cherryPickPath, revertPath, unmerged, status, head, branch, originalHead, rebaseHead, mergeHead] = await Promise.all([
     optionalGit(runner, ["rev-parse", "--git-path", "rebase-merge"], options),
     optionalGit(runner, ["rev-parse", "--git-path", "rebase-apply"], options),
     optionalGit(runner, ["rev-parse", "--git-path", "MERGE_HEAD"], options),
+    optionalGit(runner, ["rev-parse", "--git-path", "CHERRY_PICK_HEAD"], options),
+    optionalGit(runner, ["rev-parse", "--git-path", "REVERT_HEAD"], options),
     optionalGit(runner, ["ls-files", "-u", "-z"], options),
     optionalGit(runner, ["status", "--porcelain=v1", "--untracked-files=all"], options),
     optionalGit(runner, ["rev-parse", "HEAD"], options),
+    optionalGit(runner, ["branch", "--show-current"], options),
     optionalGit(runner, ["rev-parse", "--verify", "ORIG_HEAD"], options),
     optionalGit(runner, ["rev-parse", "--verify", "REBASE_HEAD"], options),
     optionalGit(runner, ["rev-parse", "--verify", "MERGE_HEAD"], options)
@@ -53,16 +56,24 @@ async function inspectGitOperation(worktreePath, { runner = runChecked, timeoutM
   const rebaseApplyActive = await exists(rebaseApplyPath);
   const rebaseActive = rebaseMergeActive || rebaseApplyActive;
   const mergeActive = await exists(mergePath);
-  const operation = rebaseActive ? "rebase" : mergeActive ? "merge" : null;
+  const cherryPickActive = await exists(cherryPickPath);
+  const revertActive = await exists(revertPath);
+  const operation = rebaseActive ? "rebase" : mergeActive ? "merge" : cherryPickActive ? "cherry-pick" : revertActive ? "revert" : null;
   const operationOriginalHeadSha = operation && originalHead.ok ? originalHead.stdout.trim() || null : null;
   const rebaseHeadSha = rebaseActive && rebaseHead.ok ? rebaseHead.stdout.trim() || null : null;
   const mergeHeadSha = mergeActive && mergeHead.ok ? mergeHead.stdout.trim() || null : null;
   const operationOntoSha = rebaseActive
     ? await readOperationFile(rebaseMergeActive ? rebaseMergePath : rebaseApplyPath, "onto")
     : null;
+  const operationHeadName = rebaseActive
+    ? await readOperationFile(rebaseMergeActive ? rebaseMergePath : rebaseApplyPath, "head-name")
+    : null;
+  const currentBranch = branch.ok ? branch.stdout.trim() || null : null;
+  const operationBranch = currentBranch || (operationHeadName?.startsWith("refs/heads/") ? operationHeadName.slice("refs/heads/".length) : null);
   return {
     operation,
-    operationActive: rebaseActive || mergeActive,
+    operationActive: rebaseActive || mergeActive || cherryPickActive || revertActive,
+    operationSupported: operation == null || operation === "rebase" || operation === "merge",
     // ORIG_HEAD is the implementation tip on which the operation began. The
     // operation-specific head is the commit Git is applying/merging, while
     // `onto` (rebase) or MERGE_HEAD (merge) is the intended target revision.
@@ -70,16 +81,21 @@ async function inspectGitOperation(worktreePath, { runner = runChecked, timeoutM
     operationCurrentHeadSha: head.ok ? head.stdout.trim() || null : null,
     operationHeadSha: rebaseActive ? rebaseHeadSha : mergeHeadSha,
     operationOntoSha,
+    operationHeadName,
     operationMergeHeadSha: mergeHeadSha,
     operationSourceSha: operationOriginalHeadSha,
     operationTargetSha: rebaseActive ? operationOntoSha : mergeHeadSha,
     headSha: head.ok ? head.stdout.trim() || null : null,
+    branch: operationBranch,
     conflictedFiles: unmerged.ok ? parseUnmerged(unmerged.stdout) : [],
     status: status.ok ? status.stdout.trim() : null
   };
 }
 
 function conflictContinuation({ stage, issue, sourceRunId }) {
+  if (stage === "adopted-operation") {
+    return "maestro resolve --continue --agent";
+  }
   if (issue == null) return null;
   if (stage === "integration-refresh") {
     return `maestro reconcile ${issue}`;
@@ -161,6 +177,7 @@ async function captureConflict({
     operationCurrentHeadSha: observed.operationCurrentHeadSha,
     operationHeadSha: observed.operationHeadSha,
     operationOntoSha: observed.operationOntoSha,
+    operationHeadName: observed.operationHeadName,
     operationMergeHeadSha: observed.operationMergeHeadSha,
     targetBranch,
     targetRef: targetRef || `origin/${targetBranch}`,

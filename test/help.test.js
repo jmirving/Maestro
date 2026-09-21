@@ -157,6 +157,10 @@ test("aliases and important documented flags are accepted by the shared registry
   assert.throws(() => parseInvocation(["details"]), /requires at least 1 issue number/);
   assert.throws(() => parseInvocation(["discard"]), /explicit issue number/);
   assert.equal(parseInvocation(["reconcile", "57"]).positionals[0], "57");
+  assert.equal(parseInvocation(["resolve", "57", "--agent"]).positionals[0], "57");
+  assert.equal(parseInvocation(["resolve", "--adopt", "--agent"]).options["--adopt"], true);
+  assert.throws(() => parseInvocation(["resolve", "57"]), /requires --agent/);
+  assert.throws(() => parseInvocation(["resolve", "57", "--continue", "--agent"]), /either issue numbers or --continue/);
   assert.throws(() => parseInvocation(["review", "--run", "run-1", "--issue", "not-an-issue", "--disposition", "approve"]), /positive issue number/);
 });
 

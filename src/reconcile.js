@@ -1,5 +1,3 @@
-const fs = require("node:fs/promises");
-const path = require("node:path");
 const { loadRunState, saveRunState } = require("./run-store");
 const { runPreflights } = require("./preflight");
 const { captureBaseline } = require("./baseline");
@@ -12,6 +10,7 @@ const { commitLifecycleTransition } = require("./lifecycle-coordination");
 const { resolveCurrentIssueStates, runDescendsFrom } = require("./run-resolver");
 const { inspectGitOperation, captureConflict, contentConflictError, isAncestor } = require("./git-conflict");
 const { bindValidation } = require("./authorization");
+const { executeConflictResolver } = require("./conflict-resolver");
 
 async function resolveReconcileSource(repoPath, issue, explicitRunId = null) {
   if (explicitRunId) return { sourceRunId: String(explicitRunId), issueIds: issue ? [String(issue)] : null };
@@ -35,8 +34,12 @@ async function ensureCleanWorktree(worker, runner = runChecked) {
 }
 
 async function rebaseInProgress(worktreePath, runner = runProcess) {
-  const result = await runner("git", ["rev-parse", "-q", "--verify", "REBASE_HEAD"], { cwd: worktreePath });
-  return result.code === 0;
+  try {
+    const result = await runner("git", ["rev-parse", "-q", "--verify", "REBASE_HEAD"], { cwd: worktreePath });
+    return result.code === undefined || result.code === 0;
+  } catch {
+    return false;
+  }
 }
 
 function buildReconcilePrompt({ repository, worker, validation, sourceRunId, defaultBranch }) {
@@ -52,23 +55,6 @@ function buildReconcilePrompt({ repository, worker, validation, sourceRunId, def
     `End with a section titled exactly \"### Human review\" containing the highest-value manual regression check.`;
 }
 
-async function resolveConflictWithAgent({ repository, worker, validation, sourceRunId, runId, defaultBranch, codexCommand = "codex", runner = runProcess }) {
-  const reportDir = path.join(path.dirname(worker.worktreePath), ".maestro-reports");
-  await fs.mkdir(reportDir, { recursive: true });
-  const reportPath = path.join(reportDir, `worker-${worker.issue}-${runId}.md`);
-  const prompt = buildReconcilePrompt({ repository, worker, validation, sourceRunId, defaultBranch });
-  console.error(`[Maestro] reconcile #${worker.issue}: agent resolving rebase conflict`);
-  const result = await runner(codexCommand, ["exec", "--sandbox", "danger-full-access", "--output-last-message", reportPath, "-"], {
-    cwd: worker.worktreePath,
-    input: `${prompt}\n`,
-    stream: true,
-    streamPrefix: `[#${worker.issue} reconcile] `
-  });
-  let report = "";
-  try { report = await fs.readFile(reportPath, "utf8"); } catch {}
-  return { result, report, reportPath };
-}
-
 async function executeReconcileRun(config, {
   repoPath,
   sourceRunId,
@@ -79,6 +65,7 @@ async function executeReconcileRun(config, {
   preflightRunner,
   baselineRunner,
   validatorExecutor = validateWorker,
+  conflictResolver = executeConflictResolver,
   stateSaver = saveRunState,
   reserveCapacity = false,
   capacityReserver = reserveExplicitWork
@@ -208,6 +195,15 @@ async function executeReconcileRun(config, {
         targetBranch: defaultBranch, targetSha: baseSha, failure: error, runner
       });
       if (conflict) {
+        const originalBaseSha = conflict.originalBaseSha || (await runner("git", ["merge-base", sourceSha, baseSha], { cwd: original.worktreePath })).stdout.trim();
+        conflict.originalBaseSha = originalBaseSha;
+        conflict.retainedDiff = (await runner("git", ["diff", "--binary", originalBaseSha, sourceSha], { cwd: original.worktreePath })).stdout;
+        conflict.targetDiff = (await runner("git", [
+          "diff", "--binary", originalBaseSha, baseSha, "--", ...conflict.conflictedFiles
+        ], { cwd: original.worktreePath })).stdout;
+        conflict.implementationFiles = (await runner("git", ["diff", "--name-only", originalBaseSha, sourceSha], { cwd: original.worktreePath })).stdout
+          .split("\n").map((entry) => entry.trim()).filter(Boolean);
+        conflict.gitStatus = conflict.statusEvidence;
         result.conflicts[String(original.issue)] = conflict;
         await stateSaver(repoPath, runId, result);
       }
@@ -218,28 +214,40 @@ async function executeReconcileRun(config, {
     let reportPath = original.reportPath || null;
     let exitCode = 0;
     if (conflicted) {
-      const resolved = await resolveConflictWithAgent({
+      const resolved = await conflictResolver({
         repository: config.repository,
-        worker: original,
-        validation: validationByIssue.get(String(original.issue)),
-        sourceRunId,
+        issue: String(original.issue),
+        issueContext: config.work?.[String(original.issue)]?.github || {},
+        priorWorkerReport: original.report || "",
+        validatorReport: validationByIssue.get(String(original.issue))?.report || "",
+        conflict,
+        worktreePath: original.worktreePath,
         runId,
-        defaultBranch,
         runner: processRunner
       });
-      exitCode = resolved.result.code;
+      exitCode = resolved.exitCode ?? (resolved.status === "resolved" ? 0 : 1);
       report = resolved.report;
       reportPath = resolved.reportPath;
-      const stillRebasing = await rebaseInProgress(original.worktreePath, processRunner);
+      const stillRebasing = await rebaseInProgress(original.worktreePath, runner);
       const dirty = (await runner("git", ["status", "--porcelain=v1"], { cwd: original.worktreePath })).stdout.trim();
-      if (exitCode !== 0 || stillRebasing || dirty) {
-        try { await runner("git", ["rebase", "--abort"], { cwd: original.worktreePath }); } catch {}
+      if (resolved.status !== "resolved" || exitCode !== 0 || stillRebasing || dirty) {
         if (conflict) {
-          conflict.operationState = "aborted";
-          conflict.resolutionState = "awaiting-technical-resolution";
-          conflict.failure = exitCode === 0
+          conflict.operationState = stillRebasing ? "active" : "completed-unverified";
+          conflict.requiresSemanticHumanDecision = resolved.status === "human-required";
+          conflict.resolutionState = resolved.status === "human-required"
+            ? "requires-semantic-human-decision"
+            : "awaiting-technical-resolution";
+          conflict.resolution = {
+            status: resolved.status,
+            exitCode,
+            timedOut: resolved.timedOut === true,
+            reportPath,
+            report,
+            stderr: resolved.stderr || null
+          };
+          conflict.failure = resolved.status === "resolved" && exitCode === 0
             ? [stillRebasing ? "rebase still in progress" : null, dirty ? `dirty worktree:\n${dirty}` : null].filter(Boolean).join("; ")
-            : `bounded resolver exited ${exitCode}`;
+            : resolved.status === "human-required" ? "bounded resolver requires a semantic human decision" : `bounded resolver failed (exit ${exitCode})`;
           result.status = "technical-conflict";
           result.failure = conflict.failure;
           await stateSaver(repoPath, runId, result);

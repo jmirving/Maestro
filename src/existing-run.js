@@ -4,6 +4,7 @@ const { ensureFollowUp, isValidValidatorOverride } = require("./reviews");
 const { integrateApproved } = require("./integrator");
 const { captureBaseline } = require("./baseline");
 const { digest, loadAuthorization, assessCurrentScope, assessDelegatedAuthorization } = require("./authorization");
+const { executeIntegrationCorrection } = require("./integration-correction");
 
 function assessRunItems(state, { effectiveByIssue = null, delegatedByIssue = new Map() } = {}) {
   const validationByIssue = new Map((state.validations || []).map((entry) => [String(entry.issue), entry]));
@@ -157,7 +158,8 @@ async function integrateExistingRun(config, {
   closeIssues = false,
   runner,
   shellRunner,
-  scopeAssessmentOptions = {}
+  scopeAssessmentOptions = {},
+  integrationCorrectionExecutor = executeIntegrationCorrection
 }) {
   const state = await loadRunState(repoPath, runId);
   const states = await loadPersistedRunStates(repoPath);
@@ -234,7 +236,10 @@ async function integrateExistingRun(config, {
       throw new Error(`Delegated integration authorization is stale: ${immediateScopeAssessment.reason}`);
     }
   }
-  const newlyIntegrated = await integrateApproved({
+  let checkFailure = null;
+  let newlyIntegrated;
+  try {
+    newlyIntegrated = await integrateApproved({
     config: integrationConfig,
     repoPath,
     manifestPath,
@@ -276,12 +281,55 @@ async function integrateExistingRun(config, {
       state.failure = conflict.failure;
       await saveRunState(repoPath, runId, state);
     },
+    onCheckFailure: async (failure) => {
+      checkFailure = failure;
+      state.status = "integration-regression";
+      state.integrationFailure = {
+        issue: failure.issue,
+        command: failure.command,
+        code: failure.result?.code ?? null,
+        stdout: failure.result?.stdout || "",
+        stderr: failure.result?.stderr || "",
+        targetSha: failure.targetSha,
+        sourceSha: failure.sourceSha,
+        capturedAt: new Date().toISOString()
+      };
+      state.failure = failure.message;
+      await saveRunState(repoPath, runId, state);
+    },
     onIntegrated: async (integrated) => {
       state.integration.push(integrated);
       state.lastIntegratedAt = new Date().toISOString();
       await saveRunState(repoPath, runId, state);
     }
-  });
+    });
+  } catch (error) {
+    if (error.code !== "INTEGRATION_CHECK_FAILED" || !checkFailure) throw error;
+    const issue = String(checkFailure.issue);
+    const entry = pendingEntries.find((candidate) => candidate.issue === issue);
+    const recovery = await integrationCorrectionExecutor(config, {
+      repoPath,
+      sourceRunId: runId,
+      originalWorker: entry.worker,
+      originalValidation: entry.validation,
+      failure: checkFailure,
+      baseline: state.baseline || null
+    });
+    return {
+      runId,
+      reviews: state.reviews,
+      baseline: state.baseline,
+      integration: state.integration,
+      newlyIntegrated: [],
+      integrationRecovery: {
+        runId: recovery.runId,
+        issue,
+        status: recovery.status,
+        outcome: recovery.integrationCorrection?.outcome || null
+      },
+      stopped: "integration-correction"
+    };
+  }
 
   state.integratedAt = new Date().toISOString();
   await saveRunState(repoPath, runId, state);

@@ -19,6 +19,7 @@ const {
   DEFAULT_AUTO_REWORK_TIMEOUT_MS
 } = require("../src/rework");
 const { resolveReconcileSource, executeReconcileRun } = require("../src/reconcile");
+const { executeAdoptedResolution } = require("../src/operation-resolution");
 const { latestRunId, loadRunState } = require("../src/run-store");
 const { resolveCurrentIssueStates } = require("../src/run-resolver");
 const { isRecoverableValidatorRework } = require("../src/run-lifecycle");
@@ -169,7 +170,7 @@ function statusIssuePositionals(rest) {
   return [...new Set(issues)];
 }
 
-function reworkPositionals(rest, { reconcile = false } = {}) {
+function reworkPositionals(rest, { reconcile = false, resolve = false } = {}) {
   const issues = [];
   const manifests = [];
   for (let index = 0; index < rest.length; index += 1) {
@@ -179,8 +180,8 @@ function reworkPositionals(rest, { reconcile = false } = {}) {
       index += 1;
       continue;
     }
-    if (value === "--allow-failing-baseline") continue;
-    if (value.startsWith("--")) throw new Error(`Unknown maestro ${reconcile ? "reconcile" : "rework"} option: ${value}`);
+    if (["--allow-failing-baseline", ...(resolve ? ["--agent", "--adopt", "--continue"] : [])].includes(value)) continue;
+    if (value.startsWith("--")) throw new Error(`Unknown maestro ${reconcile ? "reconcile" : resolve ? "resolve" : "rework"} option: ${value}`);
     if (looksLikeManifest(value)) {
       manifests.push(value);
       continue;
@@ -189,7 +190,7 @@ function reworkPositionals(rest, { reconcile = false } = {}) {
     issues.push(value);
   }
   if (manifests.length > 1) {
-    throw new Error(`maestro ${reconcile ? "reconcile" : "rework"} received multiple manifest paths: ${manifests.join(", ")}.`);
+    throw new Error(`maestro ${reconcile ? "reconcile" : resolve ? "resolve" : "rework"} received multiple manifest paths: ${manifests.join(", ")}.`);
   }
   return { manifest: manifests[0] || null, issues: [...new Set(issues)] };
 }
@@ -256,7 +257,9 @@ async function commitLatest({ config, repoPath, manifestPath, runId, closeIssues
   const newlyIntegrated = new Set(newlyIntegratedIssues);
   const alreadyIntegratedIssues = integratedIssues.filter((issue) => !newlyIntegrated.has(issue));
   const progress = persistManifestCompletion({ repoPath, manifestPath, issueIds: integratedIssues });
-  const outcome = result.nothingToDo
+  const outcome = result.integrationRecovery
+    ? `integration check regression for #${result.integrationRecovery.issue}; correction run ${result.integrationRecovery.runId} is ${result.integrationRecovery.status}`
+    : result.nothingToDo
     ? `nothing remaining${alreadyIntegratedIssues.length ? `; already integrated ${alreadyIntegratedIssues.map((issue) => `#${issue}`).join(", ")}` : ""}`
     : [
         newlyIntegratedIssues.length ? `newly integrated ${newlyIntegratedIssues.map((issue) => `#${issue}`).join(", ")}` : null,
@@ -525,10 +528,11 @@ async function main() {
 
   const reworkArgs = command === "rework" ? reworkPositionals(rest) : null;
   const reconcileArgs = command === "reconcile" ? reworkPositionals(rest, { reconcile: true }) : null;
+  const resolutionArgs = command === "resolve" ? reworkPositionals(rest, { resolve: true }) : null;
   let context;
-  if (reworkArgs || reconcileArgs) {
+  if (reworkArgs || reconcileArgs || resolutionArgs) {
     const repoPath = resolveRepoPath(option(args, "--repo-path"));
-    context = { repoPath, manifestPath: resolveManifestPath((reworkArgs || reconcileArgs).manifest, repoPath) };
+    context = { repoPath, manifestPath: resolveManifestPath((reworkArgs || reconcileArgs || resolutionArgs).manifest, repoPath) };
   } else {
     context = resolveContext(rest, args);
   }
@@ -913,6 +917,47 @@ async function main() {
     }
     const issue = positionalIssues[0] || optionIssue;
     const source = await resolveReconcileSource(repoPath, issue, option(args, "--run"));
+    const result = await executeReconcileRun(config, {
+      repoPath,
+      ...source,
+      ...(source.resumeRunId ? { runId: source.resumeRunId } : {}),
+      reserveCapacity: true
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    setResultExitCode(result);
+    return;
+  }
+
+  if (command === "resolve") {
+    if (resolutionArgs.issues.length > 1) throw new Error("maestro resolve accepts at most one issue number.");
+    const issue = resolutionArgs.issues[0] || null;
+    if (args.includes("--adopt") || args.includes("--continue")) {
+      const result = await executeAdoptedResolution(config, {
+        repoPath,
+        worktreePath: repoPath,
+        issue,
+        continueExisting: args.includes("--continue")
+      });
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      if (result.status !== "validated") process.exitCode = 1;
+      return;
+    }
+    if (!issue) throw new Error("maestro resolve requires an issue number unless --adopt or --continue is used.");
+    const [current] = await resolveCurrentIssueStates(repoPath, [issue]);
+    if (current.evidence?.conflict?.interruptedStage === "rework-refresh") {
+      const [source] = await resolveIssueReworkSources(repoPath, [issue]);
+      const result = await executeReworkRun(config, {
+        repoPath,
+        ...source,
+        runId: source.resumeRunId,
+        reserveCapacity: true,
+        concurrency
+      });
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      setResultExitCode(result);
+      return;
+    }
+    const source = await resolveReconcileSource(repoPath, issue);
     const result = await executeReconcileRun(config, {
       repoPath,
       ...source,

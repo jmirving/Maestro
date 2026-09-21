@@ -125,3 +125,54 @@ test("explicit historical integration skips a superseded implementation without 
   assert.deepEqual(result.superseded, [{ issue: "13" }]);
   assert.equal(invoked, false);
 });
+
+test("integration check failure enters bounded correction instead of opaque integration failure", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-integration-recovery-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const runId = "20260920010101-aaaaaa";
+  await saveRunState(root, runId, {
+    runId,
+    status: "awaiting-review",
+    workers: [{ issue: "26", branch: "worker/26", worktreePath: "/worker", baseSha: "base", headSha: "source", exitCode: 0 }],
+    validations: [{ issue: "26", verdict: "approve", exitCode: 0, report: "approved before combination" }],
+    reviews: { "26": { disposition: "approve" } },
+    integration: []
+  });
+  let correctionInput = null;
+  let shellCalls = 0;
+  const runner = async (_command, args) => {
+    if (args[0] === "status") return { code: 0, stdout: "", stderr: "" };
+    if (args[0] === "branch") return { code: 0, stdout: "worker/26\n", stderr: "" };
+    if (args[0] === "rev-parse" && args[1] === "origin/main") return { code: 0, stdout: "target\n", stderr: "" };
+    if (args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: "refreshed\n", stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  const result = await integrateExistingRun({
+    repository: "example/repo",
+    work: { "26": { status: "ready" } },
+    integration: { commands: ["npm test"] }
+  }, {
+    repoPath: root,
+    runId,
+    runner,
+    shellRunner: async () => {
+      shellCalls += 1;
+      return shellCalls === 1
+        ? { code: 0, stdout: "baseline passes", stderr: "" }
+        : { code: 1, stdout: "not ok 1 - integration interaction", stderr: "" };
+    },
+    integrationCorrectionExecutor: async (_config, input) => {
+      correctionInput = input;
+      return { runId: "20260920020202-bbbbbb", status: "awaiting-review", integrationCorrection: { outcome: "approved" } };
+    }
+  });
+
+  assert.equal(result.stopped, "integration-correction");
+  assert.deepEqual(result.newlyIntegrated, []);
+  assert.deepEqual(result.integrationRecovery, {
+    runId: "20260920020202-bbbbbb", issue: "26", status: "awaiting-review", outcome: "approved"
+  });
+  assert.equal(correctionInput.sourceRunId, runId);
+  assert.equal(correctionInput.failure.command, "npm test");
+  assert.match(correctionInput.failure.result.stdout, /integration interaction/);
+});

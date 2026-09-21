@@ -253,7 +253,7 @@ test("a reconciliation-created conflict persists the shared recoverable contract
   assert.equal(conflict.interruptedStage, "reconciliation-refresh");
   assert.equal(conflict.operation, "rebase");
   assert.equal(conflict.operationOwner, "maestro");
-  assert.equal(conflict.operationState, "aborted");
+  assert.equal(conflict.operationState, "active");
   assert.deepEqual(conflict.conflictedFiles, ["shared.txt"]);
   assert.equal(conflict.parentRunId, sourceRunId);
   assert.equal(conflict.originalBaseSha, baseSha);
@@ -261,8 +261,8 @@ test("a reconciliation-created conflict persists the shared recoverable contract
   assert.equal(conflict.targetSha, targetSha);
   assert.equal(conflict.continuationAction, "maestro reconcile 19");
   assert.equal(state.runId, runId);
-  assert.equal(git(workerPath, "rev-parse", "HEAD"), originalHead);
-  assert.equal(git(workerPath, "status", "--porcelain"), "");
+  assert.equal(git(workerPath, "rev-parse", "HEAD"), targetSha);
+  assert.match(git(workerPath, "status", "--porcelain"), /UU shared\.txt/);
 
   const originalProvenance = {
     interruptedStage: conflict.interruptedStage,
@@ -275,8 +275,6 @@ test("a reconciliation-created conflict persists the shared recoverable contract
   };
 
   const runCount = (await loadPersistedRunStates(repoPath)).length;
-  const attempted = spawnSync("git", ["rebase", "origin/main"], { cwd: workerPath, encoding: "utf8" });
-  assert.notEqual(attempted.status, 0);
   await fs.writeFile(path.join(workerPath, "shared.txt"), "main and retained worker\n");
   git(workerPath, "add", "shared.txt");
   git(workerPath, "-c", "core.editor=true", "rebase", "--continue");
