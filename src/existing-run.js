@@ -163,6 +163,49 @@ async function integrateExistingRun(config, {
 }) {
   const state = await loadRunState(repoPath, runId);
   const states = await loadPersistedRunStates(repoPath);
+  const activeCorrection = states.filter((candidate) =>
+    candidate.mode === "integration-correction" &&
+    candidate.status === "running" &&
+    String(candidate.parentRunId) === String(runId)
+  ).sort((left, right) => String(left.runId).localeCompare(String(right.runId))).at(-1) || null;
+  if (activeCorrection) {
+    const issue = String(activeCorrection.integrationCorrection.issue);
+    const worker = (state.workers || []).find((entry) => String(entry.issue) === issue);
+    const validation = (state.validations || []).find((entry) => String(entry.issue) === issue);
+    if (!worker || !validation) {
+      throw new Error(`Cannot resume integration correction ${activeCorrection.runId}: source run ${runId} has incomplete evidence for issue #${issue}.`);
+    }
+    const trigger = activeCorrection.integrationCorrection.trigger || {};
+    const recovery = await integrationCorrectionExecutor(config, {
+      repoPath,
+      sourceRunId: runId,
+      originalWorker: worker,
+      originalValidation: validation,
+      failure: {
+        issue,
+        command: trigger.command,
+        result: { code: trigger.code, stdout: trigger.stdout || "", stderr: trigger.stderr || "" },
+        targetSha: trigger.targetSha,
+        sourceSha: trigger.sourceSha
+      },
+      baseline: state.baseline || null
+    });
+    return {
+      runId,
+      reviews: state.reviews,
+      baseline: state.baseline || null,
+      integration: state.integration || [],
+      newlyIntegrated: [],
+      integrationRecovery: {
+        runId: recovery.runId,
+        issue,
+        status: recovery.status,
+        outcome: recovery.integrationCorrection?.outcome || null
+      },
+      stopped: "integration-correction",
+      resumed: true
+    };
+  }
   const effectiveByIssue = effectiveIssueStates(config, states);
   let persistedAuthorization = null;
   if (state.authorization?.id) persistedAuthorization = await loadAuthorization(repoPath, state.authorization.id);

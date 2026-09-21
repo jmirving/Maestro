@@ -318,3 +318,48 @@ test("a reconciliation-created conflict persists the shared recoverable contract
   assert.equal(persisted.conflicts["19"].resolutionVerifiedAgainstSha, movedTargetSha);
   assert.equal((await loadPersistedRunStates(repoPath)).length, runCount);
 });
+
+test("managed reconciliation resumes a crashed charged resolver attempt in the same run", async (t) => {
+  const { repoPath, workerPath, sourceRunId } = await conflictFixture(t, { sourceConflict: false });
+  const runId = "20260910030303-cccccc";
+  const config = {
+    repository: "example/repo",
+    defaultBranch: "main",
+    defaultConcurrency: 1,
+    resolution: { maxAttempts: 2, timeoutMs: 60_000 },
+    work: { "19": { status: "ready", blockedBy: [], requires: [] } }
+  };
+
+  await assert.rejects(executeReconcileRun(config, {
+    repoPath, sourceRunId, issueIds: ["19"], runId, reserveCapacity: true,
+    conflictResolver: async () => ({ status: "failed", exitCode: 1 })
+  }), (error) => error.code === "GIT_CONTENT_CONFLICT");
+
+  const interrupted = await loadRunState(repoPath, runId);
+  const originalDeadline = interrupted.conflicts["19"].recovery.deadlineAt;
+  Object.assign(interrupted.conflicts["19"].recovery.attempts[0], {
+    status: "running", outcome: "running", processId: 2147483647, completedAt: undefined
+  });
+  interrupted.status = "running";
+  interrupted.capacity.issues = ["19"];
+  await saveRunState(repoPath, runId, interrupted);
+
+  const resumed = await executeReconcileRun(config, {
+    repoPath, sourceRunId, issueIds: ["19"], runId, reserveCapacity: true,
+    conflictResolver: async ({ worktreePath, timeoutMs }) => {
+      assert.ok(timeoutMs > 0 && timeoutMs <= 60_000);
+      await fs.writeFile(path.join(worktreePath, "shared.txt"), "main and worker\n");
+      git(worktreePath, "add", "shared.txt");
+      git(worktreePath, "-c", "core.editor=true", "rebase", "--continue");
+      return { status: "resolved", exitCode: 0 };
+    },
+    validatorExecutor: async ({ worker }) => ({ issue: worker.issue, verdict: "approve", exitCode: 0 })
+  });
+
+  assert.equal(resumed.runId, runId);
+  assert.equal(resumed.status, "awaiting-review");
+  assert.equal(resumed.conflicts["19"].recovery.deadlineAt, originalDeadline);
+  assert.equal(resumed.conflicts["19"].recovery.attempts[0].status, "interrupted");
+  assert.equal(resumed.conflicts["19"].recovery.attempts[1].number, 2);
+  assert.deepEqual(resumed.capacity.issues, []);
+});

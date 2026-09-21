@@ -343,6 +343,35 @@ test("failed standalone validation persists evidence and releases capacity", asy
   assert.deepEqual(persisted.capacity.issues, []);
 });
 
+test("standalone validation rejects a check-created commit after resolution", async (t) => {
+  const fixture = await repository(t);
+  assert.notEqual(spawnSync("git", ["merge", "main"], { cwd: fixture.root }).status, 0);
+  const runId = "20260920019191-a9a9a9";
+
+  await assert.rejects(executeAdoptedResolution({
+    repository: "example/repo", defaultConcurrency: 1, resolution: { commands: ["mutating check"] }, work: {}
+  }, {
+    repoPath: fixture.root,
+    runId,
+    resolver: async ({ worktreePath }) => {
+      await fs.writeFile(path.join(worktreePath, "shared.txt"), "main\nfeature\n");
+      git(worktreePath, "add", "shared.txt");
+      git(worktreePath, "-c", "core.editor=true", "merge", "--continue");
+      return { status: "resolved", exitCode: 0 };
+    },
+    shellRunner: async () => {
+      await fs.writeFile(path.join(fixture.root, "check-output.txt"), "committed by validation\n");
+      git(fixture.root, "add", "check-output.txt");
+      git(fixture.root, "commit", "-qm", "validation must not change code");
+      return { code: 0, stdout: "pass", stderr: "" };
+    }
+  }), /checks changed the verified Git result/);
+
+  const persisted = (await loadPersistedRunStates(fixture.root)).find((entry) => entry.runId === runId);
+  assert.equal(persisted.status, "human-required");
+  assert.deepEqual(persisted.capacity.issues, []);
+});
+
 test("failed adopted resolver resumes the same run after manual completion", async (t) => {
   const fixture = await repository(t);
   const attempted = spawnSync("git", ["rebase", "main"], { cwd: fixture.root, encoding: "utf8" });

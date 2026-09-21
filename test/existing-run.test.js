@@ -176,3 +176,50 @@ test("integration check failure enters bounded correction instead of opaque inte
   assert.equal(correctionInput.failure.command, "npm test");
   assert.match(correctionInput.failure.result.stdout, /integration interaction/);
 });
+
+test("commit resumes an active integration-correction child before reclassifying its source", async (t) => {
+  const repoPath = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-existing-correction-resume-"));
+  t.after(() => fs.rm(repoPath, { recursive: true, force: true }));
+  const sourceRunId = "20260920080101-aaaaaa";
+  const correctionRunId = "20260920080202-bbbbbb";
+  const worker = { issue: "26", branch: "worker/26", worktreePath: repoPath, headSha: "source-head", exitCode: 0 };
+  const validation = { issue: "26", verdict: "approve", exitCode: 0 };
+  await saveRunState(repoPath, sourceRunId, {
+    runId: sourceRunId, mode: "execute", status: "awaiting-review",
+    plan: { selected: [{ id: "26" }] }, workers: [worker], validations: [validation],
+    reviews: { "26": { disposition: "approve" } }, baseline: { status: "passed" }
+  });
+  await saveRunState(repoPath, correctionRunId, {
+    runId: correctionRunId, parentRunId: sourceRunId, mode: "integration-correction", status: "running",
+    plan: { selected: [{ id: "26" }] }, workers: [], validations: [], reviews: {},
+    capacity: { issues: ["26"] },
+    integrationCorrection: {
+      contractVersion: 1, kind: "integration-regression", issue: "26", deadlineAt: Date.now() + 60_000,
+      attempts: [{ number: 1, status: "running", outcome: "running", processId: 2147483647 }],
+      trigger: { command: "npm test", code: 1, stdout: "failed", stderr: "", targetSha: "target", sourceSha: "source-head" }
+    }
+  });
+
+  let invocation;
+  const result = await integrateExistingRun({ repository: "example/repo", work: { "26": { status: "ready" } } }, {
+    repoPath,
+    runId: sourceRunId,
+    integrationCorrectionExecutor: async (_config, options) => {
+      invocation = options;
+      return {
+        runId: correctionRunId,
+        status: "awaiting-review",
+        integrationCorrection: { outcome: "approved" }
+      };
+    }
+  });
+
+  assert.equal(invocation.sourceRunId, sourceRunId);
+  assert.deepEqual(invocation.originalWorker, worker);
+  assert.deepEqual(invocation.originalValidation, validation);
+  assert.equal(invocation.failure.command, "npm test");
+  assert.equal(result.integrationRecovery.runId, correctionRunId);
+  assert.equal(result.integrationRecovery.outcome, "approved");
+  assert.equal(result.stopped, "integration-correction");
+  assert.equal(result.resumed, true);
+});

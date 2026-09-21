@@ -9,6 +9,7 @@ const { reportRootForRepo } = require("./reporter");
 const { loadPersistedRunStates, saveRunState } = require("./run-store");
 const { resolveCurrentIssueStates } = require("./run-resolver");
 const { reserveExplicitWork, withCapacityLock } = require("./scheduler");
+const { processIsRunning } = require("./recovery-attempts");
 
 const DEFAULT_ATTEMPT_LIMIT = 3;
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -32,17 +33,6 @@ function statusRecords(text) {
 
 function contentHash(contents) {
   return crypto.createHash("sha256").update(contents).digest("hex");
-}
-
-function processIsRunning(processId) {
-  if (!Number.isInteger(processId) || processId <= 0) return false;
-  try {
-    process.kill(processId, 0);
-    return true;
-  } catch (error) {
-    if (error.code === "ESRCH") return false;
-    return true;
-  }
 }
 
 async function capturePathState(worktreePath, entry, runner) {
@@ -443,7 +433,13 @@ async function executeAdoptedResolution(config, {
     conflict.resolvedHeadSha = verification.headSha;
     conflict.resolutionVerifiedAgainstSha = conflict.targetSha;
     const checkResults = await runResolutionChecks(checks, { cwd: worktreePath, shellRunner });
-    await verifyCompletedOperation({ conflict, beforeSnapshot, worktreePath, runner });
+    const afterChecks = await verifyCompletedOperation({ conflict, beforeSnapshot, worktreePath, runner });
+    if (afterChecks.headSha !== verification.headSha || afterChecks.branch !== verification.branch) {
+      throw new Error(
+        `Standalone resolution checks changed the verified Git result from ${verification.branch || "detached HEAD"}@${verification.headSha} ` +
+        `to ${afterChecks.branch || "detached HEAD"}@${afterChecks.headSha}.`
+      );
+    }
     state.resolution.validation = { status: "passed", results: checkResults };
     conflict.resolutionState = "validated";
     state.status = "validated";

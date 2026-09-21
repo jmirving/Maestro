@@ -2,11 +2,17 @@ const crypto = require("node:crypto");
 const { runChecked } = require("./process");
 const { executeWorker } = require("./worker");
 const { validateWorker } = require("./validator");
-const { reserveExplicitWork } = require("./scheduler");
-const { saveRunState } = require("./run-store");
+const { reserveExplicitWork, withCapacityLock } = require("./scheduler");
+const { loadRunState, loadPersistedRunStates, saveRunState } = require("./run-store");
 const { isAncestor } = require("./git-conflict");
-
-const DEFAULT_ATTEMPT_LIMIT = 3;
+const {
+  DEFAULT_RECOVERY_ATTEMPT_LIMIT,
+  DEFAULT_RECOVERY_TIMEOUT_MS,
+  ensureRecoveryContract,
+  interruptExitedAttempt,
+  nextRecoveryAttempt,
+  assertRecoveryAvailable
+} = require("./recovery-attempts");
 
 function correctionRunId(now = new Date()) {
   const stamp = now.toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
@@ -37,8 +43,26 @@ async function verifyCorrection(worker, originalHead, targetSha, runner) {
   }
   const branch = (await runner("git", ["branch", "--show-current"], { cwd: worker.worktreePath })).stdout.trim();
   if (worker.branch && branch !== worker.branch) throw new Error(`Integration correction moved to ${branch || "detached HEAD"}.`);
+  const headSha = (await runner("git", ["rev-parse", "HEAD"], { cwd: worker.worktreePath })).stdout.trim();
+  if (headSha !== worker.headSha) {
+    throw new Error(`Integration correction HEAD changed from verified ${worker.headSha} to ${headSha}.`);
+  }
   const status = (await runner("git", ["status", "--porcelain"], { cwd: worker.worktreePath })).stdout.trim();
   if (status) throw new Error(`Integration correction left residual changes:\n${status}`);
+}
+
+async function findContinuableCorrection(repoPath, { runId, sourceRunId, issue }) {
+  if (runId) {
+    return loadRunState(repoPath, runId).catch((error) =>
+      error.code === "ENOENT" || /No Maestro run/.test(error.message) ? null : Promise.reject(error));
+  }
+  const states = await loadPersistedRunStates(repoPath).catch((error) => error.code === "ENOENT" ? [] : Promise.reject(error));
+  return states.filter((state) =>
+    state.mode === "integration-correction" &&
+    String(state.parentRunId) === String(sourceRunId) &&
+    String(state.integrationCorrection?.issue) === String(issue) &&
+    state.status === "running"
+  ).sort((left, right) => String(left.runId).localeCompare(String(right.runId))).at(-1) || null;
 }
 
 async function executeIntegrationCorrection(config, {
@@ -47,7 +71,7 @@ async function executeIntegrationCorrection(config, {
   originalWorker,
   originalValidation,
   failure,
-  runId = correctionRunId(),
+  runId = null,
   runner = runChecked,
   workerExecutor = executeWorker,
   validatorExecutor = validateWorker,
@@ -57,18 +81,20 @@ async function executeIntegrationCorrection(config, {
 } = {}) {
   const issue = String(originalWorker.issue);
   const item = { id: issue, ...(config.work?.[issue] || {}), mode: "integration-correction" };
-  const reservation = await capacityReserver(config, {
-    repoPath,
-    runId,
-    mode: "integration-correction",
-    items: [item],
-    expectedCurrent: [{ issue, runId: sourceRunId }],
-    extraState: { parentRunId: sourceRunId }
-  });
-  if (!reservation.reserved) {
-    throw new Error(`Cannot reserve worker capacity for integration correction: ${reservation.reason}.`);
-  }
-  const state = Object.assign(reservation.state, {
+  let state = await findContinuableCorrection(repoPath, { runId, sourceRunId, issue });
+  if (state && state.status !== "running") return state;
+  const resuming = Boolean(state);
+  runId = state?.runId || runId || correctionRunId();
+  const timeoutMs = config.resolution?.timeoutMs || DEFAULT_RECOVERY_TIMEOUT_MS;
+  const trigger = {
+    command: failure.command,
+    code: failure.result?.code ?? null,
+    stdout: failure.result?.stdout || "",
+    stderr: failure.result?.stderr || "",
+    targetSha: failure.targetSha,
+    sourceSha: failure.sourceSha
+  };
+  state = state || {
     runId,
     parentRunId: sourceRunId,
     mode: "integration-correction",
@@ -77,37 +103,90 @@ async function executeIntegrationCorrection(config, {
     workers: [],
     validations: [],
     reviews: {},
-    integrationCorrection: {
+    integrationCorrection: ensureRecoveryContract(null, {
+      kind: "integration-regression",
       issue,
+      timeoutMs,
       sourceRunId,
-      trigger: {
-        command: failure.command,
-        code: failure.result?.code ?? null,
-        stdout: failure.result?.stdout || "",
-        stderr: failure.result?.stderr || "",
-        targetSha: failure.targetSha,
-        sourceSha: failure.sourceSha
-      },
-      deadlineAt: Date.now() + (config.resolution?.timeoutMs || 30 * 60 * 1000),
-      attempts: []
+      trigger
+    })
+  };
+  state.integrationCorrection = ensureRecoveryContract(state.integrationCorrection, {
+    kind: "integration-regression", issue, timeoutMs, sourceRunId, trigger
+  });
+
+  const releaseCapacity = async () => {
+    const release = async () => {
+      if (state.capacity?.issues) {
+        state.capacity.issues = [];
+        state.capacity.releasedAt = new Date().toISOString();
+      }
+      await stateSaver(repoPath, runId, state);
+    };
+    if (stateSaver === saveRunState) await withCapacityLock(repoPath, release);
+    else await release();
+  };
+
+  if (resuming) {
+    const interrupted = interruptExitedAttempt(state.integrationCorrection);
+    if (interrupted) {
+      state.failure = `Integration correction attempt ${interrupted.number} was interrupted; its charge is retained.`;
+      await releaseCapacity();
+    }
+  }
+
+  const limit = config.resolution?.maxAttempts || DEFAULT_RECOVERY_ATTEMPT_LIMIT;
+  let remainingMs;
+  try {
+    remainingMs = assertRecoveryAvailable(state.integrationCorrection, {
+      attemptLimit: limit,
+      label: "Integration correction"
+    });
+  } catch (error) {
+    state.status = "failed";
+    state.integrationCorrection.outcome = error.code === "RECOVERY_TIMEOUT" ? "timeout" : "retry-exhausted";
+    state.failure = error.message;
+    await releaseCapacity();
+    return state;
+  }
+
+  let pendingAttempt;
+  const reservation = await capacityReserver(config, {
+    repoPath,
+    runId,
+    mode: "integration-correction",
+    items: [item],
+    expectedCurrent: [{ issue, runId: resuming ? runId : sourceRunId }],
+    currentEligibility: resuming ? (current) => String(current.runId) === String(runId) : null,
+    existingState: state,
+    extraState: { parentRunId: sourceRunId },
+    beforePersist: ({ state: persisted }) => {
+      pendingAttempt = nextRecoveryAttempt(persisted.integrationCorrection, { phase: "worker", status: "running" });
+      persisted.status = "running";
+      delete persisted.failure;
     }
   });
-  await stateSaver(repoPath, runId, state);
+  if (!reservation.reserved) {
+    throw new Error(`Cannot reserve worker capacity for integration correction: ${reservation.reason}.`);
+  }
+  state = reservation.state;
+  state.workers = state.workers || [];
+  state.validations = state.validations || [];
+  state.reviews = state.reviews || {};
+  if (!state.integrationCorrection) state.integrationCorrection = ensureRecoveryContract(null, {
+    kind: "integration-regression", issue, timeoutMs, sourceRunId, trigger
+  });
+  if (!pendingAttempt) {
+    pendingAttempt = nextRecoveryAttempt(state.integrationCorrection, { phase: "worker", status: "running" });
+    await stateSaver(repoPath, runId, state);
+  }
 
-  const limit = config.resolution?.maxAttempts || DEFAULT_ATTEMPT_LIMIT;
-  let previousHead = failure.sourceSha || originalWorker.headSha;
-  let previousValidation = originalValidation;
+  let previousHead = state.workers?.[0]?.headSha || failure.sourceSha || originalWorker.headSha;
+  let previousValidation = state.validations?.[0] || originalValidation;
   try {
-    for (let number = 1; number <= limit; number += 1) {
-      const remainingMs = state.integrationCorrection.deadlineAt - Date.now();
-      if (remainingMs <= 0) {
-        state.status = "failed";
-        state.integrationCorrection.outcome = "timeout";
-        break;
-      }
-      const attempt = { number, chargedAt: new Date().toISOString(), phase: "worker", outcome: "running" };
-      state.integrationCorrection.attempts.push(attempt);
-      await stateSaver(repoPath, runId, state);
+    for (;;) {
+      const attempt = pendingAttempt;
+      remainingMs = Math.max(1, state.integrationCorrection.deadlineAt - Date.now());
       const worker = await workerExecutor({
         repository: config.repository,
         item,
@@ -125,7 +204,9 @@ async function executeIntegrationCorrection(config, {
         timeoutMs: remainingMs
       });
       attempt.worker = worker;
+      attempt.status = "validation";
       if (worker.timedOut) {
+        attempt.status = "completed";
         attempt.outcome = "timeout";
         state.status = "failed";
         state.integrationCorrection.outcome = "timeout";
@@ -142,7 +223,10 @@ async function executeIntegrationCorrection(config, {
         runId,
         timeoutMs: Math.max(1, state.integrationCorrection.deadlineAt - Date.now())
       });
+      await verifyCorrection(worker, previousHead, failure.targetSha, runner);
       attempt.validation = validation;
+      attempt.status = "completed";
+      attempt.completedAt = new Date().toISOString();
       attempt.outcome = validation.verdict;
       previousHead = worker.headSha;
       previousValidation = validation;
@@ -157,8 +241,7 @@ async function executeIntegrationCorrection(config, {
       if (validation.verdict === "approve" && validation.exitCode === 0) {
         state.status = "awaiting-review";
         state.integrationCorrection.outcome = "approved";
-        if (state.capacity?.issues) state.capacity.issues = [];
-        await stateSaver(repoPath, runId, state);
+        await releaseCapacity();
         return state;
       }
       if (validation.verdict === "human_gate") {
@@ -171,21 +254,37 @@ async function executeIntegrationCorrection(config, {
         state.integrationCorrection.outcome = "validator-failure";
         break;
       }
+      try {
+        assertRecoveryAvailable(state.integrationCorrection, {
+          attemptLimit: limit,
+          label: "Integration correction"
+        });
+      } catch (error) {
+        state.status = "failed";
+        state.integrationCorrection.outcome = error.code === "RECOVERY_TIMEOUT" ? "timeout" : "retry-exhausted";
+        break;
+      }
+      pendingAttempt = nextRecoveryAttempt(state.integrationCorrection, { phase: "worker", status: "running" });
+      await stateSaver(repoPath, runId, state);
     }
     if (state.status === "running") {
       state.status = "failed";
       state.integrationCorrection.outcome = "retry-exhausted";
     }
     state.failure = `Integration correction stopped: ${state.integrationCorrection.outcome}.`;
-    if (state.capacity?.issues) state.capacity.issues = [];
-    await stateSaver(repoPath, runId, state);
+    await releaseCapacity();
     return state;
   } catch (error) {
+    if (pendingAttempt && pendingAttempt.status !== "completed") {
+      pendingAttempt.status = "failed";
+      pendingAttempt.outcome = "infrastructure-failure";
+      pendingAttempt.completedAt = new Date().toISOString();
+      pendingAttempt.stderr = error.message;
+    }
     state.status = "failed";
     state.integrationCorrection.outcome = error.code === "CORRECTION_NO_PROGRESS" ? "no-progress" : "infrastructure-failure";
     state.failure = error.message;
-    if (state.capacity?.issues) state.capacity.issues = [];
-    await stateSaver(repoPath, runId, state);
+    await releaseCapacity();
     throw error;
   }
 }
