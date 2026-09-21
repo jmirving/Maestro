@@ -3,6 +3,14 @@ const path = require("node:path");
 const { runProcess } = require("./process");
 
 const MAX_CONTEXT_CHARS = 120000;
+const RESOLVED_REPORT_FIELDS = [
+  "PRESERVED SOURCE BEHAVIOR",
+  "PRESERVED TARGET BEHAVIOR",
+  "CHANGED FILES",
+  "CHECKS AND RESULTS",
+  "FINAL SHA",
+  "SEMANTIC UNCERTAINTY"
+];
 
 function boundedText(value, limit = MAX_CONTEXT_CHARS) {
   const text = String(value || "");
@@ -51,14 +59,29 @@ function buildConflictResolverPrompt({
     `- Do not reset the branch, discard the implementation, force-push, merge, approve, integrate, close issues, or broaden issue scope.\n` +
     `- Do not guess when the two sides encode materially contradictory product behavior.\n\n` +
     `If the intent is technically reconcilable, resolve it, stage it, and finish the ${operation} with a noninteractive editor (for example GIT_EDITOR=true git ${operation} --continue). Continue through later conflict steps from this same operation. ` +
-    `Then begin the final response with exactly RESOLUTION: RESOLVED and report the behaviors preserved from each side, changed files, checks and exact results, final SHA, and any remaining semantic uncertainty. ` +
+    `Then begin the final response with exactly RESOLUTION: RESOLVED and include every evidence line below with a nonempty value:\n` +
+    `PRESERVED SOURCE BEHAVIOR: <behavior retained from the implementation side>\n` +
+    `PRESERVED TARGET BEHAVIOR: <behavior retained from the target side>\n` +
+    `CHANGED FILES: <paths changed to resolve the operation>\n` +
+    `CHECKS AND RESULTS: <commands run and exact results>\n` +
+    `FINAL SHA: <resolved commit SHA>\n` +
+    `SEMANTIC UNCERTAINTY: <remaining uncertainty, or none>\n` +
     `If a product or semantic decision is genuinely required, leave the rebase recoverable and begin with exactly RESOLUTION: HUMAN_REQUIRED, followed by the ambiguity and safe manual continuation. ` +
     `If you cannot safely finish for another reason, leave the rebase recoverable and begin with exactly RESOLUTION: FAILED, followed by exact evidence.\n`;
 }
 
 function parseResolution(report) {
-  const match = String(report || "").match(/^RESOLUTION:\s*(RESOLVED|HUMAN_REQUIRED|FAILED)\b/m);
+  const text = String(report || "");
+  const match = text.match(/^RESOLUTION:\s*(RESOLVED|HUMAN_REQUIRED|FAILED)\b/m);
   if (!match) return "invalid";
+  if (match[1] === "RESOLVED") {
+    const evidence = Object.fromEntries(RESOLVED_REPORT_FIELDS.map((field) => {
+      const value = text.match(new RegExp(`^${field}:\\s*(\\S.*)$`, "mi"));
+      return [field, value?.[1]?.trim() || ""];
+    }));
+    if (RESOLVED_REPORT_FIELDS.some((field) => !evidence[field]) ||
+        !/^[0-9a-f]{7,64}$/i.test(evidence["FINAL SHA"])) return "invalid";
+  }
   return match[1].toLowerCase().replace("_", "-");
 }
 

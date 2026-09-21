@@ -3,6 +3,8 @@ const path = require("node:path");
 const { runProcess } = require("./process");
 const { summarizeBaseline } = require("./baseline");
 
+const MAX_VALIDATOR_OUTPUT_BYTES = 512 * 1024;
+
 function buildValidatorPrompt({ repository, worker, baseline }) {
   const baselinePolicy = baseline?.enabled
     ? `A clean-base validation was captured before workers started. Failing baseline is ${baseline.allowFailing ? "explicitly allowed" : "not allowed"}. A branch failure may be treated as non-regressive ONLY when the evidence shows it is the same failure already present in the captured baseline; new, changed, or broader failures require REWORK or HUMAN_GATE.\n\nCaptured baseline:\n${summarizeBaseline(baseline)}\n\n`
@@ -25,7 +27,16 @@ function parseVerdict(report) {
   return match ? match[1].toLowerCase() : "invalid";
 }
 
-async function validateWorker({ repository, worker, runId, baseline, codexCommand = "codex", runner = runProcess, timeoutMs = null }) {
+async function validateWorker({
+  repository,
+  worker,
+  runId,
+  baseline,
+  codexCommand = "codex",
+  runner = runProcess,
+  timeoutMs = null,
+  maxOutputBytes = MAX_VALIDATOR_OUTPUT_BYTES
+}) {
   const reportDir = path.join(path.dirname(worker.worktreePath), ".maestro-reports");
   await fs.mkdir(reportDir, { recursive: true });
   const reportPath = path.join(reportDir, `validator-${worker.issue}-${runId}.md`);
@@ -35,19 +46,26 @@ async function validateWorker({ repository, worker, runId, baseline, codexComman
     input: `${buildValidatorPrompt({ repository, worker, baseline })}\n`,
     stream: true,
     streamPrefix: `[#${worker.issue} validator] `,
-    timeoutMs
+    timeoutMs,
+    maxOutputBytes
   });
   console.error(`[Maestro] validator #${worker.issue} finished with exit ${result.code}`);
   let report = "";
-  try { report = await fs.readFile(reportPath, "utf8"); } catch {}
+  let reportLimitExceeded = false;
+  try {
+    const contents = await fs.readFile(reportPath);
+    reportLimitExceeded = contents.length > maxOutputBytes;
+    report = contents.subarray(0, maxOutputBytes).toString("utf8");
+  } catch {}
   return {
     issue: worker.issue,
     exitCode: result.code,
     timedOut: result.timedOut === true,
-    verdict: result.code === 0 ? parseVerdict(report) : "failed",
+    outputLimitExceeded: result.outputLimitExceeded === true || reportLimitExceeded,
+    verdict: result.code === 0 && !result.outputLimitExceeded && !reportLimitExceeded ? parseVerdict(report) : "failed",
     report,
     stderr: result.stderr.trim()
   };
 }
 
-module.exports = { buildValidatorPrompt, parseVerdict, validateWorker };
+module.exports = { MAX_VALIDATOR_OUTPUT_BYTES, buildValidatorPrompt, parseVerdict, validateWorker };

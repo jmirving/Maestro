@@ -1,7 +1,7 @@
 const { loadRunState, saveRunState } = require("./run-store");
 const { runPreflights } = require("./preflight");
 const { captureBaseline } = require("./baseline");
-const { validateWorker } = require("./validator");
+const { MAX_VALIDATOR_OUTPUT_BYTES, validateWorker } = require("./validator");
 const { runChecked, runProcess } = require("./process");
 const { newRunId } = require("./controller");
 const { currentHead } = require("./worktrees");
@@ -16,10 +16,25 @@ const {
   ensureRecoveryContract,
   interruptExitedAttempt,
   nextRecoveryAttempt,
-  assertRecoveryAvailable
+  assertRecoveryAvailable,
+  runWithinRecoveryDeadline
 } = require("./recovery-attempts");
 
 const DEFAULT_RECONCILE_TIMEOUT_MS = 10 * 60 * 1000;
+
+function validationTimeout(issue, remainingMs) {
+  const error = new Error(`Fresh validation for issue #${issue} timed out after ${remainingMs}ms.`);
+  error.code = "RECOVERY_TIMEOUT";
+  return error;
+}
+
+async function validateWithinRecoveryDeadline(validatorExecutor, args, { issue, deadlineAt }) {
+  return runWithinRecoveryDeadline({ deadlineAt }, (timeoutMs) => validatorExecutor({
+    ...args,
+    timeoutMs,
+    maxOutputBytes: MAX_VALIDATOR_OUTPUT_BYTES
+  }), { label: `Fresh validation for issue #${issue}` });
+}
 
 async function resolveReconcileSource(repoPath, issue, explicitRunId = null) {
   if (explicitRunId) return { sourceRunId: String(explicitRunId), issueIds: issue ? [String(issue)] : null };
@@ -166,6 +181,12 @@ async function executeReconcileRun(config, {
     validations: [],
     reviews: reservation?.state?.reviews || resumeState?.reviews || {},
     conflicts: resumeState?.conflicts || {}
+  });
+  result.recovery = ensureRecoveryContract(result.recovery, {
+    kind: "managed-reconciliation",
+    issue: null,
+    timeoutMs: config.resolution?.timeoutMs || DEFAULT_RECONCILE_TIMEOUT_MS,
+    sourceRunId
   });
   if (resuming) {
     result.workers = [];
@@ -369,7 +390,45 @@ async function executeReconcileRun(config, {
 
   result.validations = [];
   for (const worker of result.workers.filter((entry) => entry.exitCode === 0 && entry.headSha !== entry.baseSha)) {
-    const validation = await validatorExecutor({ repository: config.repository, worker, baseline: result.baseline, runId });
+    const conflict = result.conflicts?.[String(worker.issue)];
+    if (conflict) {
+      conflict.recovery = ensureRecoveryContract(conflict.recovery, {
+        kind: "managed-conflict",
+        issue: worker.issue,
+        timeoutMs: config.resolution?.timeoutMs || DEFAULT_RECONCILE_TIMEOUT_MS,
+        sourceRunId,
+        operation: conflict.operation
+      });
+    }
+    let validation;
+    try {
+      const deadlineAt = conflict?.recovery?.deadlineAt || result.recovery.deadlineAt;
+      validation = await validateWithinRecoveryDeadline(validatorExecutor, {
+        repository: config.repository, worker, baseline: result.baseline, runId
+      }, { issue: worker.issue, deadlineAt });
+    } catch (error) {
+      if (error.code !== "RECOVERY_TIMEOUT") throw error;
+      validation = { issue: worker.issue, exitCode: 1, timedOut: true, verdict: "failed", report: "", stderr: error.message };
+    }
+    if (validation.timedOut) {
+      const failure = `Fresh validation timed out within the persisted recovery deadline for issue #${worker.issue}.`;
+      const recovery = conflict?.recovery || result.recovery;
+      recovery.outcome = "timeout";
+      recovery.timeoutStage = "validator";
+      recovery.validation = validation;
+      result.failure = failure;
+      if (conflict) {
+        conflict.operationState = "completed";
+        conflict.resolutionState = "awaiting-technical-resolution";
+        conflict.failure = failure;
+        result.status = "technical-conflict";
+        await stateSaver(repoPath, runId, result);
+        throw contentConflictError(conflict);
+      }
+      const error = validationTimeout(worker.issue, 0);
+      error.message = failure;
+      throw error;
+    }
     result.validations.push(bindValidation(config, worker, validation, { scopeRevision: result.authorization?.scope?.revision }));
     const verifiedHead = await currentHead(worker.worktreePath, runner);
     const verifiedBranch = (await runner("git", ["branch", "--show-current"], { cwd: worker.worktreePath })).stdout.trim();

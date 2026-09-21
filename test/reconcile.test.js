@@ -15,7 +15,7 @@ function git(cwd, ...args) {
   return result.stdout.trim();
 }
 
-async function conflictFixture(t, { sourceConflict = true } = {}) {
+async function conflictFixture(t, { sourceConflict = true, cleanRefresh = false } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-reconcile-conflict-"));
   const originPath = path.join(root, "origin.git");
   const repoPath = path.join(root, "target");
@@ -34,11 +34,23 @@ async function conflictFixture(t, { sourceConflict = true } = {}) {
   git(repoPath, "remote", "add", "origin", originPath);
   git(repoPath, "push", "-q", "-u", "origin", "main");
   git(repoPath, "worktree", "add", "-q", "-b", "worker/19", workerPath);
-  await fs.writeFile(path.join(workerPath, "shared.txt"), "worker\n");
-  git(workerPath, "commit", "-qam", "worker change");
+  if (cleanRefresh) {
+    await fs.writeFile(path.join(workerPath, "worker.txt"), "worker\n");
+    git(workerPath, "add", "worker.txt");
+    git(workerPath, "commit", "-qm", "worker change");
+  } else {
+    await fs.writeFile(path.join(workerPath, "shared.txt"), "worker\n");
+    git(workerPath, "commit", "-qam", "worker change");
+  }
   const originalHead = git(workerPath, "rev-parse", "HEAD");
-  await fs.writeFile(path.join(repoPath, "shared.txt"), "main\n");
-  git(repoPath, "commit", "-qam", "main change");
+  if (cleanRefresh) {
+    await fs.writeFile(path.join(repoPath, "main.txt"), "main\n");
+    git(repoPath, "add", "main.txt");
+    git(repoPath, "commit", "-qm", "main change");
+  } else {
+    await fs.writeFile(path.join(repoPath, "shared.txt"), "main\n");
+    git(repoPath, "commit", "-qam", "main change");
+  }
   git(repoPath, "push", "-q", "origin", "main");
   const targetSha = git(repoPath, "rev-parse", "HEAD");
 
@@ -362,4 +374,76 @@ test("managed reconciliation resumes a crashed charged resolver attempt in the s
   assert.equal(resumed.conflicts["19"].recovery.attempts[0].status, "interrupted");
   assert.equal(resumed.conflicts["19"].recovery.attempts[1].number, 2);
   assert.deepEqual(resumed.capacity.issues, []);
+});
+
+test("hanging managed validation is bounded by the recovery deadline and releases capacity", async (t) => {
+  const { repoPath, workerPath, sourceRunId } = await conflictFixture(t, { sourceConflict: false });
+  const runId = "20260910040404-dddddd";
+  let validatorOptions;
+
+  await assert.rejects(executeReconcileRun({
+    repository: "example/repo",
+    defaultBranch: "main",
+    defaultConcurrency: 1,
+    resolution: { timeoutMs: 250 },
+    work: { "19": { status: "ready", blockedBy: [], requires: [] } }
+  }, {
+    repoPath,
+    sourceRunId,
+    issueIds: ["19"],
+    runId,
+    reserveCapacity: true,
+    conflictResolver: async ({ worktreePath }) => {
+      await fs.writeFile(path.join(worktreePath, "shared.txt"), "main and worker\n");
+      git(worktreePath, "add", "shared.txt");
+      git(worktreePath, "-c", "core.editor=true", "rebase", "--continue");
+      return { status: "resolved", exitCode: 0 };
+    },
+    validatorExecutor: async (options) => {
+      validatorOptions = options;
+      return new Promise(() => {});
+    }
+  }), (error) => error.code === "GIT_CONTENT_CONFLICT");
+
+  assert.ok(validatorOptions.timeoutMs > 0 && validatorOptions.timeoutMs <= 250);
+  assert.equal(validatorOptions.maxOutputBytes, 512 * 1024);
+  const persisted = await loadRunState(repoPath, runId);
+  assert.equal(persisted.status, "technical-conflict");
+  assert.equal(persisted.conflicts["19"].recovery.outcome, "timeout");
+  assert.equal(persisted.conflicts["19"].recovery.timeoutStage, "validator");
+  assert.equal(persisted.conflicts["19"].recovery.validation.timedOut, true);
+  assert.deepEqual(persisted.capacity.issues, []);
+});
+
+test("clean managed reconciliation persists a deadline that bounds a hanging validator", async (t) => {
+  const { repoPath, sourceRunId } = await conflictFixture(t, { sourceConflict: false, cleanRefresh: true });
+  const runId = "20260910050505-eeeeee";
+  let validatorOptions;
+
+  await assert.rejects(executeReconcileRun({
+    repository: "example/repo",
+    defaultBranch: "main",
+    defaultConcurrency: 1,
+    resolution: { timeoutMs: 250 },
+    work: { "19": { status: "ready", blockedBy: [], requires: [] } }
+  }, {
+    repoPath,
+    sourceRunId,
+    issueIds: ["19"],
+    runId,
+    reserveCapacity: true,
+    validatorExecutor: async (options) => {
+      validatorOptions = options;
+      return new Promise(() => {});
+    }
+  }), (error) => error.code === "RECOVERY_TIMEOUT");
+
+  assert.ok(validatorOptions.timeoutMs > 0 && validatorOptions.timeoutMs <= 250);
+  assert.equal(validatorOptions.maxOutputBytes, 512 * 1024);
+  const persisted = await loadRunState(repoPath, runId);
+  assert.equal(persisted.status, "failed");
+  assert.equal(persisted.recovery.outcome, "timeout");
+  assert.equal(persisted.recovery.timeoutStage, "validator");
+  assert.equal(persisted.recovery.validation.timedOut, true);
+  assert.deepEqual(persisted.capacity.issues, []);
 });

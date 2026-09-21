@@ -9,10 +9,17 @@ const { reportRootForRepo } = require("./reporter");
 const { loadPersistedRunStates, saveRunState } = require("./run-store");
 const { resolveCurrentIssueStates } = require("./run-resolver");
 const { reserveExplicitWork, withCapacityLock } = require("./scheduler");
-const { processIsRunning } = require("./recovery-attempts");
+const { processIsRunning, runWithinRecoveryDeadline } = require("./recovery-attempts");
 
 const DEFAULT_ATTEMPT_LIMIT = 3;
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+const MAX_RESOLUTION_CHECK_OUTPUT_BYTES = 512 * 1024;
+
+function recoveryTimeout(message) {
+  const error = new Error(message);
+  error.code = "RECOVERY_TIMEOUT";
+  return error;
+}
 
 async function gitText(runner, args, cwd) {
   return (await runner("git", args, { cwd })).stdout || "";
@@ -161,11 +168,47 @@ async function verifyCompletedOperation({ conflict, beforeSnapshot, worktreePath
   return { headSha: observed.headSha, branch: observed.branch, unrelatedUserStatePreserved: true };
 }
 
-async function runResolutionChecks(commands, { cwd, shellRunner = runShell }) {
+async function runResolutionChecks(commands, {
+  cwd,
+  deadlineAt,
+  shellRunner = runShell,
+  maxOutputBytes = MAX_RESOLUTION_CHECK_OUTPUT_BYTES
+}) {
   const results = [];
   for (const command of commands) {
-    const result = await shellRunner(command, { cwd, stream: true, streamPrefix: "[resolution check] " });
-    results.push({ command, code: result.code, stdout: result.stdout || "", stderr: result.stderr || "" });
+    let result;
+    try {
+      result = await runWithinRecoveryDeadline({ deadlineAt }, (timeoutMs) => shellRunner(command, {
+        cwd,
+        stream: true,
+        streamPrefix: "[resolution check] ",
+        timeoutMs,
+        maxOutputBytes
+      }), { label: `Standalone resolution validation (${command})` });
+    } catch (error) {
+      if (error.code === "RECOVERY_TIMEOUT") error.results = results;
+      throw error;
+    }
+    const evidence = {
+      command,
+      code: result.code,
+      timedOut: result.timedOut === true,
+      outputLimitExceeded: result.outputLimitExceeded === true,
+      stdout: result.stdout || "",
+      stderr: result.stderr || ""
+    };
+    results.push(evidence);
+    if (result.timedOut) {
+      const error = recoveryTimeout(`Standalone resolution validation timed out: ${command}`);
+      error.results = results;
+      throw error;
+    }
+    if (result.outputLimitExceeded) {
+      const error = new Error(`standalone resolution validation exceeded the ${maxOutputBytes}-byte output limit: ${command}`);
+      error.code = "RESOLUTION_VALIDATION_FAILED";
+      error.results = results;
+      throw error;
+    }
     if (result.code !== 0) {
       const error = new Error(`standalone resolution validation failed: ${command}`);
       error.code = "RESOLUTION_VALIDATION_FAILED";
@@ -432,7 +475,11 @@ async function executeAdoptedResolution(config, {
     conflict.resolutionState = "verified-awaiting-configured-checks";
     conflict.resolvedHeadSha = verification.headSha;
     conflict.resolutionVerifiedAgainstSha = conflict.targetSha;
-    const checkResults = await runResolutionChecks(checks, { cwd: worktreePath, shellRunner });
+    const checkResults = await runResolutionChecks(checks, {
+      cwd: worktreePath,
+      deadlineAt: state.resolution.deadlineAt,
+      shellRunner
+    });
     const afterChecks = await verifyCompletedOperation({ conflict, beforeSnapshot, worktreePath, runner });
     if (afterChecks.headSha !== verification.headSha || afterChecks.branch !== verification.branch) {
       throw new Error(
@@ -446,6 +493,13 @@ async function executeAdoptedResolution(config, {
     delete state.failure;
   } catch (error) {
     if (state.status === "human-required" && pendingAttempt?.failureKind === "resolver-error") throw error;
+    if (error.code === "RECOVERY_TIMEOUT") {
+      state.status = "human-required";
+      state.failure = `${error.message} The resolved operation and recovery evidence remain preserved.`;
+      state.resolution.validation = { status: "timeout", results: error.results || [] };
+      await stateSaver(repoPath, runId, state);
+      return state;
+    }
     state.status = error.code === "RESOLUTION_VALIDATION_FAILED" ? "validation-failed" : "human-required";
     state.failure = error.message;
     if (error.results) state.resolution.validation = { status: "failed", results: error.results };
@@ -463,6 +517,7 @@ module.exports = {
   capturePreservationSnapshot,
   findContinuableResolution,
   verifyCompletedOperation,
+  MAX_RESOLUTION_CHECK_OUTPUT_BYTES,
   runResolutionChecks,
   executeAdoptedResolution
 };

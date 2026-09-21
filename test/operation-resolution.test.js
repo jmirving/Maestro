@@ -343,6 +343,44 @@ test("failed standalone validation persists evidence and releases capacity", asy
   assert.deepEqual(persisted.capacity.issues, []);
 });
 
+test("hanging standalone validation is bounded by the persisted deadline and releases capacity", async (t) => {
+  const fixture = await repository(t);
+  assert.notEqual(spawnSync("git", ["merge", "main"], { cwd: fixture.root }).status, 0);
+  const runId = "20260920018686-a86a86";
+  let checkOptions;
+
+  const state = await executeAdoptedResolution({
+    repository: "example/repo",
+    defaultConcurrency: 1,
+    resolution: { commands: ["hanging check"], timeoutMs: 250 },
+    work: {}
+  }, {
+    repoPath: fixture.root,
+    runId,
+    resolver: async ({ worktreePath }) => {
+      await fs.writeFile(path.join(worktreePath, "shared.txt"), "main\nfeature\n");
+      git(worktreePath, "add", "shared.txt");
+      git(worktreePath, "-c", "core.editor=true", "merge", "--continue");
+      return { status: "resolved", exitCode: 0 };
+    },
+    shellRunner: async (_command, options) => {
+      checkOptions = options;
+      return new Promise(() => {});
+    }
+  });
+
+  assert.ok(checkOptions.timeoutMs > 0 && checkOptions.timeoutMs <= 250);
+  assert.equal(checkOptions.maxOutputBytes, 512 * 1024);
+  assert.equal(state.status, "human-required");
+  assert.equal(state.resolution.validation.status, "timeout");
+  assert.match(state.failure, /timed out|time budget exhausted/);
+  assert.deepEqual(state.capacity.issues, []);
+  const persisted = await loadPersistedRunStates(fixture.root);
+  const recovery = persisted.find((entry) => entry.runId === runId);
+  assert.equal(recovery.resolution.validation.status, "timeout");
+  assert.deepEqual(recovery.capacity.issues, []);
+});
+
 test("standalone validation rejects a check-created commit after resolution", async (t) => {
   const fixture = await repository(t);
   assert.notEqual(spawnSync("git", ["merge", "main"], { cwd: fixture.root }).status, 0);

@@ -15,6 +15,16 @@ function git(cwd, ...args) {
   return result.stdout.trim();
 }
 
+function completeResolutionReport(sha = "a".repeat(40)) {
+  return `RESOLUTION: RESOLVED\n` +
+    `PRESERVED SOURCE BEHAVIOR: retained implementation behavior\n` +
+    `PRESERVED TARGET BEHAVIOR: retained target behavior\n` +
+    `CHANGED FILES: shared.txt\n` +
+    `CHECKS AND RESULTS: npm test passed\n` +
+    `FINAL SHA: ${sha}\n` +
+    `SEMANTIC UNCERTAINTY: none`;
+}
+
 async function conflictFixture(t, {
   filename = "shared.txt",
   baseContent = "base\n",
@@ -97,9 +107,34 @@ test("bounded resolver prompt carries intent and prohibits lifecycle authority",
   assert.match(prompt, /src\/scheduler\.js/);
   assert.match(prompt, /Do not abort, skip, restart, or replace the rebase/);
   assert.match(prompt, /Do not.*approve, integrate, close issues/);
-  assert.equal(parseResolution("RESOLUTION: RESOLVED\nDone."), "resolved");
+  assert.equal(parseResolution(completeResolutionReport()), "resolved");
+  assert.equal(parseResolution("RESOLUTION: RESOLVED\nDone."), "invalid");
+  assert.equal(parseResolution(completeResolutionReport("not-a-sha")), "invalid");
   assert.equal(parseResolution("RESOLUTION: HUMAN_REQUIRED\nAmbiguous."), "human-required");
   assert.equal(parseResolution("looks good"), "invalid");
+});
+
+test("live conflict resolver rejects a resolved token without the required evidence", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-conflict-report-"));
+  const worktreePath = path.join(root, "worktree");
+  await fs.mkdir(worktreePath);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const result = await executeConflictResolver({
+    repository: "example/repo",
+    issue: "35",
+    conflict: { conflictedFiles: ["shared.txt"], targetRef: "origin/main" },
+    worktreePath,
+    runId: "incomplete-report",
+    runner: async (_command, args) => {
+      const reportPath = args[args.indexOf("--output-last-message") + 1];
+      await fs.writeFile(reportPath, "RESOLUTION: RESOLVED\nDone.");
+      return { code: 0, stderr: "" };
+    }
+  });
+
+  assert.equal(result.reportedStatus, "invalid");
+  assert.equal(result.status, "failed");
 });
 
 test("live conflict resolver uses the workspace-write sandbox", async (t) => {

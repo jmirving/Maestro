@@ -55,6 +55,33 @@ function remainingRecoveryMs(contract, { now = Date.now } = {}) {
   return Math.max(0, Number(contract.deadlineAt) - now());
 }
 
+async function runWithinRecoveryDeadline(contract, start, {
+  label = "Recovery operation",
+  now = Date.now
+} = {}) {
+  const remainingMs = remainingRecoveryMs(contract, { now });
+  if (remainingMs <= 0) {
+    const error = new Error(`${label} time budget exhausted.`);
+    error.code = "RECOVERY_TIMEOUT";
+    throw error;
+  }
+  let timer;
+  try {
+    return await Promise.race([
+      start(remainingMs),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error(`${label} timed out after ${remainingMs}ms.`);
+          error.code = "RECOVERY_TIMEOUT";
+          reject(error);
+        }, remainingMs);
+      })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function nextRecoveryAttempt(contract, {
   phase,
   status = "running",
@@ -98,6 +125,7 @@ module.exports = {
   ensureRecoveryContract,
   interruptExitedAttempt,
   remainingRecoveryMs,
+  runWithinRecoveryDeadline,
   nextRecoveryAttempt,
   assertRecoveryAvailable
 };
