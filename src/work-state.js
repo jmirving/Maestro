@@ -55,6 +55,17 @@ function unresolvedWork(states, config = null) {
     }
     if (effective.consistencyConflict || !effective.current) continue;
     const { runId, state, evidence } = effective.current;
+    const capacityIssues = state.capacity?.issues?.map(String);
+    if (capacityIssues?.includes(issue)) {
+      byIssue.set(issue, {
+        issue,
+        runId,
+        mode: state.mode,
+        state: state.mode === "rework" ? "rework-running" : "running",
+        action: "maestro status"
+      });
+      continue;
+    }
     if (evidence.state === "technical-conflict" && evidence.conflict) {
       byIssue.set(issue, {
         issue,
@@ -74,7 +85,6 @@ function unresolvedWork(states, config = null) {
       continue;
     }
 
-    const capacityIssues = state.capacity?.issues?.map(String);
     const hasActiveReservation = !capacityIssues || capacityIssues.includes(issue);
     if (evidence.selected && ((state.status === "running" && hasActiveReservation) || state.status === "failed")) {
       byIssue.set(issue, {

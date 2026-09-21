@@ -149,6 +149,7 @@ async function reserveExplicitWork(config, {
       const expected = expectedByIssue.get(item.id);
       if (!expected) return false;
       const actual = currentByIssue.get(item.id);
+      if (expected.runId == null) return Boolean(actual);
       return !actual || String(actual.runId) !== String(expected.runId) ||
         (currentEligibility && !currentEligibility(actual));
     });
