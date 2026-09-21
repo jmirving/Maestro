@@ -458,7 +458,7 @@
       }
     },
     "19": {
-      "status": "ready",
+      "status": "complete",
       "priority": 30,
       "github": {
         "state": "OPEN",
