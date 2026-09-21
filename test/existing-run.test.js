@@ -4,7 +4,7 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { integrateExistingRun, classifyRunItems } = require("../src/existing-run");
-const { saveRunState } = require("../src/run-store");
+const { saveRunState, loadRunState } = require("../src/run-store");
 
 test("classifyRunItems allows approved work to integrate while rejected work is marked for rework", () => {
   const state = {
@@ -126,6 +126,86 @@ test("explicit historical integration skips a superseded implementation without 
   assert.equal(invoked, false);
 });
 
+test("commit restart records a remotely accepted durable publication before any new integration", async (t) => {
+  const repoPath = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-publication-reconcile-"));
+  t.after(() => fs.rm(repoPath, { recursive: true, force: true }));
+  const runId = "20260920000101-aaaaaa";
+  await saveRunState(repoPath, runId, {
+    runId,
+    status: "awaiting-review",
+    workers: [{ issue: "26", branch: "worker/26", worktreePath: "/worker", exitCode: 0 }],
+    validations: [{ issue: "26", verdict: "approve" }],
+    reviews: { "26": { disposition: "approve" } },
+    integration: [],
+    publications: {
+      "26": {
+        version: 1,
+        issue: "26",
+        remote: "origin",
+        branch: "main",
+        beforeSha: "before",
+        candidateSha: "candidate",
+        workerBranch: "worker/26",
+        validationResults: [{ command: "npm test", code: 0 }],
+        state: "prepared"
+      }
+    }
+  });
+  const calls = [];
+  const result = await integrateExistingRun({ work: { "26": { status: "ready" } } }, {
+    repoPath,
+    runId,
+    runner: async (_command, args) => {
+      calls.push(args);
+      assert.equal(args[0], "ls-remote");
+      return { code: 0, stdout: "candidate\trefs/heads/main\n", stderr: "" };
+    }
+  });
+
+  const persisted = await loadRunState(repoPath, runId);
+  assert.equal(result.nothingToDo, true);
+  assert.equal(persisted.integration[0].integratedSha, "candidate");
+  assert.equal(persisted.integration[0].publicationReconciled, true);
+  assert.equal(persisted.publications["26"].state, "recorded");
+  assert.deepEqual(calls.map((args) => args[0]), ["ls-remote"]);
+});
+
+test("commit restart gates an uncertain publication before reset or correction", async (t) => {
+  const repoPath = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-publication-uncertain-"));
+  t.after(() => fs.rm(repoPath, { recursive: true, force: true }));
+  const runId = "20260920000102-bbbbbb";
+  await saveRunState(repoPath, runId, {
+    runId,
+    status: "awaiting-review",
+    workers: [{ issue: "26", branch: "worker/26", worktreePath: "/worker", exitCode: 0 }],
+    validations: [{ issue: "26", verdict: "approve" }],
+    reviews: { "26": { disposition: "approve" } },
+    integration: [],
+    publications: {
+      "26": {
+        version: 1, issue: "26", remote: "origin", branch: "main",
+        beforeSha: "before", candidateSha: "candidate", state: "uncertain"
+      }
+    }
+  });
+  const calls = [];
+  let correctionCalled = false;
+
+  await assert.rejects(integrateExistingRun({ work: { "26": { status: "ready" } } }, {
+    repoPath,
+    runId,
+    runner: async (_command, args) => {
+      calls.push(args);
+      throw new Error("remote unavailable");
+    },
+    integrationCorrectionExecutor: async () => { correctionCalled = true; }
+  }), (error) => error.code === "INTEGRATION_PUBLICATION_UNCERTAIN");
+
+  assert.deepEqual(calls.map((args) => args[0]), ["ls-remote"]);
+  assert.equal(correctionCalled, false);
+  assert.equal((await loadRunState(repoPath, runId)).publications["26"].state, "uncertain");
+});
+
 test("integration check failure enters bounded correction instead of opaque integration failure", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-integration-recovery-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -144,7 +224,7 @@ test("integration check failure enters bounded correction instead of opaque inte
     if (args[0] === "status") return { code: 0, stdout: "", stderr: "" };
     if (args[0] === "branch") return { code: 0, stdout: "worker/26\n", stderr: "" };
     if (args[0] === "rev-parse" && args[1] === "origin/main") return { code: 0, stdout: "target\n", stderr: "" };
-    if (args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: "refreshed\n", stderr: "" };
+    if (args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: "source\n", stderr: "" };
     return { code: 0, stdout: "", stderr: "" };
   };
   const result = await integrateExistingRun({

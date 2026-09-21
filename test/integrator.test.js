@@ -337,8 +337,9 @@ test("a clean refresh exposes integration-check evidence before any merge or pus
   await assert.rejects(integrateApproved({
     config: { repository: "example/repo", defaultBranch: "main", integration: { enabled: true, commands: ["npm test"] } },
     repoPath: "/target",
-    workers: [{ issue: "26", branch: "worker/26", worktreePath: "/worker", baseSha: "base", headSha: "source", exitCode: 0 }],
+    workers: [{ issue: "26", branch: "worker/26", worktreePath: "/worker", baseSha: "base", headSha: "refreshed", exitCode: 0 }],
     validations: [{ issue: "26", verdict: "approve" }],
+    reviewAuthorizations: [{ issue: "26", review: { disposition: "approve" } }],
     runner,
     shellRunner: async () => ({ code: 1, stdout: "not ok 1 - combined behavior", stderr: "" }),
     onCheckFailure: async (failure) => { captured = failure; }
@@ -378,6 +379,79 @@ function integrationFixture(t) {
   return { root, originPath, repoPath, workerPath, baseSha };
 }
 
+function checkedRunner(calls = []) {
+  return async (command, args, options) => {
+    calls.push({ command, args, cwd: options.cwd });
+    const result = spawnSync(command, args, { cwd: options.cwd, encoding: "utf8" });
+    if (result.status !== 0) {
+      const error = new Error(result.stderr || `${command} failed`);
+      error.result = { code: result.status, stdout: result.stdout, stderr: result.stderr };
+      throw error;
+    }
+    return { code: 0, stdout: result.stdout, stderr: result.stderr };
+  };
+}
+
+test("a push accepted remotely but reported failed is reconciled as integrated without reset", async (t) => {
+  const fixture = integrationFixture(t);
+  const calls = [];
+  const actualRunner = checkedRunner(calls);
+  const checkpoints = [];
+  const integrated = [];
+  const runner = async (command, args, options) => {
+    if (command === "git" && args[0] === "push") {
+      await actualRunner(command, args, options);
+      throw new Error("client lost the success response");
+    }
+    return actualRunner(command, args, options);
+  };
+
+  const results = await integrateApproved({
+    config: { repository: "example/repo", defaultBranch: "main", integration: { enabled: true } },
+    repoPath: fixture.repoPath,
+    workers: [{ issue: "26", branch: "worker/26", worktreePath: fixture.workerPath, baseSha: fixture.baseSha, exitCode: 0 }],
+    validations: [{ issue: "26", verdict: "approve" }],
+    reviewAuthorizations: [{ issue: "26", review: { disposition: "approve" } }],
+    runner,
+    onPublicationCheckpoint: async (checkpoint) => checkpoints.push(structuredClone(checkpoint)),
+    onIntegrated: async (entry) => integrated.push(entry)
+  });
+
+  const candidate = git(fixture.repoPath, "rev-parse", "HEAD");
+  assert.equal(git(fixture.root, "--git-dir", fixture.originPath, "rev-parse", "refs/heads/main"), candidate);
+  assert.deepEqual(results.map((entry) => String(entry.issue)), ["26"]);
+  assert.deepEqual(integrated.map((entry) => String(entry.issue)), ["26"]);
+  assert.deepEqual(checkpoints.map((entry) => entry.state), ["prepared", "remote-confirmed", "recorded"]);
+  assert.equal(calls.some((call) => call.args[0] === "reset"), false);
+});
+
+test("an unknowable push outcome preserves local HEAD and a durable uncertain checkpoint", async (t) => {
+  const fixture = integrationFixture(t);
+  const calls = [];
+  const actualRunner = checkedRunner(calls);
+  const checkpoints = [];
+  const runner = async (command, args, options) => {
+    if (command === "git" && args[0] === "push") throw new Error("transport disconnected");
+    if (command === "git" && args[0] === "ls-remote") throw new Error("remote unavailable");
+    return actualRunner(command, args, options);
+  };
+
+  await assert.rejects(integrateApproved({
+    config: { repository: "example/repo", defaultBranch: "main", integration: { enabled: true } },
+    repoPath: fixture.repoPath,
+    workers: [{ issue: "26", branch: "worker/26", worktreePath: fixture.workerPath, baseSha: fixture.baseSha, exitCode: 0 }],
+    validations: [{ issue: "26", verdict: "approve" }],
+    reviewAuthorizations: [{ issue: "26", review: { disposition: "approve" } }],
+    runner,
+    onPublicationCheckpoint: async (checkpoint) => checkpoints.push(structuredClone(checkpoint))
+  }), (error) => error.code === "INTEGRATION_PUBLICATION_UNCERTAIN");
+
+  assert.notEqual(git(fixture.repoPath, "rev-parse", "HEAD"), fixture.baseSha);
+  assert.equal(git(fixture.root, "--git-dir", fixture.originPath, "rev-parse", "refs/heads/main"), fixture.baseSha);
+  assert.deepEqual(checkpoints.map((entry) => entry.state), ["prepared", "uncertain"]);
+  assert.equal(calls.some((call) => call.args[0] === "reset"), false);
+});
+
 test("integration checks reject and restore successful and failing Git mutations", async (t) => {
   const mutations = ["commit", "switch-branch", "leave-file"];
   const outcomes = ["success", "failure"];
@@ -414,6 +488,7 @@ test("integration checks reject and restore successful and failing Git mutations
                 exitCode: 0
               }],
               validations: [{ issue: "26", verdict: "approve" }],
+              reviewAuthorizations: [{ issue: "26", review: { disposition: "approve" } }],
               shellRunner: async (_command, options) => {
                 if (mutation === "commit") {
                   fs.writeFileSync(path.join(options.cwd, "check-mutation.txt"), "mutation\n");

@@ -1,10 +1,11 @@
 const { loadPersistedRunStates, loadRunState, saveRunState } = require("./run-store");
 const { effectiveIssueStates } = require("./run-resolver");
 const { ensureFollowUp, isValidValidatorOverride } = require("./reviews");
-const { integrateApproved } = require("./integrator");
+const { integrateApproved, reconcilePublication, withPreservedManifest } = require("./integrator");
 const { captureBaseline } = require("./baseline");
 const { digest, loadAuthorization, assessCurrentScope, assessDelegatedAuthorization } = require("./authorization");
 const { executeIntegrationCorrection } = require("./integration-correction");
+const { runChecked } = require("./process");
 
 function assessRunItems(state, { effectiveByIssue = null, delegatedByIssue = new Map() } = {}) {
   const validationByIssue = new Map((state.validations || []).map((entry) => [String(entry.issue), entry]));
@@ -162,6 +163,68 @@ async function integrateExistingRun(config, {
   integrationCorrectionExecutor = executeIntegrationCorrection
 }) {
   const state = await loadRunState(repoPath, runId);
+  const gitRunner = runner || runChecked;
+
+  // Reconcile a durable pre-push checkpoint before considering correction,
+  // rollback, or another integration attempt. The client can report failure
+  // after the server has already accepted a push.
+  for (const checkpoint of Object.values(state.publications || {})) {
+    const issue = String(checkpoint.issue);
+    const recorded = (state.integration || []).some((entry) => String(entry.issue) === issue);
+    if (recorded || checkpoint.state === "recorded") continue;
+    const reconciliation = await reconcilePublication(checkpoint, { repoPath, runner: gitRunner });
+    if (reconciliation.outcome === "published") {
+      state.integration = state.integration || [];
+      state.integration.push({
+        issue,
+        branch: checkpoint.workerBranch,
+        integratedSha: checkpoint.candidateSha,
+        validationResults: checkpoint.validationResults || [],
+        publicationReconciled: true
+      });
+      state.publications[issue] = {
+        ...checkpoint,
+        state: "recorded",
+        remoteSha: reconciliation.remoteSha,
+        reconciledAt: new Date().toISOString()
+      };
+      await saveRunState(repoPath, runId, state);
+      continue;
+    }
+    if (reconciliation.outcome === "not-published") {
+      await withPreservedManifest({ repoPath, manifestPath, runner: gitRunner }, async () => {
+        const branch = (await gitRunner("git", ["branch", "--show-current"], { cwd: repoPath })).stdout.trim();
+        const head = (await gitRunner("git", ["rev-parse", "HEAD"], { cwd: repoPath })).stdout.trim();
+        if (branch !== checkpoint.branch || ![checkpoint.beforeSha, checkpoint.candidateSha].includes(head)) {
+          const error = new Error(
+            `Cannot safely reconcile unpublished integration for issue #${issue}: local ${branch || "detached HEAD"} at ${head} ` +
+            "does not match the durable publication checkpoint."
+          );
+          error.code = "INTEGRATION_PUBLICATION_UNCERTAIN";
+          throw error;
+        }
+        if (head === checkpoint.candidateSha) {
+          await gitRunner("git", ["reset", "--hard", checkpoint.beforeSha], { cwd: repoPath });
+        }
+      });
+      state.publications[issue] = {
+        ...checkpoint,
+        state: "not-published",
+        remoteSha: reconciliation.remoteSha,
+        reconciledAt: new Date().toISOString()
+      };
+      await saveRunState(repoPath, runId, state);
+      continue;
+    }
+    const error = new Error(
+      `Publication for issue #${issue} is still uncertain. Maestro preserved local HEAD and will not reset or start correction; ` +
+      `inspect ${checkpoint.remote}/${checkpoint.branch} and retry the commit command to reconcile it.`
+    );
+    error.code = "INTEGRATION_PUBLICATION_UNCERTAIN";
+    error.checkpoint = checkpoint;
+    error.reconciliation = reconciliation;
+    throw error;
+  }
   const states = await loadPersistedRunStates(repoPath);
   const activeCorrection = states.filter((candidate) =>
     candidate.mode === "integration-correction" &&
@@ -338,6 +401,11 @@ async function integrateExistingRun(config, {
         capturedAt: new Date().toISOString()
       };
       state.failure = failure.message;
+      await saveRunState(repoPath, runId, state);
+    },
+    onPublicationCheckpoint: async (checkpoint) => {
+      state.publications = state.publications || {};
+      state.publications[String(checkpoint.issue)] = checkpoint;
       await saveRunState(repoPath, runId, state);
     },
     onIntegrated: async (integrated) => {

@@ -98,6 +98,28 @@ function unresolvedWork(states, config = null) {
       });
     }
   }
+
+  // Capacity is execution ownership, not lifecycle evidence. A correction can
+  // become the current run for one issue while an original sibling is still
+  // running in its parent run. Deriving reservations only from the current
+  // evidence projection can therefore make that sibling disappear and admit
+  // a third worker. Overlay every persisted reservation after resolving the
+  // user-facing lifecycle state so scheduling always accounts for the actual
+  // owners.
+  for (const state of states) {
+    if (state.status !== "running") continue;
+    const issues = state.capacity?.issues || (state.plan?.selected || []).map((item) => item.id);
+    for (const rawIssue of issues) {
+      const issue = String(rawIssue);
+      byIssue.set(issue, {
+        issue,
+        runId: String(state.runId),
+        mode: state.mode,
+        state: state.mode === "rework" ? "rework-running" : "running",
+        action: "maestro status"
+      });
+    }
+  }
   return byIssue;
 }
 

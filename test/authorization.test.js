@@ -213,6 +213,7 @@ test("revocation during paused integration wins before merge, push, or closure",
     calls.push({ command, args, cwd: options.cwd });
     if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: "head\n", stderr: "" };
     if (command === "git" && args[0] === "rev-parse" && args[1] === "origin/main") return { code: 0, stdout: "base\n", stderr: "" };
+    if (command === "git" && args[0] === "branch" && args[1] === "--show-current") return { code: 0, stdout: "worker/7\n", stderr: "" };
     return { code: 0, stdout: "", stderr: "" };
   };
   const shellRunner = async () => {
@@ -270,6 +271,7 @@ for (const drift of ["changed", "closed"]) {
       calls.push({ command, args, cwd: options.cwd });
       if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: "head\n", stderr: "" };
       if (command === "git" && args[0] === "rev-parse" && args[1] === "origin/main") return { code: 0, stdout: "base\n", stderr: "" };
+      if (command === "git" && args[0] === "branch" && args[1] === "--show-current") return { code: 0, stdout: "worker/7\n", stderr: "" };
       return { code: 0, stdout: "", stderr: "" };
     };
     const shellRunner = async () => {

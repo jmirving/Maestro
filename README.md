@@ -216,6 +216,8 @@ For validator-REWORK items, status recommends rework first and shows override an
 
 The resolved manifest may be untracked, ignored, or contain pending edits when `maestro commit` starts. Maestro preserves that file while it integrates approved worker branches, restores it unchanged, and only then records completed work. An ignored manifest is explicitly force-added when that progress is committed. Changes to any other file still block integration. Worker or incoming changes that conflict with the preserved manifest stop with an explicit recovery message; the original manifest remains available in the named Git stash.
 
+Before publishing an integrated default-branch candidate, Maestro durably records the pre-push and candidate SHAs. If `git push` reports an error, Maestro reads the remote branch before taking any recovery action: an exact candidate match is recorded as a successful integration, while an exact pre-push match permits local rollback. An unavailable or differently advanced remote is an uncertain-publication gate; Maestro preserves local `HEAD`, starts no correction, and reconciles that checkpoint first when `maestro commit` is retried.
+
 Short aliases are available for the high-frequency loop:
 
 ```text

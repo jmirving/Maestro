@@ -124,6 +124,47 @@ test("an active rework child supersedes the source rework recommendation", () =>
   assert.deepEqual(plan.recommendations, ["maestro status"]);
 });
 
+test("a correction reservation and its still-running original sibling consume separate slots", () => {
+  const manifest = config({
+    "1": { status: "ready" },
+    "2": { status: "ready" },
+    "3": { status: "ready" }
+  }, 2);
+  const sourceRunId = "20260910010101-aaaaaa";
+  const correctionRunId = "20260910010102-bbbbbb";
+  const plan = reconcilePlan(manifest, [
+    {
+      runId: sourceRunId,
+      mode: "execute",
+      status: "running",
+      plan: { selected: [{ id: "1" }, { id: "2" }] },
+      capacity: { limit: 2, issues: ["2"] },
+      workers: [worker(1)],
+      validations: [{ issue: "1", verdict: "rework" }],
+      reviews: {}
+    },
+    {
+      runId: correctionRunId,
+      parentRunId: sourceRunId,
+      mode: "rework",
+      status: "running",
+      plan: { selected: [{ id: "1" }] },
+      capacity: { limit: 2, issues: ["1"] },
+      workers: [],
+      validations: [],
+      reviews: {}
+    }
+  ]);
+
+  assert.deepEqual(plan.active.map((entry) => [entry.issue, entry.runId]).sort(), [
+    ["1", correctionRunId],
+    ["2", sourceRunId]
+  ]);
+  assert.equal(plan.availableConcurrency, 0);
+  assert.deepEqual(plan.selected, []);
+  assert.equal(plan.deferred.some((entry) => entry.id === "3"), false);
+});
+
 test("effective planning keeps new work advisory-separated from active work", () => {
   const manifest = {
     ...config({ "1": { status: "ready" }, "2": { status: "ready" }, "3": { status: "ready" } }, 2),

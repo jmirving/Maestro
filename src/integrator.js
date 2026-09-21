@@ -251,6 +251,36 @@ async function runObservationalIntegrationCommand(command, {
   return result;
 }
 
+async function remoteBranchSha(repoPath, remote, branch, runner = runChecked) {
+  const result = await runner("git", ["ls-remote", "--heads", remote, `refs/heads/${branch}`], { cwd: repoPath });
+  const line = result.stdout.trim().split("\n").find(Boolean);
+  return line ? line.split(/\s+/)[0] : null;
+}
+
+async function reconcilePublication(checkpoint, { repoPath, runner = runChecked } = {}) {
+  let remoteSha;
+  try {
+    remoteSha = await remoteBranchSha(repoPath, checkpoint.remote, checkpoint.branch, runner);
+  } catch (error) {
+    return { outcome: "uncertain", remoteSha: null, error };
+  }
+  if (remoteSha === checkpoint.candidateSha) return { outcome: "published", remoteSha };
+  if (remoteSha === checkpoint.beforeSha) return { outcome: "not-published", remoteSha };
+  return { outcome: "uncertain", remoteSha };
+}
+
+function publicationError(checkpoint, reconciliation, cause) {
+  const error = new Error(
+    `Push outcome for ${checkpoint.remote}/${checkpoint.branch} is uncertain; ` +
+    "Maestro preserved the local candidate and will not reset or start correction until remote publication evidence is reconciled."
+  );
+  error.code = "INTEGRATION_PUBLICATION_UNCERTAIN";
+  error.checkpoint = checkpoint;
+  error.reconciliation = reconciliation;
+  error.cause = cause;
+  return error;
+}
+
 async function integrateApproved({
   config,
   repoPath,
@@ -265,6 +295,7 @@ async function integrateApproved({
   sourceRunId = null,
   onConflict = null,
   onCheckFailure = null,
+  onPublicationCheckpoint = null,
   revalidateDelegated = null,
   coordinate = withRepositoryCoordination
 }) {
@@ -404,7 +435,6 @@ async function integrateApproved({
           permission = { ...permission, delegated: current };
           authorizationByIssue.set(String(worker.issue), permission);
         }
-
         await runner("git", ["checkout", defaultBranch], { cwd: repoPath });
         await runner("git", ["pull", "--ff-only", "origin", defaultBranch], { cwd: repoPath });
         const before = (await runner("git", ["rev-parse", "HEAD"], { cwd: repoPath })).stdout.trim();
@@ -434,7 +464,6 @@ async function integrateApproved({
               throw error;
             }
           }
-          await runner("git", ["push", "origin", defaultBranch], { cwd: repoPath });
         } catch (error) {
           try { await runner("git", ["reset", "--hard", before], { cwd: repoPath }); } catch {}
           if (error.code === "INTEGRATION_CHECK_FAILED" && onCheckFailure) await onCheckFailure(error);
@@ -442,10 +471,45 @@ async function integrateApproved({
         }
 
         const integratedSha = (await runner("git", ["rev-parse", "HEAD"], { cwd: repoPath })).stdout.trim();
-        const closureAuthorized = permission.review != null || permission.delegated?.allowedActions?.closeIssue === true;
-        if (integration.closeIssues === true && closureAuthorized) {
-          await runner("gh", ["issue", "close", String(worker.issue), "--repo", config.repository, "--reason", "completed", "--comment", `Integrated by Maestro at ${integratedSha}.`], { cwd: repoPath });
+        let checkpoint = {
+          version: 1,
+          issue: String(worker.issue),
+          sourceRunId,
+          remote: "origin",
+          branch: defaultBranch,
+          beforeSha: before,
+          candidateSha: integratedSha,
+          workerBranch: worker.branch,
+          validationResults,
+          state: "prepared",
+          preparedAt: new Date().toISOString()
+        };
+        try {
+          if (onPublicationCheckpoint) await onPublicationCheckpoint(checkpoint);
+        } catch (error) {
+          try { await runner("git", ["reset", "--hard", before], { cwd: repoPath }); } catch {}
+          throw error;
         }
+
+        try {
+          await runner("git", ["push", checkpoint.remote, defaultBranch], { cwd: repoPath });
+        } catch (pushError) {
+          const reconciliation = await reconcilePublication(checkpoint, { repoPath, runner });
+          if (reconciliation.outcome === "not-published") {
+            checkpoint = { ...checkpoint, state: "not-published", remoteSha: reconciliation.remoteSha, reconciledAt: new Date().toISOString() };
+            if (onPublicationCheckpoint) await onPublicationCheckpoint(checkpoint);
+            try { await runner("git", ["reset", "--hard", before], { cwd: repoPath }); } catch {}
+            throw pushError;
+          }
+          if (reconciliation.outcome !== "published") {
+            checkpoint = { ...checkpoint, state: "uncertain", remoteSha: reconciliation.remoteSha, reconciledAt: new Date().toISOString() };
+            try { if (onPublicationCheckpoint) await onPublicationCheckpoint(checkpoint); } catch {}
+            throw publicationError(checkpoint, reconciliation, pushError);
+          }
+        }
+
+        checkpoint = { ...checkpoint, state: "remote-confirmed", remoteSha: integratedSha, confirmedAt: new Date().toISOString() };
+        if (onPublicationCheckpoint) await onPublicationCheckpoint(checkpoint);
         const integrated = {
           issue: worker.issue,
           branch: worker.branch,
@@ -457,6 +521,14 @@ async function integrateApproved({
         };
         results.push(integrated);
         if (onIntegrated) await onIntegrated(integrated);
+        if (onPublicationCheckpoint) {
+          checkpoint = { ...checkpoint, state: "recorded", recordedAt: new Date().toISOString() };
+          await onPublicationCheckpoint(checkpoint);
+        }
+        const closureAuthorized = permission.review != null || permission.delegated?.allowedActions?.closeIssue === true;
+        if (integration.closeIssues === true && closureAuthorized) {
+          await runner("gh", ["issue", "close", String(worker.issue), "--repo", config.repository, "--reason", "completed", "--comment", `Integrated by Maestro at ${integratedSha}.`], { cwd: repoPath });
+        }
         console.error(`[Maestro] integrated #${worker.issue} at ${integratedSha}`);
       });
     }
@@ -473,5 +545,7 @@ module.exports = {
   isAcceptedBaselineFailure,
   runIntegrationCommand,
   runObservationalIntegrationCommand,
+  remoteBranchSha,
+  reconcilePublication,
   integrateApproved
 };
