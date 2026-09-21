@@ -163,6 +163,94 @@ async function runIntegrationCommand(command, { cwd, baseline, shellRunner = run
   throw error;
 }
 
+function integrationCheckState(observed) {
+  return {
+    branch: observed.branch,
+    headSha: observed.headSha,
+    operation: observed.operation,
+    operationActive: observed.operationActive,
+    operationOriginalHeadSha: observed.operationOriginalHeadSha,
+    operationCurrentHeadSha: observed.operationCurrentHeadSha,
+    operationHeadSha: observed.operationHeadSha,
+    operationOntoSha: observed.operationOntoSha,
+    operationHeadName: observed.operationHeadName,
+    operationMergeHeadSha: observed.operationMergeHeadSha,
+    conflictedFiles: observed.conflictedFiles,
+    status: observed.status
+  };
+}
+
+function assertCheckReady(state, command, checkStage) {
+  if (!state.branch || !state.headSha || state.operationActive || state.conflictedFiles.length || state.status !== "") {
+    const error = new Error(
+      `Cannot run ${checkStage} integration check in a non-clean Git state: ${command}`
+    );
+    error.code = "INTEGRATION_CHECK_INVALID_STATE";
+    error.command = command;
+    error.checkStage = checkStage;
+    error.gitState = state;
+    throw error;
+  }
+}
+
+async function restoreCheckState(cwd, expected, runner) {
+  const current = integrationCheckState(await inspectGitOperation(cwd, { runner }));
+  if (current.operationActive && current.operation) {
+    await runner("git", [current.operation, "--abort"], { cwd });
+  }
+  await runner("git", ["reset", "--hard"], { cwd });
+  await runner("git", ["clean", "-fd"], { cwd });
+  await runner("git", ["checkout", expected.branch], { cwd });
+  await runner("git", ["reset", "--hard", expected.headSha], { cwd });
+  await runner("git", ["clean", "-fd"], { cwd });
+  return integrationCheckState(await inspectGitOperation(cwd, { runner }));
+}
+
+async function runObservationalIntegrationCommand(command, {
+  cwd,
+  baseline,
+  checkStage,
+  runner = runChecked,
+  shellRunner = runShell
+}) {
+  const before = integrationCheckState(await inspectGitOperation(cwd, { runner }));
+  assertCheckReady(before, command, checkStage);
+
+  let result;
+  let commandError = null;
+  try {
+    result = await runIntegrationCommand(command, { cwd, baseline, shellRunner });
+  } catch (error) {
+    commandError = error;
+  }
+
+  const after = integrationCheckState(await inspectGitOperation(cwd, { runner }));
+  if (JSON.stringify(after) !== JSON.stringify(before)) {
+    let restored = null;
+    let restorationError = null;
+    try {
+      restored = await restoreCheckState(cwd, before, runner);
+    } catch (error) {
+      restorationError = error;
+    }
+    const mutationError = new Error(
+      `${checkStage} integration check mutated its Git checkout: ${command}`
+    );
+    mutationError.code = "INTEGRATION_CHECK_MUTATED_REPOSITORY";
+    mutationError.command = command;
+    mutationError.checkStage = checkStage;
+    mutationError.beforeGitState = before;
+    mutationError.afterGitState = after;
+    mutationError.restoredGitState = restored;
+    mutationError.checkError = commandError;
+    mutationError.restorationError = restorationError;
+    throw mutationError;
+  }
+
+  if (commandError) throw commandError;
+  return result;
+}
+
 async function integrateApproved({
   config,
   repoPath,
@@ -281,7 +369,13 @@ async function integrateApproved({
       const validationResults = [];
       for (const command of integration.commands || []) {
         try {
-          validationResults.push({ command, ...(await runIntegrationCommand(command, { cwd: worker.worktreePath, baseline, shellRunner })) });
+          validationResults.push({ command, ...(await runObservationalIntegrationCommand(command, {
+            cwd: worker.worktreePath,
+            baseline,
+            checkStage: "pre-merge",
+            runner,
+            shellRunner
+          })) });
         } catch (error) {
           if (error.code !== "INTEGRATION_CHECK_FAILED") throw error;
           Object.assign(error, {
@@ -318,7 +412,13 @@ async function integrateApproved({
           await runner("git", ["merge", "--ff-only", worker.branch], { cwd: repoPath });
           for (const command of integration.postMergeCommands || []) {
             try {
-              await runIntegrationCommand(command, { cwd: repoPath, baseline, shellRunner });
+              await runObservationalIntegrationCommand(command, {
+                cwd: repoPath,
+                baseline,
+                checkStage: "post-merge",
+                runner,
+                shellRunner
+              });
             } catch (error) {
               if (error.code === "INTEGRATION_CHECK_FAILED") {
                 Object.assign(error, {
@@ -372,5 +472,6 @@ module.exports = {
   failureSignatures,
   isAcceptedBaselineFailure,
   runIntegrationCommand,
+  runObservationalIntegrationCommand,
   integrateApproved
 };

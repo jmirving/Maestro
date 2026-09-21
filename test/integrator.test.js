@@ -352,3 +352,99 @@ test("a clean refresh exposes integration-check evidence before any merge or pus
   assert.equal(calls.some((call) => call.args[0] === "merge"), false);
   assert.equal(calls.some((call) => call.args[0] === "push"), false);
 });
+
+function integrationFixture(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "maestro-observational-integration-"));
+  const originPath = path.join(root, "origin.git");
+  const repoPath = path.join(root, "target");
+  const workerPath = path.join(root, "worker");
+  fs.mkdirSync(repoPath);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  git(root, "init", "--bare", "-q", originPath);
+  git(repoPath, "init", "-q", "-b", "main");
+  git(repoPath, "config", "user.name", "Maestro Test");
+  git(repoPath, "config", "user.email", "maestro@example.test");
+  fs.writeFileSync(path.join(repoPath, "README.md"), "base\n");
+  git(repoPath, "add", "README.md");
+  git(repoPath, "commit", "-qm", "base");
+  const baseSha = git(repoPath, "rev-parse", "HEAD");
+  git(repoPath, "branch", "check-side-effect");
+  git(repoPath, "remote", "add", "origin", originPath);
+  git(repoPath, "push", "-q", "-u", "origin", "main");
+  git(repoPath, "worktree", "add", "-q", "-b", "worker/26", workerPath);
+  fs.writeFileSync(path.join(workerPath, "feature.txt"), "feature\n");
+  git(workerPath, "add", "feature.txt");
+  git(workerPath, "commit", "-qm", "feature");
+  return { root, originPath, repoPath, workerPath, baseSha };
+}
+
+test("integration checks reject and restore successful and failing Git mutations", async (t) => {
+  const mutations = ["commit", "switch-branch", "leave-file"];
+  const outcomes = ["success", "failure"];
+  const stages = ["pre-merge", "post-merge"];
+
+  for (const stage of stages) {
+    for (const mutation of mutations) {
+      for (const outcome of outcomes) {
+        await t.test(`${stage} ${outcome} check cannot ${mutation}`, async (t) => {
+          const fixture = integrationFixture(t);
+          const workerHead = git(fixture.workerPath, "rev-parse", "HEAD");
+          let correctionCalled = false;
+          let caught;
+          const command = `${stage}-${outcome}-${mutation}`;
+
+          try {
+            await integrateApproved({
+              config: {
+                repository: "example/repo",
+                defaultBranch: "main",
+                integration: {
+                  enabled: true,
+                  commands: stage === "pre-merge" ? [command] : [],
+                  postMergeCommands: stage === "post-merge" ? [command] : []
+                }
+              },
+              repoPath: fixture.repoPath,
+              workers: [{
+                issue: "26",
+                branch: "worker/26",
+                worktreePath: fixture.workerPath,
+                baseSha: fixture.baseSha,
+                headSha: workerHead,
+                exitCode: 0
+              }],
+              validations: [{ issue: "26", verdict: "approve" }],
+              shellRunner: async (_command, options) => {
+                if (mutation === "commit") {
+                  fs.writeFileSync(path.join(options.cwd, "check-mutation.txt"), "mutation\n");
+                  git(options.cwd, "add", "check-mutation.txt");
+                  git(options.cwd, "commit", "-qm", "check mutation");
+                } else if (mutation === "switch-branch") {
+                  git(options.cwd, "switch", "-q", "check-side-effect");
+                } else {
+                  fs.writeFileSync(path.join(options.cwd, "check-residue.txt"), "residue\n");
+                }
+                return { code: outcome === "success" ? 0 : 1, stdout: "", stderr: "check failed" };
+              },
+              onCheckFailure: async () => { correctionCalled = true; }
+            });
+          } catch (error) {
+            caught = error;
+          }
+
+          assert.equal(caught?.code, "INTEGRATION_CHECK_MUTATED_REPOSITORY");
+          assert.equal(caught.checkStage, stage);
+          assert.equal(caught.checkError?.code, outcome === "failure" ? "INTEGRATION_CHECK_FAILED" : undefined);
+          assert.equal(correctionCalled, false);
+          assert.equal(git(fixture.workerPath, "branch", "--show-current"), "worker/26");
+          assert.equal(git(fixture.workerPath, "rev-parse", "HEAD"), workerHead);
+          assert.equal(git(fixture.workerPath, "status", "--porcelain"), "");
+          assert.equal(git(fixture.repoPath, "branch", "--show-current"), "main");
+          assert.equal(git(fixture.repoPath, "rev-parse", "HEAD"), fixture.baseSha);
+          assert.equal(git(fixture.repoPath, "status", "--porcelain"), "");
+          assert.equal(git(fixture.root, "--git-dir", fixture.originPath, "rev-parse", "refs/heads/main"), fixture.baseSha);
+        });
+      }
+    }
+  }
+});
