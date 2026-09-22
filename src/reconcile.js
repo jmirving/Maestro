@@ -141,7 +141,10 @@ async function executeReconcileRun(config, {
     mode: "reconcile",
     status: "running",
     repoPath,
-    plan: { selected: items },
+    plan: {
+      ...(reservation?.state?.plan || resumeState?.plan || source.plan || {}),
+      selected: items
+    },
     baseline: null,
     preflights: [],
     workers: [],

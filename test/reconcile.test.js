@@ -6,6 +6,8 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { buildReconcilePrompt, resolveReconcileSource, executeReconcileRun } = require("../src/reconcile");
 const { saveRunState, loadRunState, loadPersistedRunStates } = require("../src/run-store");
+const { createDelegatedAuthorization, saveAuthorization } = require("../src/authorization");
+const { integrateExistingRun } = require("../src/existing-run");
 
 function git(cwd, ...args) {
   const result = spawnSync("git", args, { cwd, encoding: "utf8" });
@@ -141,6 +143,68 @@ test("reconcile verifies a manually completed operation and creates fresh review
     /Cannot reconcile superseded implementation evidence/
   );
   assert.equal((await loadPersistedRunStates(repoPath)).length, runCountAfterRecovery);
+});
+
+test("delegated reconciliation preserves authorized limits through fresh validation and integration", async (t) => {
+  const { repoPath, workerPath, sourceRunId } = await conflictFixture(t);
+  const runId = "20260910030303-cccccc";
+  const config = {
+    repository: "example/repo",
+    defaultBranch: "main",
+    defaultConcurrency: 2,
+    integration: { enabled: true, commands: [], postMergeCommands: [], closeIssues: false },
+    work: { "19": { status: "ready" } }
+  };
+  const authorization = createDelegatedAuthorization({
+    config,
+    repoPath,
+    runId: sourceRunId,
+    issueIds: ["19"],
+    scope: { revision: "explicit-r1" },
+    limits: { concurrency: 2, correction: { enabled: false, retryLimit: 0, deadlineMs: 0 } },
+    actor: { name: "reviewer", source: "test" }
+  });
+  await saveAuthorization(repoPath, authorization);
+  const source = await loadRunState(repoPath, sourceRunId);
+  source.authorization = authorization;
+  source.plan = { concurrency: 2, selected: [{ id: "19" }] };
+  await saveRunState(repoPath, sourceRunId, source);
+
+  const attempted = spawnSync("git", ["rebase", "origin/main"], { cwd: workerPath, encoding: "utf8" });
+  assert.notEqual(attempted.status, 0);
+  await fs.writeFile(path.join(workerPath, "shared.txt"), "main and delegated worker\n");
+  git(workerPath, "add", "shared.txt");
+  git(workerPath, "-c", "core.editor=true", "rebase", "--continue");
+
+  const reconciled = await executeReconcileRun(config, {
+    repoPath,
+    sourceRunId,
+    issueIds: ["19"],
+    runId,
+    reserveCapacity: true,
+    validatorExecutor: async ({ worker }) => ({
+      issue: worker.issue,
+      verdict: "approve",
+      exitCode: 0,
+      report: "VERDICT: APPROVE\nfresh delegated reconciliation"
+    })
+  });
+
+  assert.equal(reconciled.authorization.id, authorization.id);
+  assert.equal(reconciled.parentRunId, sourceRunId);
+  assert.equal(reconciled.plan.concurrency, authorization.limits.concurrency);
+  assert.equal(reconciled.validations[0].evidence.issueFactsRevision, authorization.scope.revision);
+
+  const integrated = await integrateExistingRun(config, {
+    repoPath,
+    runId,
+    scopeAssessmentOptions: {
+      explicitScopeResolver: async () => ({ type: "issues", issueIds: ["19"], revision: "explicit-r1" })
+    }
+  });
+  assert.deepEqual(integrated.newlyIntegrated.map((entry) => entry.issue), ["19"]);
+  assert.equal(integrated.newlyIntegrated[0].authorization.kind, "delegated");
+  assert.equal(git(repoPath, "rev-parse", "HEAD"), git(workerPath, "rev-parse", "HEAD"));
 });
 
 test("reconcile rejects manual recovery that resets away the implementation", async (t) => {

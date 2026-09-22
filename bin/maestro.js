@@ -26,7 +26,8 @@ const { statusSnapshot, formatStatus, watchStatus } = require("../src/display");
 const { formatRecommendationFooter, appendRecommendationFooter } = require("../src/recommendations");
 const { loadIssueDetails, formatDetails } = require("../src/details");
 const { discoverGitHubRepository, loadGitHubIssues } = require("../src/github");
-const { proposeDraft, formatDraftSummary, formatDraftVerbose, formatDraftJson, readManifestSnapshot, writeManifest, detectExecutionDrift } = require("../src/draft");
+const { proposeDraft, formatDraftSummary, formatDraftVerbose, formatDraftJson, readManifestSnapshot, writeManifest } = require("../src/draft");
+const { verifyExecutionSelection } = require("../src/execution-selection");
 const { createAgentPlanner } = require("../src/agent-planner");
 const { runPlanningAnalyzer } = require("../src/planning-analysis");
 const { stableWorksetName, epicWorkset, issueWorkset, explicitIssueRevision, resolveWorksetScope, assertExecutableScope, validateWorksetName } = require("../src/worksets");
@@ -221,18 +222,6 @@ function setAutoReworkExitCode(result) {
 async function workflowFooter(config, repoPath, { includeIssues = true, concurrency } = {}) {
   const snapshot = await statusSnapshot(config || { work: {} }, repoPath, [], { concurrency });
   return formatRecommendationFooter(snapshot, { includeIssues });
-}
-
-async function verifyExecutionSelection(config, repoPath, issueIds) {
-  if (!issueIds.length) return [];
-  const repository = await discoverGitHubRepository(repoPath);
-  if (repository !== config.repository) throw new Error(`The manifest targets ${config.repository}, but the current checkout is ${repository}.`);
-  const issues = await loadGitHubIssues(repository, issueIds, { repoPath });
-  const findings = detectExecutionDrift(config, issues, issueIds);
-  if (findings.length) {
-    throw new Error(`GitHub/manifest drift blocks execution: ${findings.map((item) => `#${item.issue} ${item.reason}`).join(" ")} Run \`maestro draft --write\` and review any conflicts before retrying.`);
-  }
-  return issues;
 }
 
 async function outputLatest(repoPath, { copy = true, print = true, config = null, recommendations = false } = {}) {
@@ -958,7 +947,7 @@ async function main() {
   }
 
   let result;
-  if (args.includes("--continuous")) result = await continuousRun(config, { repoPath, concurrency, delegate: args.includes("--delegate") });
+  if (args.includes("--continuous")) result = await continuousRun(config, { repoPath, manifestPath, concurrency, delegate: args.includes("--delegate") });
   else if (args.includes("--integrate")) result = await executeAndIntegrate(config, { repoPath, manifestPath, concurrency, delegate: args.includes("--delegate") });
   else if (args.includes("--execute")) result = await executeRun(config, { repoPath, concurrency });
   else result = await dryRun(config, { repoPath, concurrency });

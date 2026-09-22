@@ -484,3 +484,77 @@ test("direct and continuous execute-and-integrate entrypoints cannot bypass expl
   await assert.rejects(executeAndIntegrate(current, { repoPath: "/target" }), /explicit delegated authorization/);
   await assert.rejects(continuousRun(current, { repoPath: "/target", maxCycles: 1 }), /explicit delegated authorization/);
 });
+
+for (const [entrypoint, drift] of [["direct", "changed"], ["continuous", "closed"]]) {
+  test(`${entrypoint} delegated legacy runner rejects ${drift} GitHub issue facts before execution`, async (t) => {
+    const repoPath = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-legacy-drift-"));
+    t.after(() => fs.rm(repoPath, { recursive: true, force: true }));
+    const current = config();
+    delete current.work["8"];
+    const reconciled = {
+      number: 7,
+      state: "OPEN",
+      title: "Issue 7",
+      body: "Original acceptance criteria",
+      labels: [],
+      updatedAt: "2026-09-20",
+      closedAt: null,
+      stateReason: null
+    };
+    current.work["7"].github = {
+      state: "OPEN",
+      title: reconciled.title,
+      body: reconciled.body,
+      labels: [],
+      blockedBy: [],
+      updatedAt: reconciled.updatedAt,
+      closedAt: null,
+      stateReason: null
+    };
+    const live = drift === "closed"
+      ? { ...reconciled, state: "CLOSED", updatedAt: "2026-09-21", closedAt: "2026-09-21", stateReason: "COMPLETED" }
+      : { ...reconciled, body: "Blocked by #99", updatedAt: "2026-09-21" };
+    const options = {
+      repoPath,
+      delegate: true,
+      maxCycles: 1,
+      selectionVerificationOptions: {
+        repositoryResolver: async () => current.repository,
+        issueLoader: async () => [live]
+      }
+    };
+
+    const operation = entrypoint === "direct"
+      ? executeAndIntegrate(current, options)
+      : continuousRun(current, options);
+    await assert.rejects(operation, new RegExp(`GitHub/manifest drift blocks execution.*${drift === "closed" ? "closed" : "changed"}`, "s"));
+
+    const reportRoot = path.join(path.dirname(repoPath), ".maestro-worktrees", path.basename(repoPath), ".maestro-reports");
+    await assert.rejects(fs.access(reportRoot), { code: "ENOENT" });
+  });
+}
+
+test("delegated legacy runners defer work with an unresolved persisted lifecycle", async (t) => {
+  const repoPath = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-legacy-lifecycle-"));
+  t.after(() => fs.rm(repoPath, { recursive: true, force: true }));
+  const current = config();
+  delete current.work["8"];
+  await saveRunState(repoPath, "20260921010101-aaaaaa", {
+    runId: "20260921010101-aaaaaa",
+    mode: "execute",
+    status: "awaiting-review",
+    plan: { concurrency: 1, selected: [{ id: "7" }] },
+    workers: [{ issue: "7", exitCode: 0, baseSha: "base", headSha: "head" }],
+    validations: [{ issue: "7", exitCode: 0, verdict: "approve" }],
+    reviews: {}
+  });
+
+  const direct = await executeAndIntegrate(current, { repoPath, delegate: true });
+  assert.equal(direct.status, "no-ready-work");
+  assert.deepEqual(direct.plan.selected, []);
+
+  const continuous = await continuousRun(current, { repoPath, delegate: true, maxCycles: 1 });
+  assert.equal(continuous.stopped, "no-ready-work");
+  assert.equal(continuous.cycles.length, 0);
+  assert.deepEqual(continuous.finalPlan.selected, []);
+});

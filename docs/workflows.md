@@ -139,6 +139,6 @@ maestro report --copy
 maestro integrate-run --run 20260910010101-aaaaaa
 ```
 
-`run --integrate` and `run --continuous` fail closed without `--delegate`; they use the same persisted authorization and integration guard as the ordinary delegated path. A `no-ready-work` stop reason is not proof of broader epic or repository completion. Prefer `start`, `status`, `approve`, `commit`, and `next` for ordinary supervised operation.
+`run --integrate` and `run --continuous` fail closed without `--delegate`; before each wave they reconcile persisted lifecycle state and apply the same GitHub/manifest drift check, persisted authorization, and integration guard as the ordinary delegated path. Changed, closed, awaiting-review, awaiting-rework, and otherwise superseded work cannot be revived through the compatibility runner. A `no-ready-work` stop reason is not proof of broader epic or repository completion. Prefer `start`, `status`, `approve`, `commit`, and `next` for ordinary supervised operation.
 
 `integrate-run` integrates a specifically selected reviewed run but, unlike `commit`, does not advance and commit `.maestro.json` completion. `review` is the low-level command for explicit historical and human-gate dispositions; use the everyday `approve`, `rework`, and `discard` commands when they cover the current state.

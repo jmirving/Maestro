@@ -1,5 +1,6 @@
 const crypto = require("node:crypto");
 const { computePlan } = require("./planner");
+const { computeEffectivePlan } = require("./work-state");
 const { describePreflights, runPreflights } = require("./preflight");
 const { captureBaseline } = require("./baseline");
 const { prepareWorktree } = require("./worktrees");
@@ -7,8 +8,10 @@ const { executeWorker } = require("./worker");
 const { validateWorker } = require("./validator");
 const { saveRunState } = require("./run-store");
 const { commitLifecycleTransition } = require("./lifecycle-coordination");
-const { bindValidation, createDelegatedAuthorization, saveAuthorization, resolveExplicitIssueScope } = require("./authorization");
+const { bindValidation, createDelegatedAuthorization, saveAuthorization } = require("./authorization");
 const { integrateExistingRun } = require("./existing-run");
+const { verifyExecutionSelection } = require("./execution-selection");
+const { explicitIssueRevision } = require("./worksets");
 
 function newRunId(now = new Date()) {
   const stamp = now.toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
@@ -187,18 +190,32 @@ async function executeAndIntegrate(config, options = {}) {
     throw new Error("Execute-and-integrate requires explicit delegated authorization. Use --delegate; validator approval alone is not integration authority.");
   }
   const runId = options.runId || newRunId();
-  const plan = options.plan || computePlan(config, { concurrency: options.concurrency });
-  if (!plan.selected.length) return executeRun(config, { ...options, runId, plan });
-  const explicitScope = await (options.explicitScopeResolver || resolveExplicitIssueScope)({
-    config,
-    repoPath: options.repoPath,
-    issueIds: plan.selected.map((item) => String(item.id))
+  const plan = await (options.effectivePlanResolver || computeEffectivePlan)(config, options.repoPath, {
+    concurrency: options.concurrency
   });
+  if (!plan.selected.length) {
+    const result = await executeRun(config, { ...options, runId, plan });
+    return { ...result, integration: [], stopped: "no-ready-work" };
+  }
+  const selectedIssueIds = plan.selected.map((item) => String(item.id));
+  const verifiedIssues = await (options.selectionVerifier || verifyExecutionSelection)(
+    config,
+    options.repoPath,
+    selectedIssueIds,
+    options.selectionVerificationOptions
+  );
+  const explicitScope = options.explicitScopeResolver
+    ? await options.explicitScopeResolver({ config, repoPath: options.repoPath, issueIds: selectedIssueIds })
+    : {
+        type: "issues",
+        issueIds: selectedIssueIds,
+        revision: explicitIssueRevision(config.repository, selectedIssueIds, verifiedIssues)
+      };
   const authorization = createDelegatedAuthorization({
     config,
     repoPath: options.repoPath,
     runId,
-    issueIds: plan.selected.map((item) => String(item.id)),
+    issueIds: selectedIssueIds,
     scope: { revision: explicitScope.revision },
     limits: {
       concurrency: plan.concurrency,
@@ -217,23 +234,33 @@ async function executeAndIntegrate(config, options = {}) {
   return { ...result, integration: integrated.integration || [], ...(blockedValidation ? { stopped: `validation-${blockedValidation.verdict}` } : {}) };
 }
 
-async function continuousRun(config, { repoPath, maxCycles = 20, concurrency, delegate = false } = {}) {
+async function continuousRun(config, options = {}) {
+  const { repoPath, maxCycles = 20, concurrency, delegate = false } = options;
   const runtime = cloneConfig(config);
   const cycles = [];
   for (let cycle = 0; cycle < maxCycles; cycle += 1) {
-    const plan = computePlan(runtime, { concurrency });
+    const plan = await (options.effectivePlanResolver || computeEffectivePlan)(runtime, repoPath, { concurrency });
     if (!plan.selected.length) {
       return { mode: "continuous", cycles, finalPlan: plan, stopped: plan.humanGates.length ? "human-gate" : "no-ready-work" };
     }
-    const result = await executeAndIntegrate(runtime, { repoPath, concurrency, delegate });
+    const result = await executeAndIntegrate(runtime, { ...options, repoPath, concurrency, delegate });
     cycles.push(result);
-    if (result.stopped) return { mode: "continuous", cycles, finalPlan: computePlan(runtime, { concurrency }), stopped: result.stopped };
-    if (!result.integration.length) return { mode: "continuous", cycles, finalPlan: computePlan(runtime, { concurrency }), stopped: "nothing-integrated" };
+    if (result.stopped) {
+      return { mode: "continuous", cycles, finalPlan: await (options.effectivePlanResolver || computeEffectivePlan)(runtime, repoPath, { concurrency }), stopped: result.stopped };
+    }
+    if (!result.integration.length) {
+      return { mode: "continuous", cycles, finalPlan: await (options.effectivePlanResolver || computeEffectivePlan)(runtime, repoPath, { concurrency }), stopped: "nothing-integrated" };
+    }
     for (const integrated of result.integration) {
       if (runtime.work?.[integrated.issue]) runtime.work[integrated.issue].status = "complete";
     }
   }
-  return { mode: "continuous", cycles, finalPlan: computePlan(runtime, { concurrency }), stopped: "max-cycles" };
+  return {
+    mode: "continuous",
+    cycles,
+    finalPlan: await (options.effectivePlanResolver || computeEffectivePlan)(runtime, repoPath, { concurrency }),
+    stopped: "max-cycles"
+  };
 }
 
 module.exports = { newRunId, dryRun, executeRun, executeAndIntegrate, continuousRun };
