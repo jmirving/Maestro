@@ -59,6 +59,23 @@ function issueFact(issue, repository) {
   };
 }
 
+function explicitIssueRevision(repository, issueIds, issues) {
+  const membership = [...new Set(issueIds.map(String))]
+    .sort((a, b) => Number(a) - Number(b))
+    .map((number) => normalizeIssueRef({ repository, number }));
+  const byNumber = new Map(issues.map((issue) => [String(issue.number), issue]));
+  const missing = membership.filter((ref) => !byNumber.has(ref.number));
+  if (missing.length) {
+    throw new Error(`GitHub did not return canonical facts for ${missing.map((ref) => `${ref.repository}#${ref.number}`).join(", ")}.`);
+  }
+  return digest({
+    type: "issues",
+    repository,
+    membership,
+    issues: membership.map((ref) => issueFact(byNumber.get(ref.number), ref.repository))
+  });
+}
+
 function scopeRevision(definition, membership, issues, parent, supportingIssues = []) {
   return digest({
     definition,
@@ -223,6 +240,8 @@ module.exports = {
   validateWorksetName,
   epicWorkset,
   issueWorkset,
+  issueFact,
+  explicitIssueRevision,
   resolveWorksetScope,
   assertExecutableScope
 };

@@ -214,7 +214,8 @@ async function integrateApproved({
       if (validation?.evidence?.implementationSha && validation.evidence.implementationSha !== currentHead) {
         throw new Error(`Validation for issue #${worker.issue} is stale for the current implementation; fresh independent validation is required.`);
       }
-      if (validation?.evidence && digest(validation.evidence) !== digest(validationContext(config, worker, worker.issue))) {
+      const scopeRevision = authorizationByIssue.get(String(worker.issue))?.delegated?.scopeRevision || null;
+      if (validation?.evidence && digest(validation.evidence) !== digest(validationContext(config, worker, worker.issue, scopeRevision))) {
         throw new Error(`Validation for issue #${worker.issue} was produced under a different acceptance, check, capability, or baseline context; fresh independent validation is required.`);
       }
       const beforeOperation = await inspectGitOperation(worker.worktreePath, { runner });

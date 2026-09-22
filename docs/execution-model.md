@@ -39,6 +39,8 @@ Scoped draft uses the ordinary reconcile → deterministic proposal → optional
 
 The editable workset definition is not an execution session or authorization. A successful scoped write stores a revisioned membership/facts snapshot beside persisted run evidence, with manifest and snapshot compare-and-swap performed under one lock. `start` or `next --workset` resolves it again and fails closed on drift or when any authorized member is absent from the shared work graph. The resulting run records repository-qualified authorized members, scope revision, timestamp, and explicit-launch provenance. Scheduling filters ready work to that membership while continuing to use global completion, active lifecycle, advisory conflict, and capacity facts. Outside prerequisites remain blockers and cannot become executable merely because they support the selected scope. A new epic child or requirement change requires another scoped draft and a later explicit launch; it never broadens an active run.
 
+Selected-issue delegation uses the same live-facts boundary without requiring a named workset. Its authorization stores a canonical revision of the selected GitHub issues, validation evidence records that revision, and status plus the final serialized integration guard resolve the issues again. A title, body, state, label, or GitHub revision change therefore requires explicit renewal and fresh validation before merge, push, or closure.
+
 ## Capability requirements
 
 A work item may require named capabilities such as:

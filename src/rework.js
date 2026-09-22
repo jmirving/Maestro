@@ -770,7 +770,7 @@ async function executeReworkRun(config, {
         baseline: result.baseline,
         runId,
         timeoutMs: remainingTime(deadlineAt)
-      }))));
+      }), { scopeRevision: result.authorization?.scope?.revision })));
 
     const outcomes = candidates.map((worker) => ({
       issue: String(worker.issue),

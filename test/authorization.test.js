@@ -18,6 +18,7 @@ const { integrateApproved } = require("../src/integrator");
 const { executeAndIntegrate, continuousRun } = require("../src/controller");
 const { statusSnapshot } = require("../src/display");
 const { saveRunState } = require("../src/run-store");
+const { explicitIssueRevision } = require("../src/worksets");
 
 function config() {
   return {
@@ -43,13 +44,14 @@ async function fixture(t, { closeIssues = false } = {}) {
     repoPath,
     runId: "20260920010101-aaaaaa",
     issueIds: ["7"],
+    scope: { revision: "explicit-r1" },
     limits: { concurrency: 2, correction: { enabled: true, retryLimit: 3, deadlineMs: 1_800_000 } },
     invocation: ["maestro", "start", "7", "--delegate"],
     actor: { name: "reviewer", source: "test" }
   });
   await saveAuthorization(repoPath, authorization);
   const worker = { issue: "7", exitCode: 0, baseSha: "base", headSha: "head", branch: "worker/7", worktreePath: "/worker/7" };
-  const validation = bindValidation(current, worker, { issue: "7", exitCode: 0, verdict: "approve", report: "VERDICT: APPROVE" });
+  const validation = bindValidation(current, worker, { issue: "7", exitCode: 0, verdict: "approve", report: "VERDICT: APPROVE" }, { scopeRevision: authorization.scope.revision });
   const state = {
     runId: authorization.runId,
     status: "awaiting-review",
@@ -69,6 +71,7 @@ test("delegated authorization records real provenance and admits only matching c
     ...value,
     issue: "7",
     persistedAuthorization: persisted,
+    scopeAssessment: { current: true, revision: value.authorization.scope.revision },
     statesById: new Map([[value.state.runId, value.state]])
   });
 
@@ -91,6 +94,7 @@ test("scope, repository, lineage, validation freshness, policy tampering, and re
     ...value,
     issue: "7",
     persistedAuthorization: persisted,
+    scopeAssessment: { current: true, revision: value.authorization.scope.revision },
     statesById: new Map([[value.state.runId, value.state]]),
     ...changes
   });
@@ -111,13 +115,15 @@ test("scope, repository, lineage, validation freshness, policy tampering, and re
 test("explicit and workset scope evidence is revalidated against current durable and live scope", async (t) => {
   const value = await fixture(t);
   assert.deepEqual(await assessCurrentScope({
-    config: value.config, repoPath: value.repoPath, authorization: value.authorization
-  }), { current: true });
+    config: value.config, repoPath: value.repoPath, authorization: value.authorization,
+    explicitScopeResolver: async () => ({ revision: "explicit-r1", issueIds: ["7"] })
+  }), { current: true, revision: "explicit-r1" });
   const changed = structuredClone(value.config);
   changed.work["7"].github.updatedAt = "2026-09-21";
   assert.match((await assessCurrentScope({
-    config: changed, repoPath: value.repoPath, authorization: value.authorization
-  })).reason, /scope|requirements|renewal/);
+    config: changed, repoPath: value.repoPath, authorization: value.authorization,
+    explicitScopeResolver: async () => ({ revision: "explicit-r2", issueIds: ["7"] })
+  })).reason, /facts|scope|requirements|renewal/);
 
   const definition = { source: { type: "issues", issues: [{ repository: "owner/repo", number: "7" }] }, refresh: { mode: "explicit" } };
   const worksetAuthorization = {
@@ -156,7 +162,8 @@ test("delegated backfill and correction descendants remain in the explicit sessi
   ]);
   for (const state of [backfill, correction]) {
     const assessment = assessDelegatedAuthorization({
-      ...value, state, issue: "7", persistedAuthorization: persisted, statesById
+      ...value, state, issue: "7", persistedAuthorization: persisted, statesById,
+      scopeAssessment: { current: true, revision: value.authorization.scope.revision }
     });
     assert.equal(assessment.eligible, true, assessment.reason);
   }
@@ -171,6 +178,7 @@ test("revocation blocks resume while an explicit renewal creates a distinct audi
     repoPath: value.repoPath,
     runId: "20260921010101-bbbbbb",
     issueIds: ["7"],
+    scope: { revision: "explicit-r1" },
     limits: value.authorization.limits,
     renews: value.authorization.id,
     actor: { name: "reviewer", source: "test" }
@@ -183,6 +191,7 @@ test("revocation blocks resume while an explicit renewal creates a distinct audi
     authorization: renewed,
     issue: "7",
     persistedAuthorization: await loadAuthorization(value.repoPath, renewed.id),
+    scopeAssessment: { current: true, revision: renewed.scope.revision },
     statesById: new Map([[state.runId, state]])
   });
   assert.equal(renewed.renews, value.authorization.id);
@@ -216,7 +225,10 @@ test("revocation during paused integration wins before merge, push, or closure",
     repoPath: value.repoPath,
     runId: value.state.runId,
     runner,
-    shellRunner
+    shellRunner,
+    scopeAssessmentOptions: {
+      explicitScopeResolver: async () => ({ revision: "explicit-r1", issueIds: ["7"] })
+    }
   });
   await checkStarted;
   const revoked = await revokeAuthorization(value.repoPath, value.authorization.id, {
@@ -230,6 +242,62 @@ test("revocation during paused integration wins before merge, push, or closure",
   assert.equal(calls.some((call) => call.command === "git" && call.args[0] === "push"), false);
   assert.equal(calls.some((call) => call.command === "gh" && call.args[0] === "issue" && call.args[1] === "close"), false);
 });
+
+for (const drift of ["changed", "closed"]) {
+  test(`explicit issue ${drift} after validation blocks merge, push, and closure`, async (t) => {
+    const value = await fixture(t, { closeIssues: true });
+    value.state.workers[0].worktreePath = path.join(value.repoPath, "worker-7");
+    let liveIssue = {
+      number: 7, state: "OPEN", title: "Issue 7", body: "Original acceptance criteria",
+      labels: [], updatedAt: "2026-09-20T00:00:00Z", closedAt: null
+    };
+    const revision = () => explicitIssueRevision(value.config.repository, ["7"], [liveIssue]);
+    value.authorization.scope.revision = revision();
+    value.state.authorization = value.authorization;
+    value.validation = bindValidation(value.config, value.worker, {
+      issue: "7", exitCode: 0, verdict: "approve", report: "VERDICT: APPROVE"
+    }, { scopeRevision: value.authorization.scope.revision });
+    value.state.validations = [value.validation];
+    await saveAuthorization(value.repoPath, value.authorization);
+    await saveRunState(value.repoPath, value.state.runId, value.state);
+
+    const calls = [];
+    let reachedCheck;
+    let resumeCheck;
+    const checkStarted = new Promise((resolve) => { reachedCheck = resolve; });
+    const checkCanFinish = new Promise((resolve) => { resumeCheck = resolve; });
+    const runner = async (command, args, options = {}) => {
+      calls.push({ command, args, cwd: options.cwd });
+      if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: "head\n", stderr: "" };
+      if (command === "git" && args[0] === "rev-parse" && args[1] === "origin/main") return { code: 0, stdout: "base\n", stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const shellRunner = async () => {
+      reachedCheck();
+      await checkCanFinish;
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const explicitScopeResolver = async () => ({ type: "issues", issueIds: ["7"], revision: revision() });
+
+    const integration = integrateExistingRun(value.config, {
+      repoPath: value.repoPath,
+      runId: value.state.runId,
+      runner,
+      shellRunner,
+      scopeAssessmentOptions: { explicitScopeResolver }
+    });
+    await checkStarted;
+    liveIssue = drift === "closed"
+      ? { ...liveIssue, state: "CLOSED", updatedAt: "2026-09-21T00:00:00Z", closedAt: "2026-09-21T00:00:00Z" }
+      : { ...liveIssue, body: "Materially changed acceptance criteria", updatedAt: "2026-09-21T00:00:00Z" };
+    resumeCheck();
+
+    await assert.rejects(integration, /no longer eligible: current explicit issue facts drifted/);
+    assert.equal(calls.some((call) => call.command === "git" && call.args[0] === "merge"), false);
+    assert.equal(calls.some((call) => call.command === "git" && call.args[0] === "push"), false);
+    assert.equal(calls.some((call) => call.command === "gh" && call.args[0] === "issue" && call.args[1] === "close"), false);
+  });
+}
 
 test("status applies live workset scope assessment before showing delegated eligibility", async (t) => {
   const value = await fixture(t);
@@ -249,6 +317,20 @@ test("status applies live workset scope assessment before showing delegated elig
   });
 
   assert.match(status.items[0].state, /not eligible under delegated policy: current workset scope drifted/);
+  assert.equal(status.items[0].integrationState, "not eligible under delegated policy");
+  assert.doesNotMatch(status.items[0].state, /validator approved, eligible under delegated policy/);
+});
+
+test("status re-resolves explicit issue facts before showing delegated eligibility", async (t) => {
+  const value = await fixture(t);
+  const status = await statusSnapshot(value.config, value.repoPath, ["7"], {
+    stateLoader: async () => [value.state],
+    scopeAssessmentOptions: {
+      explicitScopeResolver: async () => ({ type: "issues", issueIds: ["7"], revision: "explicit-r2" })
+    }
+  });
+
+  assert.match(status.items[0].state, /not eligible under delegated policy: current explicit issue facts drifted/);
   assert.equal(status.items[0].integrationState, "not eligible under delegated policy");
   assert.doesNotMatch(status.items[0].state, /validator approved, eligible under delegated policy/);
 });
@@ -275,6 +357,7 @@ else process.exit(2);
 `, { mode: 0o755 });
   const old = createDelegatedAuthorization({
     config: current, repoPath, runId: "old-run", issueIds: ["7"],
+    scope: { revision: "explicit-old" },
     limits: { concurrency: 4, correction: { enabled: false, retryLimit: 0, deadlineMs: 0 } }
   });
   await saveAuthorization(repoPath, old);
@@ -339,11 +422,12 @@ test("an explicitly accepted failing baseline remains eligible without relaxing 
     repoPath: value.repoPath,
     runId: "accepted-baseline",
     issueIds: ["7"],
+    scope: { revision: "explicit-r1" },
     limits: value.authorization.limits
   });
   await saveAuthorization(value.repoPath, authorization);
   const worker = value.worker;
-  const validation = bindValidation(acceptedConfig, worker, { issue: "7", exitCode: 0, verdict: "approve" });
+  const validation = bindValidation(acceptedConfig, worker, { issue: "7", exitCode: 0, verdict: "approve" }, { scopeRevision: authorization.scope.revision });
   const state = {
     ...value.state,
     runId: authorization.runId,
@@ -366,6 +450,7 @@ test("an explicitly accepted failing baseline remains eligible without relaxing 
     validation,
     authorization,
     persistedAuthorization: await loadAuthorization(value.repoPath, authorization.id),
+    scopeAssessment: { current: true, revision: authorization.scope.revision },
     statesById: new Map([[state.runId, state]])
   });
   assert.equal(assessment.eligible, true, assessment.reason);

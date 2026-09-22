@@ -7,7 +7,7 @@ const { executeWorker } = require("./worker");
 const { validateWorker } = require("./validator");
 const { saveRunState } = require("./run-store");
 const { commitLifecycleTransition } = require("./lifecycle-coordination");
-const { bindValidation, createDelegatedAuthorization, saveAuthorization } = require("./authorization");
+const { bindValidation, createDelegatedAuthorization, saveAuthorization, resolveExplicitIssueScope } = require("./authorization");
 const { integrateExistingRun } = require("./existing-run");
 
 function newRunId(now = new Date()) {
@@ -54,12 +54,13 @@ async function executeRun(config, {
   baselineRunner,
   stateSaver = saveRunState,
   scope = null,
+  authorization = null,
   reservedState = null,
   onIssueSettled = async () => {}
 } = {}) {
   plan = plan || computePlan(config, { concurrency });
   if (!plan.selected.length) {
-    const empty = { runId, mode: "execute", status: "no-ready-work", plan, baseline: null, preflights: [], workers: [], validations: [], reviews: {}, ...(scope ? { scope } : {}) };
+    const empty = { runId, mode: "execute", status: "no-ready-work", plan, baseline: null, preflights: [], workers: [], validations: [], reviews: {}, ...(scope ? { scope } : {}), ...(authorization ? { authorization } : {}) };
     if (scope) await stateSaver(repoPath, runId, empty);
     return empty;
   }
@@ -77,6 +78,7 @@ async function executeRun(config, {
     reviews: {}
   };
   if (scope) result.scope = scope;
+  if (authorization) result.authorization = authorization;
   if (!reservedState || scope) await stateSaver(repoPath, runId, result);
   let sourceSettled = false;
 
@@ -109,7 +111,7 @@ async function executeRun(config, {
         if (worker.exitCode === 0 && worker.headSha !== worker.baseSha) {
           console.error(`[Maestro] run ${runId}: validating changed branch for #${issue}`);
           const validation = await validatorExecutor({ repository: config.repository, worker, baseline: result.baseline, runId });
-          result.validations.push(bindValidation(config, worker, validation));
+          result.validations.push(bindValidation(config, worker, validation, { scopeRevision: result.authorization?.scope?.revision }));
         }
       } catch (error) {
         if (!result.workers.some((worker) => String(worker.issue) === issue)) {
@@ -187,18 +189,24 @@ async function executeAndIntegrate(config, options = {}) {
   const runId = options.runId || newRunId();
   const plan = options.plan || computePlan(config, { concurrency: options.concurrency });
   if (!plan.selected.length) return executeRun(config, { ...options, runId, plan });
+  const explicitScope = await (options.explicitScopeResolver || resolveExplicitIssueScope)({
+    config,
+    repoPath: options.repoPath,
+    issueIds: plan.selected.map((item) => String(item.id))
+  });
   const authorization = createDelegatedAuthorization({
     config,
     repoPath: options.repoPath,
     runId,
     issueIds: plan.selected.map((item) => String(item.id)),
+    scope: { revision: explicitScope.revision },
     limits: {
       concurrency: plan.concurrency,
       correction: { enabled: false, retryLimit: 0, deadlineMs: 0 }
     }
   });
   await saveAuthorization(options.repoPath, authorization);
-  const result = await executeRun(config, { ...options, runId, plan, scope: options.scope || null, reservedState: options.reservedState ? { ...options.reservedState, authorization } : null });
+  const result = await executeRun(config, { ...options, runId, plan, scope: options.scope || null, authorization, reservedState: options.reservedState ? { ...options.reservedState, authorization } : null });
   if (!options.reservedState) {
     result.authorization = authorization;
     await (options.stateSaver || saveRunState)(options.repoPath, runId, result);

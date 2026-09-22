@@ -29,7 +29,7 @@ const { discoverGitHubRepository, loadGitHubIssues } = require("../src/github");
 const { proposeDraft, formatDraftSummary, formatDraftVerbose, formatDraftJson, readManifestSnapshot, writeManifest, detectExecutionDrift } = require("../src/draft");
 const { createAgentPlanner } = require("../src/agent-planner");
 const { runPlanningAnalyzer } = require("../src/planning-analysis");
-const { stableWorksetName, epicWorkset, issueWorkset, resolveWorksetScope, assertExecutableScope, validateWorksetName } = require("../src/worksets");
+const { stableWorksetName, epicWorkset, issueWorkset, explicitIssueRevision, resolveWorksetScope, assertExecutableScope, validateWorksetName } = require("../src/worksets");
 const { loadScopeSnapshot, readScopeSnapshot } = require("../src/scope-store");
 const { persistScopedDraft } = require("../src/scoped-persistence");
 const { reserveReadyWork, reserveExplicitWork, runLifecycleBackfill } = require("../src/scheduler");
@@ -224,7 +224,7 @@ async function workflowFooter(config, repoPath, { includeIssues = true, concurre
 }
 
 async function verifyExecutionSelection(config, repoPath, issueIds) {
-  if (!issueIds.length) return;
+  if (!issueIds.length) return [];
   const repository = await discoverGitHubRepository(repoPath);
   if (repository !== config.repository) throw new Error(`The manifest targets ${config.repository}, but the current checkout is ${repository}.`);
   const issues = await loadGitHubIssues(repository, issueIds, { repoPath });
@@ -232,6 +232,7 @@ async function verifyExecutionSelection(config, repoPath, issueIds) {
   if (findings.length) {
     throw new Error(`GitHub/manifest drift blocks execution: ${findings.map((item) => `#${item.issue} ${item.reason}`).join(" ")} Run \`maestro draft --write\` and review any conflicts before retrying.`);
   }
+  return issues;
 }
 
 async function outputLatest(repoPath, { copy = true, print = true, config = null, recommendations = false } = {}) {
@@ -583,7 +584,8 @@ async function main() {
     const planOptions = { ...(delegatedIssues.length ? { issueIds: delegatedIssues } : scopedPlanOptions(scope)), concurrency };
     const candidatePlan = args.includes("--rerun") ? computePlan(config, planOptions) : await computeEffectivePlan(config, repoPath, planOptions);
     const selectedIssueIds = candidatePlan.selected.map((item) => item.id);
-    await verifyExecutionSelection(config, repoPath, selectedIssueIds);
+    const authorizedScopeIds = delegatedIssues.length ? delegatedIssues : scope?.issueIds || candidatePlan.selected.map((item) => String(item.id));
+    const verifiedIssues = await verifyExecutionSelection(config, repoPath, delegatedIssues.length ? authorizedScopeIds : selectedIssueIds);
     const authorization = scope ? {
       workset: scope.name,
       revision: scope.revision,
@@ -595,12 +597,13 @@ async function main() {
     const requestedRunId = newRunId();
     let delegatedAuthorization = null;
     if (delegated) {
-      const authorizedScopeIds = delegatedIssues.length ? delegatedIssues : scope?.issueIds || candidatePlan.selected.map((item) => String(item.id));
       const renewalId = option(args, "--renew");
       if (renewalId) await loadAuthorization(repoPath, renewalId);
       delegatedAuthorization = createDelegatedAuthorization({
         config, repoPath, runId: requestedRunId, issueIds: authorizedScopeIds,
-        scope: scope ? { workset: scope.name, revision: scope.revision } : null,
+        scope: scope
+          ? { workset: scope.name, revision: scope.revision }
+          : { revision: explicitIssueRevision(config.repository, authorizedScopeIds, verifiedIssues) },
         limits: {
           concurrency: candidatePlan.concurrency,
           correction: {

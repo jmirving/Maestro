@@ -275,7 +275,7 @@ async function executeReconcileRun(config, {
 
   result.validations = await Promise.all(result.workers
     .filter((worker) => worker.exitCode === 0 && worker.headSha !== worker.baseSha)
-    .map(async (worker) => bindValidation(config, worker, await validatorExecutor({ repository: config.repository, worker, baseline: result.baseline, runId }))));
+    .map(async (worker) => bindValidation(config, worker, await validatorExecutor({ repository: config.repository, worker, baseline: result.baseline, runId }), { scopeRevision: result.authorization?.scope?.revision })));
 
   result.status = "awaiting-review";
   if (stateSaver === saveRunState) {
