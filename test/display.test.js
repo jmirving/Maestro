@@ -121,6 +121,48 @@ test("status CLI accepts issue positionals and resolves the latest relevant run"
   assert.match(invalid.stderr, /either issue numbers or --all/);
 });
 
+test("repository status keeps a persisted direct conflict visible by default and with --all", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-status-conflict-"));
+  const repoPath = path.join(root, "target");
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  const runId = "20260910020202-acdeff";
+  const worktreePath = path.join(root, "worktrees", "issue-7");
+  const conflictConfig = {
+    repository: "example/conflict",
+    work: { "7": { status: "ready", title: "Conflicted integration" } }
+  };
+  const conflictRun = {
+    runId,
+    mode: "execute",
+    status: "technical-conflict",
+    plan: { selected: [{ id: "7", title: "Conflicted integration" }] },
+    workers: [{ issue: "7", exitCode: 0, headSha: "conflicted-head" }],
+    validations: [{ issue: "7", verdict: "approve" }],
+    reviews: { "7": { disposition: "approve" } },
+    integration: [],
+    conflicts: { "7": {
+      operation: "rebase",
+      interruptedStage: "integration-refresh",
+      operationState: "active",
+      worktreePath,
+      continuationAction: "maestro reconcile 7"
+    } }
+  };
+  await fs.mkdir(repoPath);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(manifestPath, `${JSON.stringify(conflictConfig)}\n`);
+  await saveRunState(repoPath, runId, conflictRun);
+
+  const cli = path.resolve(__dirname, "../bin/maestro.js");
+  for (const args of [[], ["--all"]]) {
+    const result = spawnSync(process.execPath, [cli, "status", ...args, "--repo-path", repoPath], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Needs attention \(1\)/);
+    assert.match(result.stdout, new RegExp(`#7 Conflicted integration - Git rebase content conflict during integration-refresh \\(active\\); preserved at ${worktreePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    assert.match(result.stdout, /Recommended: `maestro reconcile 7`/);
+  }
+});
+
 test("repository status derives start versus next from persisted integration history", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-status-advance-"));
   const repoPath = path.join(root, "target");

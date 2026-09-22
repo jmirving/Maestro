@@ -66,6 +66,7 @@ const external = effective?.completion?.source === "external";
     integrationState = external ? "external completion adopted during reconciliation" : "integrated";
   } else if (conflict && !evidence?.correction?.conflict && !["completed", "resolved", "manually-resolved"].includes(conflict.operationState)) {
     state = `Git ${conflict.operation} content conflict during ${conflict.interruptedStage} (${conflict.operationState}); preserved at ${conflict.worktreePath}`;
+    group = "attention";
     integrationState = "not eligible; conflict recovery and fresh evidence are required";
     action = conflict.continuationAction || `maestro details ${issue}`;
   } else if (review?.disposition === "discard") {
@@ -91,9 +92,11 @@ const external = effective?.completion?.source === "external";
     action = `maestro details ${issue}`;
   } else if (delegated?.eligible && validation?.verdict === "approve") {
     state = "validator approved, eligible under delegated policy";
+    group = "ready-integrate";
     integrationState = `eligible under delegated authorization ${delegated.authorizationId}`;
   } else if (delegated && validation?.verdict === "approve") {
     state = `validator approved, not eligible under delegated policy: ${delegated.reason || "authorization evidence is invalid"}`;
+    group = "attention";
     integrationState = "not eligible under delegated policy";
   } else if (review && validation?.verdict === "approve") {
     state = "human approved, ready to integrate";
