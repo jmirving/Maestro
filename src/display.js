@@ -5,7 +5,7 @@ const { buildRecommendations, formatRecommendations } = require("./recommendatio
 const { isValidValidatorOverride } = require("./reviews");
 const { capacitySnapshot } = require("./scheduler");
 const { formatConcurrency } = require("./concurrency");
-const { loadAuthorization, assessDelegatedAuthorization } = require("./authorization");
+const { loadAuthorization, assessCurrentScope, assessDelegatedAuthorization } = require("./authorization");
 
 function numericSort(left, right) {
   return String(left).localeCompare(String(right), undefined, { numeric: true });
@@ -85,6 +85,9 @@ function describeIssue(config, issue, evidence, plan, effective = null, delegate
   } else if (delegated?.eligible && validation?.verdict === "approve") {
     state = "validator approved, eligible under delegated policy";
     integrationState = `eligible under delegated authorization ${delegated.authorizationId}`;
+  } else if (delegated && validation?.verdict === "approve") {
+    state = `validator approved, not eligible under delegated policy: ${delegated.reason || "authorization evidence is invalid"}`;
+    integrationState = "not eligible under delegated policy";
   } else if (review && validation?.verdict === "approve") {
     state = "human approved, ready to integrate";
     integrationState = "eligible when every item in its run has a human disposition";
@@ -199,7 +202,8 @@ function runReadiness(states, currentByIssue, effectiveByIssue = null, delegated
 
 async function statusSnapshot(config, repoPath, requestedIssues = [], {
   stateLoader = loadExecutionStates,
-  concurrency
+  concurrency,
+  scopeAssessmentOptions = {}
 } = {}) {
   const states = await stateLoader(repoPath);
   const capacity = capacitySnapshot(config, states, { concurrency });
@@ -214,10 +218,13 @@ async function statusSnapshot(config, repoPath, requestedIssues = [], {
     if (!state.authorization?.id) continue;
     let persisted = null;
     try { persisted = await loadAuthorization(repoPath, state.authorization.id); } catch {}
+    const scopeAssessment = state.authorization?.kind === "delegated"
+      ? await assessCurrentScope({ config, repoPath, authorization: state.authorization, ...scopeAssessmentOptions })
+      : null;
     delegatedByRun.set(String(state.runId), new Map((state.workers || []).map((worker) => {
       const issue = String(worker.issue);
       const validation = (state.validations || []).find((entry) => String(entry.issue) === issue);
-      return [issue, assessDelegatedAuthorization({ config, repoPath, state, issue, worker, validation, authorization: state.authorization, persistedAuthorization: persisted, statesById })];
+      return [issue, assessDelegatedAuthorization({ config, repoPath, state, issue, worker, validation, authorization: state.authorization, persistedAuthorization: persisted, statesById, scopeAssessment })];
     })));
   }
   const allIssues = [...effectiveByIssue.keys()].sort(numericSort);

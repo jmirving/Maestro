@@ -3,7 +3,7 @@ const { effectiveIssueStates } = require("./run-resolver");
 const { ensureFollowUp, isValidValidatorOverride } = require("./reviews");
 const { integrateApproved } = require("./integrator");
 const { captureBaseline } = require("./baseline");
-const { loadAuthorization, assessCurrentScope, assessDelegatedAuthorization } = require("./authorization");
+const { digest, loadAuthorization, assessCurrentScope, assessDelegatedAuthorization } = require("./authorization");
 
 function assessRunItems(state, { effectiveByIssue = null, delegatedByIssue = new Map() } = {}) {
   const validationByIssue = new Map((state.validations || []).map((entry) => [String(entry.issue), entry]));
@@ -245,6 +245,30 @@ async function integrateExistingRun(config, {
     runner,
     shellRunner,
     sourceRunId: runId,
+    revalidateDelegated: state.authorization?.kind === "delegated" ? async ({ worker, validation, authorization }) => {
+      const liveState = await loadRunState(repoPath, runId);
+      const liveStates = await loadPersistedRunStates(repoPath);
+      const liveAuthorization = liveState.authorization;
+      const persisted = liveAuthorization?.id ? await loadAuthorization(repoPath, liveAuthorization.id) : null;
+      const liveScopeAssessment = liveAuthorization?.kind === "delegated"
+        ? await assessCurrentScope({ config, repoPath, authorization: liveAuthorization, ...scopeAssessmentOptions })
+        : null;
+      const liveWorker = (liveState.workers || []).find((entry) => String(entry.issue) === String(worker.issue));
+      const liveValidation = (liveState.validations || []).find((entry) => String(entry.issue) === String(worker.issue));
+      if (!liveWorker || liveWorker.headSha !== worker.headSha || !liveValidation || digest(liveValidation) !== digest(validation)) {
+        return { eligible: false, reason: "persisted worker or validation evidence changed before integration" };
+      }
+      if (authorization.authorizationId !== liveAuthorization?.id) {
+        return { eligible: false, reason: "the run now references different authorization evidence" };
+      }
+      return assessDelegatedAuthorization({
+        config, repoPath, state: liveState, issue: worker.issue, worker: liveWorker, validation: liveValidation,
+        authorization: liveAuthorization,
+        persistedAuthorization: persisted,
+        statesById: new Map(liveStates.map((entry) => [String(entry.runId), entry])),
+        scopeAssessment: liveScopeAssessment
+      });
+    } : null,
     onConflict: async (conflict) => {
       state.conflicts = state.conflicts || {};
       state.conflicts[String(conflict.issue)] = conflict;

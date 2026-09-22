@@ -2,6 +2,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { coordinatedRepoPath, reportRootForRepo } = require("./reporter");
+const { withRepositoryCoordination } = require("./repository-coordination");
 const { loadScopeSnapshot } = require("./scope-store");
 const { resolveWorksetScope, assertExecutableScope } = require("./worksets");
 
@@ -140,15 +141,17 @@ async function loadAuthorization(repoPath, id) {
 }
 
 async function revokeAuthorization(repoPath, id, { invocation = process.argv, actor = availableActor(), now = new Date() } = {}) {
-  const authorization = await loadAuthorization(repoPath, id);
-  const revoked = {
-    ...authorization,
-    status: "revoked",
-    revokedAt: now.toISOString(),
-    revocation: { invocation: invocation.map(String), ...(actor ? { actor } : {}) }
-  };
-  await saveAuthorization(repoPath, revoked);
-  return revoked;
+  return withRepositoryCoordination(repoPath, async () => {
+    const authorization = await loadAuthorization(repoPath, id);
+    const revoked = {
+      ...authorization,
+      status: "revoked",
+      revokedAt: now.toISOString(),
+      revocation: { invocation: invocation.map(String), ...(actor ? { actor } : {}) }
+    };
+    await saveAuthorization(repoPath, revoked);
+    return revoked;
+  });
 }
 
 function validationContext(config, worker, issue) {

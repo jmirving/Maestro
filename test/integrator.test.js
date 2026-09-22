@@ -250,7 +250,8 @@ test("integrates an audited validator override while excluding unreviewed REWORK
       { issue: "8", verdict: "rework", exitCode: 1, report: "not reviewed" }
     ],
     reviewAuthorizations: [{ issue: "7", review: override }],
-    runner
+    runner,
+    coordinate: async (_repoPath, operation) => operation()
   });
 
   assert.deepEqual(results.map((entry) => entry.issue), ["7"]);
@@ -272,7 +273,8 @@ test("approve-with-follow-up remains a valid supervised integration disposition"
     workers: [{ issue: "25", branch: "worker/25", worktreePath: "/worker/25", exitCode: 0 }],
     validations: [{ issue: "25", verdict: "approve", exitCode: 0 }],
     reviewAuthorizations: [{ issue: "25", review: { disposition: "approve-with-follow-up", recordedAt: "2026-09-21T00:00:00Z" } }],
-    runner
+    runner,
+    coordinate: async (_repoPath, operation) => operation()
   });
   assert.deepEqual(result.map((entry) => entry.issue), ["25"]);
   assert.equal(result[0].authorization.kind, "human-review");

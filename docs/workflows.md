@@ -124,7 +124,7 @@ maestro start --workset release --delegate --auto-rework
 
 The authorization is persisted separately from validator, human-review, override, and integration evidence. Passing current siblings may integrate while a REWORK sibling remains recorded and non-integrable. A `HUMAN_GATE`, invalid validator, policy/scope drift, stale implementation SHA, changed rebase, missing checks, superseded run, or mismatched repository/session fails closed.
 
-Pause and renew explicitly with `maestro revoke <authorization-id>` and `maestro start 57 63 --delegate --renew <authorization-id>`. Renewal is a new authorization after current resolution, not reactivation of historical evidence. Ordinary `start`, `next`, `approve`, and `draft --agent --write` retain their supervised/planning meanings.
+Pause and renew explicitly with `maestro revoke <authorization-id>` and `maestro start 57 63 --delegate --renew <authorization-id>`. Revocation and the final delegated decision share the serialized integration boundary: after revocation reports success, pending work cannot merge, push, or close its issue. Renewal is a new authorization after current resolution, not reactivation of historical evidence. Ordinary `start`, `next`, `approve`, and `draft --agent --write` retain their supervised/planning meanings.
 
 ## Advanced explicit runner
 

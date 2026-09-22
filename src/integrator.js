@@ -3,6 +3,7 @@ const { runChecked, runShell } = require("./process");
 const { isValidValidatorOverride } = require("./reviews");
 const { inspectGitOperation, captureConflict, safelyAbortConflict, contentConflictError } = require("./git-conflict");
 const { digest, validationContext, isDelegatedAssessment } = require("./authorization");
+const { withRepositoryCoordination } = require("./repository-coordination");
 
 async function ensureClean(repoPath, runner = runChecked) {
   const status = (await runner("git", ["status", "--porcelain"], { cwd: repoPath })).stdout.trim();
@@ -172,7 +173,9 @@ async function integrateApproved({
   shellRunner = runShell,
   onIntegrated = null,
   sourceRunId = null,
-  onConflict = null
+  onConflict = null,
+  revalidateDelegated = null,
+  coordinate = withRepositoryCoordination
 }) {
   const integration = config.integration || {};
   if (integration.enabled !== true) throw new Error("Manifest does not enable integration.");
@@ -276,38 +279,52 @@ async function integrateApproved({
         validationResults.push({ command, ...(await runIntegrationCommand(command, { cwd: worker.worktreePath, baseline, shellRunner })) });
       }
 
-      await runner("git", ["checkout", defaultBranch], { cwd: repoPath });
-      await runner("git", ["pull", "--ff-only", "origin", defaultBranch], { cwd: repoPath });
-      const before = (await runner("git", ["rev-parse", "HEAD"], { cwd: repoPath })).stdout.trim();
-      try {
-        await runner("git", ["merge", "--ff-only", worker.branch], { cwd: repoPath });
-        for (const command of integration.postMergeCommands || []) {
-          await runIntegrationCommand(command, { cwd: repoPath, baseline, shellRunner });
+      await coordinate(repoPath, async () => {
+        let permission = authorizationByIssue.get(String(worker.issue)) || {};
+        if (permission.delegated) {
+          if (typeof revalidateDelegated !== "function") {
+            throw new Error(`Delegated integration authorization for issue #${worker.issue} cannot be revalidated at the serialized integration boundary.`);
+          }
+          const current = await revalidateDelegated({ worker, validation, authorization: permission.delegated });
+          if (!current?.eligible || !isDelegatedAssessment(current) || current.authorizationId !== permission.delegated.authorizationId) {
+            throw new Error(`Delegated integration authorization for issue #${worker.issue} is no longer eligible: ${current?.reason || "authorization evidence changed"}.`);
+          }
+          permission = { ...permission, delegated: current };
+          authorizationByIssue.set(String(worker.issue), permission);
         }
-        await runner("git", ["push", "origin", defaultBranch], { cwd: repoPath });
-      } catch (error) {
-        try { await runner("git", ["reset", "--hard", before], { cwd: repoPath }); } catch {}
-        throw error;
-      }
 
-      const integratedSha = (await runner("git", ["rev-parse", "HEAD"], { cwd: repoPath })).stdout.trim();
-      const permission = authorizationByIssue.get(String(worker.issue)) || {};
-      const closureAuthorized = permission.review != null || permission.delegated?.allowedActions?.closeIssue === true;
-      if (integration.closeIssues === true && closureAuthorized) {
-        await runner("gh", ["issue", "close", String(worker.issue), "--repo", config.repository, "--reason", "completed", "--comment", `Integrated by Maestro at ${integratedSha}.`], { cwd: repoPath });
-      }
-      const integrated = {
-        issue: worker.issue,
-        branch: worker.branch,
-        integratedSha,
-        validationResults,
-        authorization: permission.delegated?.eligible
-          ? { kind: "delegated", id: permission.delegated.authorizationId }
-          : { kind: permission.review?.disposition === "approve-override" ? "human-override" : "human-review", recordedAt: permission.review?.recordedAt || null }
-      };
-      results.push(integrated);
-      if (onIntegrated) await onIntegrated(integrated);
-      console.error(`[Maestro] integrated #${worker.issue} at ${integratedSha}`);
+        await runner("git", ["checkout", defaultBranch], { cwd: repoPath });
+        await runner("git", ["pull", "--ff-only", "origin", defaultBranch], { cwd: repoPath });
+        const before = (await runner("git", ["rev-parse", "HEAD"], { cwd: repoPath })).stdout.trim();
+        try {
+          await runner("git", ["merge", "--ff-only", worker.branch], { cwd: repoPath });
+          for (const command of integration.postMergeCommands || []) {
+            await runIntegrationCommand(command, { cwd: repoPath, baseline, shellRunner });
+          }
+          await runner("git", ["push", "origin", defaultBranch], { cwd: repoPath });
+        } catch (error) {
+          try { await runner("git", ["reset", "--hard", before], { cwd: repoPath }); } catch {}
+          throw error;
+        }
+
+        const integratedSha = (await runner("git", ["rev-parse", "HEAD"], { cwd: repoPath })).stdout.trim();
+        const closureAuthorized = permission.review != null || permission.delegated?.allowedActions?.closeIssue === true;
+        if (integration.closeIssues === true && closureAuthorized) {
+          await runner("gh", ["issue", "close", String(worker.issue), "--repo", config.repository, "--reason", "completed", "--comment", `Integrated by Maestro at ${integratedSha}.`], { cwd: repoPath });
+        }
+        const integrated = {
+          issue: worker.issue,
+          branch: worker.branch,
+          integratedSha,
+          validationResults,
+          authorization: permission.delegated?.eligible
+            ? { kind: "delegated", id: permission.delegated.authorizationId }
+            : { kind: permission.review?.disposition === "approve-override" ? "human-override" : "human-review", recordedAt: permission.review?.recordedAt || null }
+        };
+        results.push(integrated);
+        if (onIntegrated) await onIntegrated(integrated);
+        console.error(`[Maestro] integrated #${worker.issue} at ${integratedSha}`);
+      });
     }
     return results;
   });

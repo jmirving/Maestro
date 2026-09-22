@@ -13,9 +13,11 @@ const {
   assessCurrentScope,
   assessDelegatedAuthorization
 } = require("../src/authorization");
-const { classifyRunItems } = require("../src/existing-run");
+const { classifyRunItems, integrateExistingRun } = require("../src/existing-run");
 const { integrateApproved } = require("../src/integrator");
 const { executeAndIntegrate, continuousRun } = require("../src/controller");
+const { statusSnapshot } = require("../src/display");
+const { saveRunState } = require("../src/run-store");
 
 function config() {
   return {
@@ -31,10 +33,11 @@ function config() {
   };
 }
 
-async function fixture(t) {
+async function fixture(t, { closeIssues = false } = {}) {
   const repoPath = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-authorization-"));
   t.after(() => fs.rm(repoPath, { recursive: true, force: true }));
   const current = config();
+  current.integration.closeIssues = closeIssues;
   const authorization = createDelegatedAuthorization({
     config: current,
     repoPath,
@@ -185,6 +188,69 @@ test("revocation blocks resume while an explicit renewal creates a distinct audi
   assert.equal(renewed.renews, value.authorization.id);
   assert.notEqual(renewed.id, value.authorization.id);
   assert.equal(assessment.eligible, true, assessment.reason);
+});
+
+test("revocation during paused integration wins before merge, push, or closure", async (t) => {
+  const value = await fixture(t, { closeIssues: true });
+  value.state.workers[0].worktreePath = path.join(value.repoPath, "worker-7");
+  await saveRunState(value.repoPath, value.state.runId, value.state);
+
+  const calls = [];
+  let reachedCheck;
+  let resumeCheck;
+  const checkStarted = new Promise((resolve) => { reachedCheck = resolve; });
+  const checkCanFinish = new Promise((resolve) => { resumeCheck = resolve; });
+  const runner = async (command, args, options = {}) => {
+    calls.push({ command, args, cwd: options.cwd });
+    if (command === "git" && args[0] === "rev-parse" && args[1] === "HEAD") return { code: 0, stdout: "head\n", stderr: "" };
+    if (command === "git" && args[0] === "rev-parse" && args[1] === "origin/main") return { code: 0, stdout: "base\n", stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  const shellRunner = async () => {
+    reachedCheck();
+    await checkCanFinish;
+    return { code: 0, stdout: "", stderr: "" };
+  };
+
+  const integration = integrateExistingRun(value.config, {
+    repoPath: value.repoPath,
+    runId: value.state.runId,
+    runner,
+    shellRunner
+  });
+  await checkStarted;
+  const revoked = await revokeAuthorization(value.repoPath, value.authorization.id, {
+    invocation: ["maestro", "revoke"], actor: null
+  });
+  assert.equal(revoked.status, "revoked");
+  resumeCheck();
+
+  await assert.rejects(integration, /no longer eligible: authorization is revoked/);
+  assert.equal(calls.some((call) => call.command === "git" && call.args[0] === "merge"), false);
+  assert.equal(calls.some((call) => call.command === "git" && call.args[0] === "push"), false);
+  assert.equal(calls.some((call) => call.command === "gh" && call.args[0] === "issue" && call.args[1] === "close"), false);
+});
+
+test("status applies live workset scope assessment before showing delegated eligibility", async (t) => {
+  const value = await fixture(t);
+  const definition = { source: { type: "issues", issues: [{ repository: "owner/repo", number: "7" }] }, refresh: { mode: "explicit" } };
+  const snapshot = { name: "release", definition, revision: "scope-r1", issueIds: ["7"], complete: true, diagnostics: [] };
+  value.config.worksets = { release: definition };
+  value.authorization.scope = { type: "workset", workset: "release", revision: "scope-r1", issueIds: ["7"] };
+  value.state.authorization = value.authorization;
+  await saveAuthorization(value.repoPath, value.authorization);
+
+  const status = await statusSnapshot(value.config, value.repoPath, ["7"], {
+    stateLoader: async () => [value.state],
+    scopeAssessmentOptions: {
+      snapshotLoader: async () => snapshot,
+      scopeResolver: async () => ({ ...snapshot, revision: "scope-r2", issueIds: ["7", "8"] })
+    }
+  });
+
+  assert.match(status.items[0].state, /not eligible under delegated policy: current workset scope drifted/);
+  assert.equal(status.items[0].integrationState, "not eligible under delegated policy");
+  assert.doesNotMatch(status.items[0].state, /validator approved, eligible under delegated policy/);
 });
 
 test("CLI previews explicit scope and protected limits, then supports revoke and explicit renewal", async (t) => {
