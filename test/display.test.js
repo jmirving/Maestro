@@ -447,6 +447,41 @@ test("default status is bounded, follows scheduler order, and collapses complete
   assert.ok(text.split("\n").length < 35, "routine status should remain near one screen");
 });
 
+test("default status bounds readiness and actions across many independent active runs", async () => {
+  const work = {};
+  const states = [];
+  for (let issue = 1; issue <= 100; issue += 1) {
+    const id = String(issue);
+    const runId = `20260910${String(issue).padStart(6, "0")}-run${issue}`;
+    work[id] = { status: "ready", title: `Approval ${issue}` };
+    states.push({
+      runId,
+      mode: "execute",
+      status: "awaiting-review",
+      plan: { selected: [{ id, title: `Approval ${issue}` }] },
+      workers: [{ issue: id, exitCode: 0, headSha: `head-${issue}` }],
+      validations: [{ issue: id, verdict: "approve" }],
+      reviews: {},
+      integration: []
+    });
+  }
+  const largeConfig = { repository: "example/active", defaultConcurrency: 4, work };
+  const stateLoader = async () => states;
+  const defaultText = formatStatus(await statusSnapshot(largeConfig, "/unused", [], { stateLoader }));
+
+  assert.equal((defaultText.match(/^Commit: not ready/gm) || []).length, 5);
+  assert.match(defaultText, /Run readiness: 95 more runs hidden \(0 ready, 95 not ready; use maestro status --all\)/);
+  assert.match(defaultText, /Recommended: `maestro approve 1 2 3 4 5`/);
+  assert.match(defaultText, /More available: 95 more actionable issues; use maestro status --all/);
+  assert.doesNotMatch(defaultText, /maestro approve 1 2 3 4 5 6/);
+  assert.ok(defaultText.split("\n").length < 35, "large active status should remain near one screen");
+
+  const allText = formatStatus(await statusSnapshot(largeConfig, "/unused", [], { stateLoader, view: "all" }));
+  assert.equal((allText.match(/^Commit: not ready/gm) || []).length, 100);
+  assert.match(allText, /Recommended: `maestro approve 1 2 3 4 5 6 7 8 9 10[\s\S]*100`/);
+  assert.doesNotMatch(allText, /more runs hidden|More available:/);
+});
+
 test("all and completed views expand one effective row per issue", async () => {
   const viewConfig = {
     repository: "example/history",

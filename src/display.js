@@ -281,7 +281,12 @@ async function statusSnapshot(config, repoPath, requestedIssues = [], {
     view,
     items,
     readiness,
-    recommendations: buildRecommendations(items, readiness, plan.selected || [], { states }),
+    recommendations: buildRecommendations(items, readiness, plan.selected || [], {
+      states,
+      issueLimit: !requested.length && view === "default" ? 5 : Number.POSITIVE_INFINITY,
+      actionLimit: !requested.length && view === "default" ? 8 : Number.POSITIVE_INFINITY,
+      expansionCommand: !requested.length && view === "default" ? "maestro status --all" : null
+    }),
     selected: plan.selected?.map((item) => String(item.id)) || [],
     scheduler: {
       selected: (plan.selected || []).map((item) => String(item.id)),
@@ -309,16 +314,43 @@ function issueHeading(item) {
   return `Issue #${item.issue}${item.title ? ` — ${item.title}` : ""}`;
 }
 
-function formatCommit(lines, run) {
+function issueList(issues, expanded) {
+  const limit = expanded ? Number.POSITIVE_INFINITY : 5;
+  const shown = issues.slice(0, limit).map((issue) => `#${issue}`).join(", ");
+  const hidden = issues.length - Math.min(issues.length, limit);
+  return `${shown}${hidden ? ` (+${hidden} more; use maestro status --all)` : ""}`;
+}
+
+function formatCommit(lines, run, { expanded = false } = {}) {
   if (run.ready) {
-    lines.push(`Commit: ready — integrates ${run.integrate.map((issue) => `#${issue}`).join(", ")}${run.skip.length ? `; skips ${run.skip.map((issue) => `#${issue}`).join(", ")} for rework` : ""}${run.discard.length ? `; excludes discarded ${run.discard.map((issue) => `#${issue}`).join(", ")}` : ""}; run \`${run.command}\``);
+    lines.push(`Commit: ready — integrates ${issueList(run.integrate, expanded)}${run.skip.length ? `; skips ${issueList(run.skip, expanded)} for rework` : ""}${run.discard.length ? `; excludes discarded ${issueList(run.discard, expanded)}` : ""}; run \`${run.command}\``);
     return;
   }
   const requirements = [
     ...run.missing.map((entry) => `#${entry.issue} needs ${entry.kind}`),
     ...run.blocked.map((entry) => `#${entry.issue} needs ${entry.kind}`)
   ];
-  if (requirements.length) lines.push(`Commit: not ready — ${requirements.join("; ")}; inspect run ${run.runId}`);
+  if (requirements.length) {
+    const limit = expanded ? Number.POSITIVE_INFINITY : 5;
+    const hidden = requirements.length - Math.min(requirements.length, limit);
+    lines.push(`Commit: not ready — ${requirements.slice(0, limit).join("; ")}${hidden ? `; ${hidden} more requirements (use maestro status --all)` : ""}; inspect run ${run.runId}`);
+  }
+}
+
+function formatReadiness(lines, snapshot) {
+  const expanded = snapshot.focused || snapshot.view === "all";
+  const ordered = [
+    ...snapshot.readiness.filter((run) => run.ready),
+    ...snapshot.readiness.filter((run) => !run.ready)
+  ];
+  const displayed = expanded ? ordered : ordered.slice(0, 5);
+  for (const run of displayed) formatCommit(lines, run, { expanded });
+  if (displayed.length === ordered.length) return;
+
+  const hidden = ordered.slice(displayed.length);
+  const ready = hidden.filter((run) => run.ready).length;
+  const notReady = hidden.length - ready;
+  lines.push(`Run readiness: ${hidden.length} more ${hidden.length === 1 ? "run" : "runs"} hidden (${ready} ready, ${notReady} not ready; use maestro status --all)`);
 }
 
 function wrapLine(line, columns, continuation = "  ") {
@@ -447,7 +479,7 @@ function formatStatus(snapshot, { columns = Number.POSITIVE_INFINITY } = {}) {
     }
   }
 
-  for (const run of snapshot.readiness) formatCommit(lines, run);
+  formatReadiness(lines, snapshot);
   const recommendations = formatRecommendations(snapshot.recommendations);
   if (recommendations) lines.push("", recommendations.trimEnd());
   return `${lines.flatMap((line) => wrapLine(line, columns)).join("\n")}\n`;

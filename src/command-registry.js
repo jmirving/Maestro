@@ -155,7 +155,7 @@ const COMMANDS = [
     options: {
       "--repo-path": COMMON_REPO_OPTION,
       ...CONCURRENCY_OPTIONS,
-      "--all": { description: "Expand the full known issue inventory, grouped by operational state." },
+      "--all": { description: "Expand the full issue inventory, run readiness, and recommended actions." },
       "--completed": { description: "Show completed items that are collapsed in the default operational view." },
       "--watch": { description: "Continuously refresh the current or issue-focused status view." }
     },

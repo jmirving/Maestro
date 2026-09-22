@@ -11,18 +11,34 @@ function hasRecordedIntegration(states) {
   return states.some((state) => Array.isArray(state.integration) && state.integration.length > 0);
 }
 
-function buildRecommendations(items, readiness, selected, { states = [] } = {}) {
+function countLabel(count, singular, plural = `${singular}s`) {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function buildRecommendations(items, readiness, selected, {
+  states = [],
+  issueLimit = Number.POSITIVE_INFINITY,
+  actionLimit = Number.POSITIVE_INFINITY,
+  expansionCommand = null
+} = {}) {
   const primary = [];
   const alternatives = [];
+  const omittedIssues = new Set();
+  const limitIssues = (entries) => {
+    if (!Number.isFinite(issueLimit) || entries.length <= issueLimit) return entries;
+    entries.slice(issueLimit).forEach((entry) => omittedIssues.add(String(entry.issue)));
+    return entries.slice(0, issueLimit);
+  };
   const actionable = items.filter((item) => item.actionable !== false);
   const technicalConflicts = actionable.filter((item) => item.autoReworkStatus === "technical-conflict" || item.technicalConflict);
   const available = actionable.filter((item) => !technicalConflicts.includes(item));
-  const exhaustedRework = available.filter((item) => item.autoReworkStatus === "retry-exhausted" && !item.humanReview);
-  const humanRequiredConflicts = available.filter((item) => item.autoReworkStatus === "human-required");
-  const currentRework = available.filter((item) => item.validator === "rework" && !item.humanReview && item.autoReworkStatus !== "retry-exhausted");
-  const reviewedRework = available.filter((item) => item.humanReview === "rework-original");
-  const approvals = available.filter((item) => item.validator === "approve" && !item.humanReview);
-  const humanGates = available.filter((item) => item.validator === "human_gate" && !item.humanReview);
+  const exhaustedRework = limitIssues(available.filter((item) => item.autoReworkStatus === "retry-exhausted" && !item.humanReview));
+  const humanRequiredConflicts = limitIssues(available.filter((item) => item.autoReworkStatus === "human-required"));
+  const currentRework = limitIssues(available.filter((item) => item.validator === "rework" && !item.humanReview && item.autoReworkStatus !== "retry-exhausted"));
+  const reviewedRework = limitIssues(available.filter((item) => item.humanReview === "rework-original"));
+  const approvals = limitIssues(available.filter((item) => item.validator === "approve" && !item.humanReview));
+  const humanGates = limitIssues(available.filter((item) => item.validator === "human_gate" && !item.humanReview));
+  const visibleTechnicalConflicts = limitIssues(technicalConflicts);
 
   if (currentRework.length) {
     primary.push({ command: `maestro rework ${currentRework.map((item) => item.issue).join(" ")}` });
@@ -43,7 +59,7 @@ function buildRecommendations(items, readiness, selected, { states = [] } = {}) 
     }
   }
 
-  for (const item of technicalConflicts) {
+  for (const item of visibleTechnicalConflicts) {
     const action = { command: item.action || `maestro details ${item.issue}` };
     (primary.length ? alternatives : primary).push(action);
     alternatives.push({ command: `maestro details ${item.issue}` });
@@ -99,10 +115,20 @@ function buildRecommendations(items, readiness, selected, { states = [] } = {}) 
   }
 
   const ordered = uniqueActions([...primary.slice(0, 1), ...primary.slice(1), ...alternatives]);
-  return {
-    recommended: ordered[0]?.command || null,
-    alternatives: ordered.slice(1).map((entry) => entry.command)
+  const visible = Number.isFinite(actionLimit) ? ordered.slice(0, actionLimit) : ordered;
+  const result = {
+    recommended: visible[0]?.command || null,
+    alternatives: visible.slice(1).map((entry) => entry.command)
   };
+  const hiddenActions = ordered.length - visible.length;
+  if (omittedIssues.size || hiddenActions) {
+    result.omitted = {
+      issues: omittedIssues.size,
+      actions: hiddenActions,
+      expansionCommand
+    };
+  }
+  return result;
 }
 
 function formatRecommendations(recommendations) {
@@ -110,6 +136,15 @@ function formatRecommendations(recommendations) {
   const lines = [`Recommended: \`${recommendations.recommended}\``];
   if (recommendations.alternatives?.length) {
     lines.push(`Also available: ${recommendations.alternatives.map((command) => `\`${command}\``).join(", ")}`);
+  }
+  if (recommendations.omitted?.issues || recommendations.omitted?.actions) {
+    const counts = [];
+    if (recommendations.omitted.issues) counts.push(`${countLabel(recommendations.omitted.issues, "more actionable issue")}`);
+    if (recommendations.omitted.actions) counts.push(`${countLabel(recommendations.omitted.actions, "more action")}`);
+    const expansion = recommendations.omitted.expansionCommand
+      ? `; use ${recommendations.omitted.expansionCommand}`
+      : "";
+    lines.push(`More available: ${counts.join(" and ")}${expansion}`);
   }
   return `${lines.join("\n")}\n`;
 }

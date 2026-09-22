@@ -53,7 +53,7 @@ maestro details 57
 maestro output
 ```
 
-`status` is the canonical decision surface and ends with state-derived next commands. Its default action-first groups include the effective scheduler selection, while completed history is collapsed to a count. Use `status --all` for the full effective inventory, `status --completed` for completed history, or `status <issue...>` for focused lifecycle evidence; expansion filters cannot be combined with focused issue numbers. `plan` remains available for manifest-only or hypothetical planning/debugging previews. `details` reads issue-level worker, validator, review, and integration evidence. `output` prints and copies the latest combined report. None reruns work.
+`status` is the canonical decision surface and ends with state-derived next commands. Its default action-first groups include the effective scheduler selection, while issue previews, run-readiness diagnostics, and recommendation actions are bounded with exact omitted counts and completed history is collapsed to a count. Displayed integration sets always include their exact commit command. Use `status --all` for the full effective inventory and expanded readiness/actions, `status --completed` for completed history, or `status <issue...>` for focused lifecycle evidence; expansion filters cannot be combined with focused issue numbers. `plan` remains available for manifest-only or hypothetical planning/debugging previews. `details` reads issue-level worker, validator, review, and integration evidence. `output` prints and copies the latest combined report. None reruns work.
 
 Resolve every item in the wave, integrate reviewed work, and continue:
 
