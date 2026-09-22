@@ -227,16 +227,20 @@ test("status reports adopted external completion and suppresses stale lifecycle 
   historical.validations = historical.validations.filter((entry) => entry.issue === "2");
   historical.plan.selected = historical.plan.selected.filter((entry) => entry.id === "2");
   delete historical.reviews["7"];
-  const text = formatStatus(await statusSnapshot({
+  const config = {
     repository: "example/repo",
     work: { "2": {
       status: "complete",
       title: "Passing change",
       completion: { source: "external", githubState: "CLOSED", githubStateReason: "completed" }
     } }
-  }, "/unused", [], { stateLoader: async () => [historical] }));
+  };
+  const stateLoader = async () => [historical];
+  const defaultText = formatStatus(await statusSnapshot(config, "/unused", [], { stateLoader }));
+  const text = formatStatus(await statusSnapshot(config, "/unused", [], { stateLoader, view: "completed" }));
 
-  assert.match(text, /Issue #2 .*complete \(external\)/);
+  assert.match(defaultText, /Complete: 1 \(history collapsed; use maestro status --completed\)/);
+  assert.match(text, /#2 Passing change - complete \(external\)/);
   assert.doesNotMatch(text, /consistency conflict/);
   assert.doesNotMatch(text, /Recommended: `maestro (approve|rework|commit)/);
 });
