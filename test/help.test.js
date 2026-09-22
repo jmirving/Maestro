@@ -134,6 +134,14 @@ test("aliases and important documented flags are accepted by the shared registry
   assert.throws(() => parseInvocation(["draft", "--verbose", "--json"]), /only one/);
   assert.equal(parseInvocation(["s"]).command, "start");
   assert.equal(parseInvocation(["start", "--auto-rework"]).options["--auto-rework"], true);
+  assert.equal(parseInvocation(["start", "57", "--delegate", "--continuous"]).options["--continuous"], true);
+  assert.equal(parseInvocation(["resume", "57"]).command, "resume");
+  assert.equal(parseInvocation(["resume", "--workset", "release"]).options["--workset"], "release");
+  assert.equal(parseInvocation(["resume", "--session", "session-20260910010101-aaaaaa"]).options["--session"], "session-20260910010101-aaaaaa");
+  assert.equal(parseInvocation(["pause", "session-20260910010101-aaaaaa"]).command, "pause");
+  assert.equal(parseInvocation(["stop", "session-20260910010101-aaaaaa"]).command, "stop");
+  assert.throws(() => parseInvocation(["resume", "57", "--workset", "release"]), /cannot combine|either/);
+  assert.throws(() => parseInvocation(["start", "57", "--delegate", "--continuous", "--rerun"]), /cannot combine/);
   assert.equal(parseInvocation(["next", "--auto-rework"]).options["--auto-rework"], true);
   assert.equal(parseInvocation(["next", "-j", "4"]).options["-j"], "4");
   assert.equal(parseInvocation(["draft", "57", "--concurrency", "4", "63"]).positionals.join(","), "57,63");

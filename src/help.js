@@ -121,6 +121,9 @@ function parsePositionals(command, positionals) {
   if (kind === "authorization-id" && (positionals.length !== 1 || !/^delegation-[A-Za-z0-9._-]+$/.test(positionals[0]))) {
     throw cliError(`maestro ${command.name} requires one valid delegated authorization id.`);
   }
+  if (kind === "session-id" && (positionals.length !== 1 || !/^session-[A-Za-z0-9._-]+$/.test(positionals[0]))) {
+    throw cliError(`maestro ${command.name} requires one valid session id.`);
+  }
   if (kind === "optional-manifest") {
     if (positionals.length > 1 || (positionals.length === 1 && !isManifest(positionals[0]))) {
       throw cliError(`maestro ${command.name} accepts at most one manifest path.`);

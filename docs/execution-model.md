@@ -41,6 +41,16 @@ The editable workset definition is not an execution session or authorization. A 
 
 Selected-issue delegation uses the same live-facts boundary without requiring a named workset. Its authorization stores a canonical revision of the selected GitHub issues, validation evidence records that revision, and status plus the final serialized integration guard resolve the issues again. A title, body, state, label, or GitHub revision change therefore requires explicit renewal and fresh validation before merge, push, or closure.
 
+## Durable autonomous sessions
+
+`start <issues> --delegate --continuous` and `start --workset <name> --delegate --continuous` place the same scope and delegated authorization above the ordinary persisted run lifecycle. The session is a versioned record outside the manifest. It binds repository/common-Git root, manifest path, target, scope revision/membership, authorization/policy digest, concurrency and correction limits, run/rework/recovery lineage, integrated items, and pending bookkeeping. It records intent before each reconcile/advance transition and records results before another wave is considered.
+
+Repository coordination serializes claims and session writes. A live PID and random ownership token prevent a second process or stale owner from writing; dead owners are recorded and safely reclaimed. Run capacity and lifecycle ownership remain repository-wide, so alternate manifests and linked worktrees cannot bypass them. Local ownership is not represented as cross-machine coordination: remote branch freshness and publication checkpoints remain authoritative at integration.
+
+Resume resolves an explicit session, issue, or named workset and refuses ambiguity. It reuses current persisted evidence and cumulative limits, and fails closed on manifest/repository/target/scope/policy/authorization drift or corrupt/unknown state. Pause and stop are checkpoint requests: an active child settles, no new child starts, and evidence remains. Code integration and manifest bookkeeping are separate session evidence so a bookkeeping failure never erases an integrated SHA and resume does not reimplement it.
+
+The session terminal interface distinguishes verified completion from quiescence and lists unresolved issue/reason/next-action evidence. Until the companion completion evaluator supplies acceptance evidence, no-ready-work remains an explicit stop rather than an epic-complete claim.
+
 ## Capability requirements
 
 A work item may require named capabilities such as:

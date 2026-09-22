@@ -19,7 +19,7 @@ It coordinates disposable workers, validators, and serialized integration around
 
 ## Safety defaults
 
-Dry-run remains available through the advanced `run` command. Ordinary `start`/`next` stays supervised: it executes workers and validators but never integrates them. A user may explicitly add `--delegate` for one resolved issue selection or named workset; that creates a durable, revisioned authorization and permits only current in-scope passing results to integrate serially. Workers and validators never grant that authority themselves.
+Dry-run remains available through the advanced `run` command. Ordinary `start`/`next` stays supervised: it executes workers and validators but never integrates them. A user may explicitly add `--delegate` for one resolved issue selection or named workset; that creates a durable, revisioned authorization and permits only current in-scope passing results to integrate serially. Add `--continuous` to that explicit delegated start to create a durable autonomous session across dependency waves. Workers and validators never grant that authority themselves.
 
 ## Install the CLI locally
 
@@ -36,7 +36,7 @@ npm link
 
 Start with `maestro help`. It is the canonical interactive guide to Maestro's operating model and groups commands by workflow purpose. `maestro help <command>` and `maestro <command> --help` show the same command-specific guidance, including prerequisites, state changes, likely next actions, and examples. Help resolves before repository discovery, so it also works outside a configured checkout.
 
-Use `maestro help workflow` or [docs/workflows.md](docs/workflows.md) for the expanded supervised lifecycle, mixed outcomes, resume/retry behavior, conflict recovery, and the advanced `run --continuous` compatibility path.
+Use `maestro help workflow` or [docs/workflows.md](docs/workflows.md) for the expanded supervised lifecycle, autonomous issue/workset launch and resume, mixed outcomes, and conflict recovery.
 
 ## Everyday target-repository workflow
 
@@ -130,6 +130,18 @@ maestro start 101 102 --delegate --renew delegation-20260910010101-aaaaaa-deadbe
 ```
 
 Delegation binds repository checkout identity, target branch, exact scope/revision, policy version, capabilities, baseline policy, integration checks, invocation/available actor, and run lineage. `draft --write`, `draft --agent --write`, ordinary `start`, and `VERDICT: APPROVE` never create it. Revocation is serialized with the final authorization decision: once `maestro revoke` succeeds, an integration that has not entered its final merge/push boundary cannot proceed. It does not undo commits already integrated; renewal creates a new record after scope and policy are resolved again. Issue closure is authorized only when `integration.closeIssues` was explicitly configured. Deployment, force-push, follow-up admission, arbitrary GitHub mutations, and unrelated work are never implied.
+
+To delegate more than one dependency wave without hand-chaining commands, launch the same bounded scope continuously:
+
+```bash
+maestro start 101 102 --delegate --continuous
+maestro start --workset scheduling --delegate --continuous
+maestro resume 101
+maestro resume --workset scheduling
+maestro pause session-20260910010101-aaaaaa
+```
+
+The session record lives with Maestro evidence rather than in the editable manifest. It binds the exact repository/common-Git root, manifest path, target, scope revision, authorization and effective limits, then persists transition intent/results and run, correction, recovery, integration, and bookkeeping lineage. Resume refuses stale scope or policy and never guesses among multiple matching sessions. Pause and stop take effect at a lifecycle checkpoint after an active child settles; neither pretends to cancel a child that can still write. Quiescent output lists unresolved work and exact next actions. An empty scheduler wave is not reported as verified epic acceptance.
 
 Repository configuration, worksets, and execution sessions have distinct jobs. `.maestro.json` contains one repository-wide `work` graph and execution configuration; `worksets.<name>` only records a repository-qualified epic or explicit issue source plus explicit-refresh policy. It does not copy issue lifecycle or grant permission to execute. A successful scoped `--write` stores the resolved, revisioned membership snapshot outside the editable manifest with other Maestro evidence. `start`/`next --workset` is the explicit authorization event: Maestro resolves the source again, refuses scope or requirement drift, and records the authorized membership in that run.
 
@@ -255,7 +267,7 @@ maestro run examples/nexus-scheduling.json --repo-path ../Nexus --execute
 maestro run examples/nexus-scheduling.json --repo-path ../Nexus --integrate
 
 # Repeat waves until blocked/complete/human-gated
-maestro run examples/nexus-scheduling.json --repo-path ../Nexus --continuous
+maestro start examples/nexus-scheduling.json --workset scheduling --repo-path ../Nexus --delegate --continuous
 
 # Existing persisted-run controls remain available
 maestro report --repo-path ../Nexus --copy

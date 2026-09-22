@@ -138,6 +138,21 @@ maestro start 57 63 --delegate --preview
 maestro start --workset release --delegate --auto-rework
 ```
 
+For autonomous progression, add `--continuous` to the same explicit launch rather than switching command systems:
+
+```bash
+maestro start 57 63 --delegate --continuous
+maestro start --workset release --delegate --continuous
+maestro resume 57
+maestro resume --workset release
+```
+
+The launch saves a versioned session outside the editable manifest, bound to the coordinated repository, exact manifest path, target branch, scope revision, authorization/policy digest, concurrency, correction budget, and owned run/recovery lineage. It checkpoints intent before and results after each reconciliation and lifecycle wave. A live PID plus an unguessable ownership token excludes another controller; a dead owner is retained as orphan history and may be reclaimed. Linked worktrees share this local coordination root. These locks do not coordinate unrelated clones, so integration still rechecks remote publication evidence and authorization at its serialized boundary.
+
+`maestro pause <session-id>` and `maestro stop <session-id>` record a request. An already-running child is allowed to settle, then no new mutable transition starts and ownership is released; the commands do not claim hard cancellation while a child may still write. Pause can resume. Stop is terminal and preserves evidence for audit. Resume normally selects an issue or workset; `--session` exists for explicit ambiguity resolution. Maestro never guesses the latest matching session, resets its budgets, or accepts repository, manifest, scope, policy, or authorization drift.
+
+At quiescence, output retains remaining issue ids, specific gate/retry/dependency reasons, supported next actions, integrated code, pending bookkeeping, and sibling progress. Empty scheduling output is not verified epic acceptance; the companion completion evaluator owns that boundary.
+
 The authorization is persisted separately from validator, human-review, override, and integration evidence. Explicit selections persist a canonical revision of their live GitHub issue facts; validation binds to it, and status plus the serialized integration boundary re-resolve it. Editing or closing a selected issue after validation makes the delegation ineligible until explicit renewal and fresh validation. Passing current siblings may integrate while a REWORK sibling remains recorded and non-integrable. A `HUMAN_GATE`, invalid validator, policy/scope drift, stale implementation SHA, changed rebase, missing checks, superseded run, or mismatched repository/session fails closed.
 
 Pause and renew explicitly with `maestro revoke <authorization-id>` and `maestro start 57 63 --delegate --renew <authorization-id>`. Revocation and the final delegated decision share the serialized integration boundary: after revocation reports success, pending work cannot merge, push, or close its issue. Renewal is a new authorization after current resolution, not reactivation of historical evidence. Ordinary `start`, `next`, `approve`, and `draft --agent --write` retain their supervised/planning meanings.
@@ -150,11 +165,11 @@ The run-ID-oriented commands exist for low-level control, history, and recovery.
 maestro run                            # dry-run only
 maestro run --execute                  # one worker/validator wave
 maestro run --integrate --delegate     # explicit delegated one-wave integration
-maestro run --continuous --delegate    # delegated compatibility loop
+maestro run --continuous --delegate    # prints migration guidance; does not launch
 maestro report --copy
 maestro integrate-run --run 20260910010101-aaaaaa
 ```
 
-`run --integrate` and `run --continuous` fail closed without `--delegate`; before each wave they reconcile persisted lifecycle state and apply the same GitHub/manifest drift check, persisted authorization, and integration guard as the ordinary delegated path. Changed, closed, awaiting-review, awaiting-rework, and otherwise superseded work cannot be revived through the compatibility runner. A `no-ready-work` stop reason is not proof of broader epic or repository completion. Prefer `start`, `status`, `approve`, `commit`, and `next` for ordinary supervised operation.
+`run --integrate` remains a one-wave compatibility command and fails closed without `--delegate`. The former `run --continuous` in-memory/per-wave authorization loop now fails with the exact `start … --delegate --continuous` migration command; it cannot silently enter an alternate lifecycle with weaker persistence. A `no-ready-work` stop reason is not proof of broader epic or repository completion. Prefer `start`, `status`, `approve`, `commit`, and `next` for ordinary supervised operation.
 
 `integrate-run` integrates a specifically selected reviewed run but, unlike `commit`, does not advance and commit `.maestro.json` completion. `review` is the low-level command for explicit historical and human-gate dispositions; use the everyday `approve`, `rework`, and `discard` commands when they cover the current state.

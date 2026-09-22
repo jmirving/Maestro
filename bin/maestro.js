@@ -40,6 +40,8 @@ const { reserveReadyWork, reserveExplicitWork, runLifecycleBackfill } = require(
 const { resolveConcurrency } = require("../src/concurrency");
 const { runConfigCommand } = require("../src/config-command");
 const { createDelegatedAuthorization, saveAuthorization, loadAuthorization, revokeAuthorization } = require("../src/authorization");
+const { createSession, resolveSession, driveSession, requestSessionState } = require("../src/autonomous-controller");
+const { loadSession, saveSession } = require("../src/session-store");
 const {
   resolveRepoPath,
   resolveManifestPath,
@@ -76,12 +78,12 @@ function issuePositionals(rest) {
   const issues = [];
   for (let index = start; index < rest.length; index += 1) {
     const value = rest[index];
-    if (["--repo-path", "--run", "--renew", "--workset", "-j", "--concurrency"].includes(value)) {
+    if (["--repo-path", "--run", "--renew", "--workset", "--session", "-j", "--concurrency"].includes(value)) {
       if (!rest[index + 1] || rest[index + 1].startsWith("--")) throw new Error(`${value} requires a value.`);
       index += 1;
       continue;
     }
-    if (["--override", "--delegate", "--preview", "--auto-rework", "--rerun", "--retry"].includes(value)) continue;
+    if (["--override", "--delegate", "--preview", "--auto-rework", "--rerun", "--retry", "--continuous"].includes(value)) continue;
     if (value.startsWith("--")) throw new Error(`Unknown review option: ${value}`);
     if (!/^[1-9]\d*$/.test(value)) throw new Error(`Invalid issue number: ${value}`);
     issues.push(value);
@@ -298,6 +300,156 @@ async function backfillAfterIntegration(config, repoPath, sourceState) {
   });
 }
 
+function unresolvedSessionWork(plan, authorizedIssueIds) {
+  const authorized = new Set(authorizedIssueIds.map(String));
+  const entries = [];
+  for (const item of plan.humanGates || []) {
+    if (authorized.has(String(item.id))) entries.push({ issue: String(item.id), reason: item.humanGate || "human gate", nextAction: `maestro details ${item.id}` });
+  }
+  for (const item of plan.blocked || []) {
+    if (authorized.has(String(item.id))) entries.push({ issue: String(item.id), reason: `blocked by ${(item.blockedBy || []).map((id) => `#${id}`).join(", ") || "dependency"}`, nextAction: "maestro status" });
+  }
+  for (const item of plan.deferred || []) {
+    if (!authorized.has(String(item.id))) continue;
+    entries.push({ issue: String(item.id), reason: item.lifecycle?.state || item.reason || "deferred lifecycle work", nextAction: `maestro details ${item.id}` });
+  }
+  return [...new Map(entries.map((entry) => [entry.issue, entry])).values()];
+}
+
+async function driveAutonomous({ config, repoPath, manifestPath, session }) {
+  const authorization = await loadAuthorization(repoPath, session.authorization.id);
+  const concurrency = resolveConcurrency({ override: session.settings.concurrency, savedDefault: config.defaultConcurrency });
+  const authorizedIssueIds = session.scope.issueIds.map(String);
+  let firstRunAvailable = !session.lineage.runIds.length;
+  const result = await driveSession({
+    config,
+    repoPath,
+    manifestPath,
+    session,
+    observe: async (currentSession) => {
+      const plan = await computeEffectivePlan(config, repoPath, { issueIds: authorizedIssueIds, concurrency });
+      const unresolved = unresolvedSessionWork(plan, authorizedIssueIds);
+      const states = await loadExecutionStates(repoPath);
+      const recordedBySession = new Set(currentSession.progress.integratedIssueIds.map(String));
+      const recoveryRunIds = states.filter((state) => {
+        if (state.authorization?.id !== authorization.id) return false;
+        const integrated = new Set((state.integration || []).map((entry) => String(entry.issue)));
+        const uncheckpointedIntegration = [...integrated].some((issue) => !recordedBySession.has(issue));
+        const pendingPublication = Object.values(state.publications || {}).some((entry) => entry.state !== "recorded");
+        const validationByIssue = new Map((state.validations || []).map((entry) => [String(entry.issue), entry]));
+        const pendingApproved = (state.workers || []).some((worker) => validationByIssue.get(String(worker.issue))?.verdict === "approve" && !integrated.has(String(worker.issue)));
+        return uncheckpointedIntegration || pendingPublication || pendingApproved || state.mode === "integration-correction";
+      }).map((state) => String(state.parentRunId || state.runId));
+      return {
+        readyIssueIds: plan.selected.map((item) => String(item.id)),
+        remainingIssueIds: [...new Set([...plan.selected.map((item) => String(item.id)), ...unresolved.map((entry) => entry.issue)])],
+        unresolved,
+        nextAction: unresolved.find((entry) => entry.nextAction)?.nextAction || "maestro status",
+        recoveryRunIds: [...new Set(recoveryRunIds)],
+        recoverable: recoveryRunIds.length > 0,
+        stopReason: unresolved.length ? "unresolved-work" : "no-ready-work",
+        // Issue #28 owns verified workset acceptance. Empty scheduler output is
+        // intentionally not promoted to verified completion here.
+        verifiedComplete: false
+      };
+    },
+    advance: async ({ observation }) => {
+      if (!observation.readyIssueIds.length && observation.recoveryRunIds?.length) {
+        const integratedIssueIds = [];
+        const recoveryRunIds = [];
+        for (const recoveryRunId of observation.recoveryRunIds) {
+          const recovered = await integrateExistingRun(config, { repoPath, manifestPath, runId: recoveryRunId });
+          integratedIssueIds.push(...(recovered.integration || []).map((entry) => String(entry.issue)));
+          if (recovered.integrationRecovery?.runId) recoveryRunIds.push(String(recovered.integrationRecovery.runId));
+        }
+        return {
+          kind: "integration-recovery",
+          runIds: observation.recoveryRunIds,
+          recoveryRunIds,
+          integratedIssueIds: [...new Set(integratedIssueIds)],
+          bookkeepingPendingIssueIds: [...new Set(integratedIssueIds)],
+          progressed: integratedIssueIds.length > 0 || recoveryRunIds.length > 0
+        };
+      }
+      const runId = firstRunAvailable ? authorization.runId : newRunId();
+      firstRunAvailable = false;
+      const reservation = await reserveReadyWork(config, {
+        repoPath,
+        runId,
+        mode: "autonomous",
+        authorizedIssueIds,
+        planOptions: { issueIds: authorizedIssueIds, concurrency },
+        extraState: {
+          authorization,
+          autonomousSessionId: session.id,
+          ...(runId !== authorization.runId ? { parentRunId: authorization.runId } : {})
+        }
+      });
+      if (!reservation.reserved) return { progressed: false, stopReason: reservation.capacity?.idle?.kind || reservation.reason || "capacity-unavailable" };
+      const execution = await executeAndIntegrate(config, {
+        repoPath,
+        manifestPath,
+        runId,
+        concurrency,
+        delegate: true,
+        authorization,
+        parentRunId: runId !== authorization.runId ? authorization.runId : null,
+        issueIds: authorizedIssueIds,
+        reservedState: reservation.state,
+        effectivePlanResolver: async () => reservation.plan,
+        allowPartialIntegration: true
+      });
+      const runIds = [runId];
+      const integratedIssueIds = (execution.integration || []).map((entry) => String(entry.issue));
+      const reworkIssues = (execution.validations || []).filter((entry) => entry.verdict === "rework").map((entry) => String(entry.issue));
+      const issueAttempts = {};
+      if (reworkIssues.length) {
+        const correction = await autoRework(config, {
+          repoPath,
+          issueIds: reworkIssues,
+          capacity: concurrency.value,
+          timeoutMs: authorization.limits.correction.deadlineMs,
+          reworkOptions: { reserveCapacity: true, concurrency }
+        });
+        for (const item of correction.issues) {
+          runIds.push(...(item.runs || []), item.finalRunId);
+          issueAttempts[item.issue] = (item.runs || []).length;
+          if (item.outcome === "approved") {
+            const integrated = await integrateExistingRun(config, { repoPath, manifestPath, runId: item.finalRunId });
+            integratedIssueIds.push(...(integrated.integration || []).map((entry) => String(entry.issue)));
+          }
+        }
+      }
+      return {
+        kind: "lifecycle-wave",
+        runIds: [...new Set(runIds)],
+        issueAttempts,
+        integratedIssueIds: [...new Set(integratedIssueIds)],
+        bookkeepingPendingIssueIds: [...new Set(integratedIssueIds)],
+        // A worker/validator/rework gate is durable lifecycle progress even
+        // when it is issue-local and integrates nothing. Reconciliation will
+        // continue independent authorized work before quiescing on the gate.
+        progressed: true
+      };
+    }
+  });
+
+  if (result.progress.bookkeepingPendingIssueIds.length || result.progress.integratedIssueIds.length) {
+    try {
+      const progress = persistManifestCompletion({ repoPath, manifestPath, issueIds: result.progress.integratedIssueIds });
+      const current = await loadSession(repoPath, result.id);
+      current.progress.bookkeepingPendingIssueIds = [];
+      current.checkpoints.push({ kind: "bookkeeping-result", at: new Date().toISOString(), changedIssueIds: progress.changed, committed: progress.committed });
+      await saveSession(repoPath, current);
+      return current;
+    } catch (error) {
+      error.message = `Autonomous code integration is durable, but manifest bookkeeping remains pending: ${error.message}`;
+      throw error;
+    }
+  }
+  return result;
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const help = resolveHelp(args);
@@ -313,6 +465,14 @@ async function main() {
     const repoPath = resolveRepoPath(option(args, "--repo-path"));
     const authorization = await revokeAuthorization(repoPath, invocation.positionals[0]);
     process.stdout.write(`${JSON.stringify({ authorizationId: authorization.id, status: authorization.status, revokedAt: authorization.revokedAt }, null, 2)}\n`);
+    return;
+  }
+
+  if (command === "pause" || command === "stop") {
+    const repoPath = resolveRepoPath(option(args, "--repo-path"));
+    const session = await loadSession(repoPath, invocation.positionals[0]);
+    const updated = await requestSessionState(repoPath, session, command);
+    process.stdout.write(`${JSON.stringify({ sessionId: updated.id, status: updated.status, stopReason: updated.stopReason || null, activeOwner: updated.owner?.pid || null }, null, 2)}\n`);
     return;
   }
 
@@ -568,12 +728,29 @@ async function main() {
     return;
   }
 
+  if (command === "resume") {
+    const issues = issuePositionals(rest);
+    if (issues.length > 1) throw new Error("maestro resume accepts at most one issue number.");
+    const selected = await resolveSession(repoPath, {
+      sessionId: option(args, "--session"),
+      workset: option(args, "--workset"),
+      issue: issues[0] || null
+    });
+    const result = await driveAutonomous({ config, repoPath, manifestPath, session: selected });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    if (result.status !== "complete") process.exitCode = 1;
+    return;
+  }
+
   if (command === "start" || command === "next") {
     const delegated = args.includes("--delegate");
     const delegatedIssues = command === "start" ? issuePositionals(rest) : [];
     if (delegatedIssues.length && !delegated) throw new Error("Explicit issue selection on maestro start requires --delegate; ordinary start remains supervised.");
     if (option(args, "--renew") && !delegated) throw new Error("--renew requires --delegate and a newly resolved scope.");
     if (args.includes("--preview") && !delegated) throw new Error("--preview requires --delegate.");
+    if (args.includes("--continuous") && (!delegated || command !== "start")) {
+      throw new Error("--continuous is available only with an explicit delegated start.");
+    }
     const worksetName = option(args, "--workset");
     if (delegated && !delegatedIssues.length && !worksetName) throw new Error("--delegate requires explicit issue numbers or --workset so authorization scope is bounded.");
     const scope = worksetName ? await resolveSavedWorkset(config, repoPath, worksetName, { refresh: true }) : null;
@@ -604,9 +781,9 @@ async function main() {
         limits: {
           concurrency: candidatePlan.concurrency,
           correction: {
-            enabled: args.includes("--auto-rework"),
-            retryLimit: args.includes("--auto-rework") ? DEFAULT_AUTO_REWORK_LIMIT : 0,
-            deadlineMs: args.includes("--auto-rework") ? DEFAULT_AUTO_REWORK_TIMEOUT_MS : 0
+            enabled: args.includes("--auto-rework") || args.includes("--continuous"),
+            retryLimit: args.includes("--auto-rework") || args.includes("--continuous") ? DEFAULT_AUTO_REWORK_LIMIT : 0,
+            deadlineMs: args.includes("--auto-rework") || args.includes("--continuous") ? DEFAULT_AUTO_REWORK_TIMEOUT_MS : 0
           }
         },
         renews: renewalId
@@ -616,6 +793,26 @@ async function main() {
         return;
       }
       await saveAuthorization(repoPath, delegatedAuthorization);
+    }
+    if (args.includes("--continuous")) {
+      const autonomousScope = scope
+        ? { type: "workset", workset: scope.name, issueIds: authorizedScopeIds.map(String), revision: scope.revision }
+        : { type: "issues", issueIds: authorizedScopeIds.map(String), revision: delegatedAuthorization.scope.revision };
+      const session = await createSession({
+        config,
+        repoPath,
+        manifestPath,
+        scope: autonomousScope,
+        authorization: delegatedAuthorization,
+        settings: {
+          concurrency: candidatePlan.concurrency,
+          correction: delegatedAuthorization.limits.correction
+        }
+      });
+      const result = await driveAutonomous({ config, repoPath, manifestPath, session });
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      if (result.status !== "complete") process.exitCode = 1;
+      return;
     }
     const authorizationState = {
       ...(authorization ? { scope: authorization } : {}),
@@ -1002,7 +1199,9 @@ async function main() {
   }
 
   let result;
-  if (args.includes("--continuous")) result = await continuousRun(config, { repoPath, manifestPath, concurrency, delegate: args.includes("--delegate") });
+  if (args.includes("--continuous")) {
+    throw new Error("maestro run --continuous has migrated to the durable scoped lifecycle. Use `maestro start <issue...> --delegate --continuous` or `maestro start --workset <name> --delegate --continuous`.");
+  }
   else if (args.includes("--integrate")) result = await executeAndIntegrate(config, { repoPath, manifestPath, concurrency, delegate: args.includes("--delegate") });
   else if (args.includes("--execute")) result = await executeRun(config, { repoPath, concurrency });
   else result = await dryRun(config, { repoPath, concurrency });

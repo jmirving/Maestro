@@ -58,6 +58,7 @@ async function executeRun(config, {
   stateSaver = saveRunState,
   scope = null,
   authorization = null,
+  parentRunId = null,
   reservedState = null,
   onIssueSettled = async () => {}
 } = {}) {
@@ -80,6 +81,7 @@ async function executeRun(config, {
     validations: [],
     reviews: {}
   };
+  if (parentRunId) result.parentRunId = parentRunId;
   if (scope) result.scope = scope;
   if (authorization) result.authorization = authorization;
   if (!reservedState || scope) await stateSaver(repoPath, runId, result);
@@ -191,47 +193,64 @@ async function executeAndIntegrate(config, options = {}) {
   }
   const runId = options.runId || newRunId();
   const plan = await (options.effectivePlanResolver || computeEffectivePlan)(config, options.repoPath, {
-    concurrency: options.concurrency
+    concurrency: options.concurrency,
+    ...(options.issueIds ? { issueIds: options.issueIds.map(String) } : {})
   });
   if (!plan.selected.length) {
     const result = await executeRun(config, { ...options, runId, plan });
     return { ...result, integration: [], stopped: "no-ready-work" };
   }
   const selectedIssueIds = plan.selected.map((item) => String(item.id));
-  const verifiedIssues = await (options.selectionVerifier || verifyExecutionSelection)(
-    config,
-    options.repoPath,
-    selectedIssueIds,
-    options.selectionVerificationOptions
-  );
-  const explicitScope = options.explicitScopeResolver
-    ? await options.explicitScopeResolver({ config, repoPath: options.repoPath, issueIds: selectedIssueIds })
-    : {
-        type: "issues",
-        issueIds: selectedIssueIds,
-        revision: explicitIssueRevision(config.repository, selectedIssueIds, verifiedIssues)
-      };
-  const authorization = createDelegatedAuthorization({
-    config,
-    repoPath: options.repoPath,
+  let authorization = options.authorization || null;
+  if (!authorization) {
+    const verifiedIssues = await (options.selectionVerifier || verifyExecutionSelection)(
+      config,
+      options.repoPath,
+      selectedIssueIds,
+      options.selectionVerificationOptions
+    );
+    const explicitScope = options.explicitScopeResolver
+      ? await options.explicitScopeResolver({ config, repoPath: options.repoPath, issueIds: selectedIssueIds })
+      : {
+          type: "issues",
+          issueIds: selectedIssueIds,
+          revision: explicitIssueRevision(config.repository, selectedIssueIds, verifiedIssues)
+        };
+    authorization = createDelegatedAuthorization({
+      config,
+      repoPath: options.repoPath,
+      runId,
+      issueIds: selectedIssueIds,
+      scope: { revision: explicitScope.revision },
+      limits: {
+        concurrency: plan.concurrency,
+        correction: { enabled: false, retryLimit: 0, deadlineMs: 0 }
+      }
+    });
+    await saveAuthorization(options.repoPath, authorization);
+  }
+  const result = await executeRun(config, {
+    ...options,
     runId,
-    issueIds: selectedIssueIds,
-    scope: { revision: explicitScope.revision },
-    limits: {
-      concurrency: plan.concurrency,
-      correction: { enabled: false, retryLimit: 0, deadlineMs: 0 }
-    }
+    plan,
+    scope: options.scope || null,
+    authorization,
+    parentRunId: options.parentRunId || null,
+    reservedState: options.reservedState ? { ...options.reservedState, authorization } : null
   });
-  await saveAuthorization(options.repoPath, authorization);
-  const result = await executeRun(config, { ...options, runId, plan, scope: options.scope || null, authorization, reservedState: options.reservedState ? { ...options.reservedState, authorization } : null });
   if (!options.reservedState) {
     result.authorization = authorization;
     await (options.stateSaver || saveRunState)(options.repoPath, runId, result);
   }
-  if (result.workers.some((worker) => worker.exitCode !== 0)) return { ...result, integration: [], stopped: "worker-failure" };
+  const workerFailure = result.workers.some((worker) => worker.exitCode !== 0);
+  if (workerFailure && options.allowPartialIntegration !== true) return { ...result, integration: [], stopped: "worker-failure" };
   const integrated = await integrateExistingRun(config, { repoPath: options.repoPath, manifestPath: options.manifestPath || null, runId });
   const blockedValidation = result.validations.find((entry) => entry.verdict !== "approve");
-  return { ...result, integration: integrated.integration || [], ...(blockedValidation ? { stopped: `validation-${blockedValidation.verdict}` } : {}) };
+  return {
+    ...result,
+    integration: integrated.integration || [],
+    ...(workerFailure ? { stopped: "worker-failure" } : blockedValidation ? { stopped: `validation-${blockedValidation.verdict}` } : {})
+  };
 }
 
 async function continuousRun(config, options = {}) {

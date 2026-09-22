@@ -81,7 +81,7 @@ const COMMANDS = [
     category: "Execution",
     summary: "Execute the current ready wave in isolated workers and fresh validators.",
     when: "Use after planning when status shows ready work and required capabilities are available.",
-    usages: ["maestro start [manifest.json] [issue ...|--workset <name>] [-j <count>] [--delegate [--renew <authorization-id>]] [--auto-rework]"],
+    usages: ["maestro start [manifest.json] [issue ...|--workset <name>] [-j <count>] [--delegate [--continuous] [--renew <authorization-id>]] [--auto-rework]"],
     positionals: "Optional manifest path. Issue numbers are accepted only with --delegate and create a bounded one-shot scope.",
     options: {
       "--repo-path": COMMON_REPO_OPTION,
@@ -90,17 +90,64 @@ const COMMANDS = [
       "--rerun": { description: "Intentionally bypass persisted lifecycle deferrals and retry manifest-ready work." },
       "--auto-rework": { description: "Automatically correct and revalidate REWORK results, up to three attempts within a 30-minute session." },
       "--delegate": { description: "Explicitly authorize this resolved scope/session to integrate passing current results without per-issue human review." },
+      "--continuous": { description: "Drive the delegated scope through durable dependency waves, correction, integration, and bookkeeping checkpoints." },
       "--preview": { description: "Resolve and print the exact delegated authorization without persisting it or starting work." },
       "--renew": { value: "<authorization-id>", description: "Create a new authorization after explicitly resolving scope and policy again; the prior record is retained." }
     },
     prerequisites: "Ready reconciled work, a clean usable repository, current GitHub issue facts, and every capability required by the selected items.",
     effects: "Atomically reserves repository worker slots, persists a run, creates isolated branches/worktrees, validates changed branches, and backfills authorized ready work. With --delegate, eligible passing results are integrated serially under a durable scoped authorization.",
-    cautions: "Without --delegate: Does not approve, integrate, push the default branch, or close issues. Delegation does not override human gates, validation failures, drift, checks, closure policy, or unrelated/live operations. --rerun cannot be combined with --workset.",
+    cautions: "Without --delegate: Does not approve, integrate, push the default branch, or close issues. --continuous requires --delegate plus explicit issues or --workset. Delegation does not override human gates, validation failures, drift, checks, closure policy, or unrelated/live operations. --rerun cannot be combined with --workset or --continuous.",
     next: ["maestro status", "maestro details <issue>", "maestro output"],
     examples: [["start"], ["start", "57", "63", "--delegate"]],
     positionalKind: "manifest-issues",
-    conflicts: [["--workset", "--rerun"]],
+    conflicts: [["--workset", "--rerun"], ["--continuous", "--rerun"]],
     exclusive: [["-j", "--concurrency"]]
+  },
+  {
+    name: "resume",
+    category: "Execution",
+    summary: "Resume a durable delegated session by issue, workset, or explicit session id.",
+    when: "Use after interruption or a recoverable autonomous stop; normal use should select the issue or workset, not reconstruct run ids.",
+    usages: ["maestro resume [manifest.json] [issue|--workset <name>|--session <session-id>]"],
+    positionals: "Optional manifest path and at most one issue number. A scope selector is required and ambiguous matches are reported rather than guessed.",
+    options: { "--repo-path": COMMON_REPO_OPTION, "--workset": { value: "<name>", description: "Select the active session for this named workset." }, "--session": { value: "<session-id>", description: "Select an exact session for exceptional or ambiguous recovery." } },
+    prerequisites: "A persisted non-terminal session whose repository, manifest, scope revision, authorization, and protected policy still match.",
+    effects: "Reclaims orphaned ownership, reconciles persisted evidence, and continues only pending authorized lifecycle and bookkeeping work.",
+    cautions: "Resume never resets attempt/runtime budgets or revives stale authorization. A quiescent stop is not verified epic acceptance.",
+    next: ["maestro status", "maestro details <issue>"],
+    examples: [["resume", "57"], ["resume", "--workset", "release"]],
+    positionalKind: "manifest-issues",
+    conflicts: [["--workset", "$issues"], ["--session", "$issues"], ["--workset", "--session"]]
+  },
+  {
+    name: "pause",
+    category: "Execution",
+    summary: "Request a durable autonomous session to pause at its next checkpoint.",
+    when: "Use to stop scheduling new work while preserving active work and all evidence for resume.",
+    usages: ["maestro pause <session-id> [--repo-path <path>]"],
+    positionals: "One exact session id.",
+    options: { "--repo-path": COMMON_REPO_OPTION },
+    prerequisites: "The session must exist in the coordinated repository.",
+    effects: "Records a pause request. An active child is allowed to finish before the controller releases ownership at a checkpoint.",
+    cautions: "Pause does not terminate a child process or revoke integration authorization.",
+    next: ["maestro resume --session <session-id>", "maestro status"],
+    examples: [["pause", "session-20260910010101-aaaaaa"]],
+    positionalKind: "session-id"
+  },
+  {
+    name: "stop",
+    category: "Execution",
+    summary: "Request a durable autonomous session to stop without discarding evidence.",
+    when: "Use when this delegation should not schedule further work.",
+    usages: ["maestro stop <session-id> [--repo-path <path>]"],
+    positionals: "One exact session id.",
+    options: { "--repo-path": COMMON_REPO_OPTION },
+    prerequisites: "The session must exist in the coordinated repository.",
+    effects: "Records a stop request and preserves authorization, runs, branches, attempts, and recovery evidence for audit.",
+    cautions: "An active child is allowed to finish to avoid claiming cancellation while it can still mutate files. Stop is terminal; intentionally rerun with a new authorization.",
+    next: ["maestro status", "maestro start <issue> --delegate --continuous"],
+    examples: [["stop", "session-20260910010101-aaaaaa"]],
+    positionalKind: "session-id"
   },
   {
     name: "next",
@@ -308,14 +355,14 @@ const COMMANDS = [
   {
     name: "run",
     category: "Advanced / debugging",
-    summary: "Use the explicit legacy runner for dry-run, execution, integration, or continuous modes.",
+    summary: "Use the explicit legacy runner for dry-run, execution, or one-wave integration diagnostics.",
     when: "Use for explicit low-level control or compatibility; prefer start/status/approve/commit/next for supervised work.",
     usages: ["maestro run [manifest.json] [-j <count>] [--execute|--integrate|--continuous] [--allow-failing-baseline]"],
     positionals: "Optional manifest path; defaults to .maestro.json in the target repository.",
     options: { "--repo-path": COMMON_REPO_OPTION, ...CONCURRENCY_OPTIONS, "--execute": { description: "Execute and validate one wave without integration." }, "--integrate": { description: "Execute, validate, and integrate one wave when manifest policy enables it." }, "--continuous": { description: "Repeat the execute-and-integrate loop until a stop condition." }, "--delegate": { description: "Explicitly grant a bounded delegated authorization for --integrate or --continuous." }, "--allow-failing-baseline": { description: "Explicitly continue despite a failing configured baseline." } },
     prerequisites: "Mode-specific capabilities and gates. Integration modes require repository authorization in the manifest.",
-    effects: "With no mode flag, prints a dry run. Other modes can create workers or integrate according to the explicit flag.",
-    cautions: "--integrate and --continuous fail closed without --delegate. Delegation remains scoped to each resolved wave and is not proof of epic completion.",
+    effects: "With no mode flag, prints a dry run. --execute and --integrate retain their explicit one-wave compatibility behavior.",
+    cautions: "--integrate fails closed without --delegate. --continuous now reports the exact migration to start --delegate --continuous instead of entering the former weaker in-memory lifecycle.",
     next: ["maestro report", "maestro status"],
     examples: [["run"], ["run", "--execute"]],
     positionalKind: "optional-manifest",
@@ -431,8 +478,12 @@ Boundaries
   "No ready work" can still mean blocked, human-gated, or bookkeeping-pending work.
 
 Advanced compatibility
-  maestro run --continuous is the existing explicit execute-and-integrate loop. It is
-  separate from the supervised persisted-review lifecycle; inspect its stop reason.
+  maestro start 57 63 --delegate --continuous creates one durable autonomous session.
+  maestro start --workset release --delegate --continuous uses the same lifecycle.
+  Resume by scope with maestro resume 57 or maestro resume --workset release.
+  Pause/stop preserve evidence and take effect at lifecycle checkpoints.
+  maestro run --continuous is a compatibility migration error with an exact replacement;
+  it no longer enters the former in-memory, per-wave authorization lifecycle.
 
 See docs/workflows.md for task-based walkthroughs and maestro help <command> for
 prerequisites, state changes, and examples.`
