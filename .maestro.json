@@ -510,7 +510,7 @@
       }
     },
     "23": {
-      "status": "ready",
+      "status": "complete",
       "priority": 140,
       "github": {
         "state": "OPEN",
