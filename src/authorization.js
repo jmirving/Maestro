@@ -2,8 +2,10 @@ const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { coordinatedRepoPath, reportRootForRepo } = require("./reporter");
+const { loadScopeSnapshot } = require("./scope-store");
+const { resolveWorksetScope, assertExecutableScope } = require("./worksets");
 
-const EXECUTION_POLICY_VERSION = "delegated-integration-v1";
+const EXECUTION_POLICY_VERSION = "delegated-integration-v2";
 const DEFAULT_ACTIONS = Object.freeze({
   implement: true,
   correct: true,
@@ -13,6 +15,7 @@ const DEFAULT_ACTIONS = Object.freeze({
   createFollowUp: false,
   admitFollowUp: false
 });
+const delegatedAssessments = new WeakSet();
 
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
@@ -24,7 +27,18 @@ function digest(value) {
   return crypto.createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
 }
 
-function issuePolicy(config, issueIds) {
+function normalizeLimits(limits = {}) {
+  return {
+    concurrency: Number(limits.concurrency),
+    correction: {
+      enabled: limits.correction?.enabled === true,
+      retryLimit: Number(limits.correction?.retryLimit || 0),
+      deadlineMs: Number(limits.correction?.deadlineMs || 0)
+    }
+  };
+}
+
+function issuePolicy(config, issueIds, limits = {}) {
   const ids = [...new Set(issueIds.map(String))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   return {
     version: EXECUTION_POLICY_VERSION,
@@ -39,6 +53,7 @@ function issuePolicy(config, issueIds) {
       postMergeCommands: config.integration?.postMergeCommands || [],
       closeIssues: config.integration?.closeIssues === true
     },
+    limits: normalizeLimits(limits),
     capabilities: ids.map((issue) => ({
       issue,
       requires: [...(config.work?.[issue]?.requires || [])].sort(),
@@ -62,9 +77,19 @@ function availableActor(env = process.env) {
   return actor ? { name: actor, source: env.GITHUB_ACTOR ? "GITHUB_ACTOR" : env.USER ? "USER" : "USERNAME" } : null;
 }
 
-function createDelegatedAuthorization({ config, repoPath, runId, issueIds, scope = null, invocation = process.argv, actor = availableActor(), now = new Date(), renews = null }) {
+function createDelegatedAuthorization({ config, repoPath, runId, issueIds, scope = null, limits = {}, invocation = process.argv, actor = availableActor(), now = new Date(), renews = null }) {
   if (!issueIds?.length) throw new Error("Delegated authorization requires at least one resolved issue.");
-  const policy = issuePolicy(config, issueIds);
+  const protectedLimits = normalizeLimits(limits);
+  if (!Number.isInteger(protectedLimits.concurrency) || protectedLimits.concurrency < 1) {
+    throw new Error("Delegated authorization requires a protected positive concurrency limit.");
+  }
+  if (protectedLimits.correction.enabled && (
+    !Number.isInteger(protectedLimits.correction.retryLimit) || protectedLimits.correction.retryLimit < 1 ||
+    !Number.isFinite(protectedLimits.correction.deadlineMs) || protectedLimits.correction.deadlineMs <= 0
+  )) {
+    throw new Error("Delegated automatic correction requires protected retry and deadline limits.");
+  }
+  const policy = issuePolicy(config, issueIds, protectedLimits);
   if (!policy.integration.enabled) throw new Error("Delegated integration requires integration.enabled=true in the repository manifest.");
   const resolvedScope = scopeMaterial(config, issueIds, scope);
   const repositoryRoot = coordinatedRepoPath(repoPath);
@@ -80,6 +105,7 @@ function createDelegatedAuthorization({ config, repoPath, runId, issueIds, scope
     runId: String(runId),
     lineageRootRunId: String(runId),
     scope: resolvedScope,
+    limits: protectedLimits,
     policyDigest: digest(policy),
     policy,
     allowedActions: { ...DEFAULT_ACTIONS, closeIssue: config.integration?.closeIssues === true },
@@ -154,7 +180,39 @@ function lineageIncludes(statesById, state, ancestorRunId) {
   return false;
 }
 
-function assessDelegatedAuthorization({ config, repoPath, state, issue, worker, validation, authorization, persistedAuthorization, statesById = null }) {
+async function assessCurrentScope({ config, repoPath, authorization, snapshotLoader = loadScopeSnapshot, scopeResolver = resolveWorksetScope }) {
+  const fail = (reason) => ({ current: false, reason });
+  if (!authorization?.scope) return fail("authorization scope is missing");
+  const authorizedIds = authorization.scope.issueIds?.map(String) || [];
+  if (authorization.scope.type !== "workset") {
+    const current = scopeMaterial(config, authorizedIds);
+    return current.revision === authorization.scope.revision
+      ? { current: true }
+      : fail("explicit issue scope or requirements changed; explicit renewal is required");
+  }
+
+  const name = authorization.scope.workset;
+  const definition = config.worksets?.[name];
+  if (!definition) return fail(`authorized workset '${name}' is no longer defined`);
+  let saved;
+  let live;
+  try {
+    saved = assertExecutableScope(await snapshotLoader(repoPath, name));
+    live = assertExecutableScope(await scopeResolver(name, definition, { repository: config.repository, repoPath }));
+  } catch (error) {
+    return fail(`workset scope cannot be revalidated: ${error.message}`);
+  }
+  const sameIds = (value) => digest((value || []).map(String).sort()) === digest([...authorizedIds].sort());
+  if (digest(saved.definition) !== digest(definition) || saved.revision !== authorization.scope.revision || !sameIds(saved.issueIds)) {
+    return fail("saved workset scope changed; explicit renewal is required");
+  }
+  if (live.revision !== authorization.scope.revision || !sameIds(live.issueIds)) {
+    return fail("current workset scope drifted; refresh the scope and explicitly renew authorization");
+  }
+  return { current: true, revision: live.revision };
+}
+
+function assessDelegatedAuthorization({ config, repoPath, state, issue, worker, validation, authorization, persistedAuthorization, statesById = null, scopeAssessment = null }) {
   const fail = (reason) => ({ eligible: false, reason });
   if (!authorization || authorization.kind !== "delegated") return fail("no delegated authorization is recorded");
   if (!persistedAuthorization || persistedAuthorization.id !== authorization.id) return fail("authorization provenance is missing");
@@ -164,8 +222,15 @@ function assessDelegatedAuthorization({ config, repoPath, state, issue, worker, 
   if (authorization.repository !== config.repository) return fail("repository identity changed");
   if (authorization.repositoryRoot !== coordinatedRepoPath(repoPath)) return fail("repository checkout/session identity changed");
   if (authorization.targetBranch !== (config.defaultBranch || "main")) return fail("target branch changed");
+  if (scopeAssessment && scopeAssessment.current !== true) return fail(scopeAssessment.reason || "authorized scope is stale");
   if (!authorization.scope?.issueIds?.map(String).includes(String(issue))) return fail("issue is outside the authorized scope");
-  if (authorization.policyDigest !== digest(issuePolicy(config, authorization.scope.issueIds))) return fail("protected execution policy, checks, capabilities, or baseline policy changed");
+  if (authorization.policyDigest !== digest(issuePolicy(config, authorization.scope.issueIds, authorization.limits))) return fail("protected execution policy, checks, capabilities, baseline policy, or operational limits changed");
+  if (state.plan?.concurrency !== authorization.limits?.concurrency) return fail("run concurrency differs from the authorized operational limit");
+  for (const attempt of Object.values(state.correction?.attempts || {})) {
+    if (attempt.automatic === true && attempt.retryLimit !== authorization.limits?.correction?.retryLimit) {
+      return fail("correction retry policy differs from the authorized operational limit");
+    }
+  }
   if (!authorization.allowedActions?.integrate || !authorization.allowedActions?.pushDefaultBranch) return fail("default-branch integration/push was not authorized");
   if (String(state.runId) !== authorization.runId && !lineageIncludes(statesById, state, authorization.lineageRootRunId)) return fail("run is outside the authorized session lineage");
   const requiredCapabilities = config.work?.[String(issue)]?.requires || [];
@@ -183,7 +248,13 @@ function assessDelegatedAuthorization({ config, repoPath, state, issue, worker, 
   if (!validation || validation.exitCode !== 0 || validation.verdict !== "approve") return fail("independent validation is missing, invalid, or not approving");
   const expectedEvidence = validationContext(config, worker, issue);
   if (digest(validation.evidence || null) !== digest(expectedEvidence)) return fail("validation evidence is stale or bound to a different implementation/policy context");
-  return { eligible: true, authorizationId: authorization.id, kind: "delegated", allowedActions: authorization.allowedActions };
+  const assessment = { eligible: true, authorizationId: authorization.id, kind: "delegated", allowedActions: authorization.allowedActions };
+  delegatedAssessments.add(assessment);
+  return assessment;
+}
+
+function isDelegatedAssessment(value) {
+  return Boolean(value && delegatedAssessments.has(value));
 }
 
 function policyForBaseline(config) {
@@ -198,6 +269,7 @@ module.exports = {
   DEFAULT_ACTIONS,
   digest,
   issuePolicy,
+  normalizeLimits,
   scopeMaterial,
   createDelegatedAuthorization,
   saveAuthorization,
@@ -205,5 +277,7 @@ module.exports = {
   revokeAuthorization,
   validationContext,
   bindValidation,
-  assessDelegatedAuthorization
+  assessCurrentScope,
+  assessDelegatedAuthorization,
+  isDelegatedAssessment
 };

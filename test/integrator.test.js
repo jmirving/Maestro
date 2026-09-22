@@ -258,6 +258,28 @@ test("integrates an audited validator override while excluding unreviewed REWORK
   assert.equal(calls.some((call) => call.args.includes("worker/8")), false);
 });
 
+test("approve-with-follow-up remains a valid supervised integration disposition", async () => {
+  const calls = [];
+  const runner = async (command, args, options) => {
+    calls.push({ command, args, cwd: options.cwd });
+    if (args[0] === "status") return { code: 0, stdout: "", stderr: "" };
+    if (args[0] === "rev-parse") return { code: 0, stdout: "worker-head\n", stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  const result = await integrateApproved({
+    config: { defaultBranch: "main", integration: { enabled: true, closeIssues: false } },
+    repoPath: "/target",
+    workers: [{ issue: "25", branch: "worker/25", worktreePath: "/worker/25", exitCode: 0 }],
+    validations: [{ issue: "25", verdict: "approve", exitCode: 0 }],
+    reviewAuthorizations: [{ issue: "25", review: { disposition: "approve-with-follow-up", recordedAt: "2026-09-21T00:00:00Z" } }],
+    runner
+  });
+  assert.deepEqual(result.map((entry) => entry.issue), ["25"]);
+  assert.equal(result[0].authorization.kind, "human-review");
+  assert.equal(calls.some((call) => call.args[0] === "merge"), true);
+  assert.equal(calls.some((call) => call.command === "gh" && call.args[1] === "close"), false);
+});
+
 test("integration refresh persists the shared conflict contract before aborting", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "maestro-integration-conflict-"));
   const originPath = path.join(root, "origin.git");

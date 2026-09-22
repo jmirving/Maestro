@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { proposeDraft } = require("../src/draft");
+const { loadRunState } = require("../src/run-store");
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: "utf8", ...options });
@@ -192,4 +193,73 @@ fs.writeFileSync(reportPath, "Result: complete\\n");
   }
   assert.equal(active, 0, events.join(", "));
   assert.equal(peak, 2, events.join(", "));
+});
+
+test("delegated backfill persists session lineage and integrates the authorized descendant", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-delegated-backfill-"));
+  const repoPath = path.join(root, "target");
+  const originPath = path.join(root, "origin.git");
+  const binPath = path.join(root, "bin");
+  await fs.mkdir(repoPath);
+  await fs.mkdir(binPath);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  run("git", ["init", "-q", "-b", "main"], { cwd: repoPath });
+  run("git", ["config", "user.name", "Test"], { cwd: repoPath });
+  run("git", ["config", "user.email", "test@example.com"], { cwd: repoPath });
+  await fs.writeFile(path.join(repoPath, "tracked.txt"), "base\n");
+  run("git", ["add", "tracked.txt"], { cwd: repoPath });
+  run("git", ["commit", "-qm", "base"], { cwd: repoPath });
+  run("git", ["clone", "-q", "--bare", repoPath, originPath]);
+  run("git", ["remote", "add", "origin", originPath], { cwd: repoPath });
+
+  const issues = [issue(1), issue(2)];
+  const manifest = proposeDraft({ repository: "owner/repo", issues }).manifest;
+  manifest.defaultBranch = "main";
+  manifest.defaultConcurrency = 1;
+  manifest.integration = { enabled: true, commands: [], postMergeCommands: [], closeIssues: false };
+  await fs.writeFile(path.join(repoPath, ".maestro.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+  await fs.writeFile(path.join(binPath, "gh"), `#!/usr/bin/env node
+const issues = JSON.parse(process.env.MAESTRO_TEST_ISSUES);
+const args = process.argv.slice(2);
+if (args[0] === "repo") process.stdout.write(JSON.stringify({nameWithOwner:"owner/repo"}));
+else if (args[0] === "issue" && args[1] === "view") process.stdout.write(JSON.stringify(issues.find((item) => String(item.number) === args[2])));
+else if (args[0] === "api") process.stdout.write(JSON.stringify({number:Number(args[1].split("/").at(-1)),state_reason:null}));
+else process.exit(2);
+`, { mode: 0o755 });
+  await fs.writeFile(path.join(binPath, "codex"), `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+const reportPath = args[args.indexOf("--output-last-message") + 1];
+if (args.includes("read-only")) {
+  fs.writeFileSync(reportPath, "VERDICT: APPROVE\\n");
+  process.exit(0);
+}
+const issue = path.basename(process.cwd()).match(/^(\\d+)-/)[1];
+if (issue === "2") {
+  fs.writeFileSync("issue-2.txt", "delegated backfill\\n");
+  spawnSync("git", ["add", "issue-2.txt"], {stdio:"inherit"});
+  spawnSync("git", ["commit", "-qm", "implement issue 2"], {stdio:"inherit"});
+}
+fs.writeFileSync(reportPath, "Result: complete\\n");
+`, { mode: 0o755 });
+
+  const cli = path.resolve(__dirname, "../bin/maestro.js");
+  const result = spawnSync(process.execPath, [cli, "start", "1", "2", "--delegate", "--repo-path", repoPath], {
+    cwd: repoPath,
+    env: { ...process.env, PATH: `${binPath}${path.delimiter}${process.env.PATH}`, MAESTRO_TEST_ISSUES: JSON.stringify(issues) },
+    encoding: "utf8"
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(result.stdout.split("\n\nIssue #", 1)[0]);
+  assert.equal(output.backfill.length, 1);
+  const backfillRunId = output.backfill[0].runId;
+  const backfill = await loadRunState(repoPath, backfillRunId);
+  assert.equal(backfill.parentRunId, output.runId);
+  assert.equal(backfill.authorization.id, output.delegatedAuthorization.id);
+  const integrated = output.delegatedIntegration.find((entry) => entry.runId === backfillRunId);
+  assert.deepEqual(integrated.integration.map((entry) => String(entry.issue)), ["2"], JSON.stringify(output.delegatedIntegration));
+  assert.equal(await fs.readFile(path.join(repoPath, "issue-2.txt"), "utf8"), "delegated backfill\n");
 });

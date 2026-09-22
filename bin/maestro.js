@@ -14,7 +14,9 @@ const {
   resolveIssueReworkSources,
   resolveReworkParentRunId,
   executeReworkRun,
-  autoRework
+  autoRework,
+  DEFAULT_AUTO_REWORK_LIMIT,
+  DEFAULT_AUTO_REWORK_TIMEOUT_MS
 } = require("../src/rework");
 const { resolveReconcileSource, executeReconcileRun } = require("../src/reconcile");
 const { latestRunId, loadRunState } = require("../src/run-store");
@@ -276,15 +278,21 @@ async function commitLatest({ config, repoPath, manifestPath, runId, closeIssues
 }
 
 async function backfillAfterIntegration(config, repoPath, sourceState) {
-  const authorizedIssueIds = sourceState.scope?.authorizedIssueIds?.map(String) || Object.keys(config.work || {});
+  const authorizedIssueIds = sourceState.authorization?.scope?.issueIds?.map(String) ||
+    sourceState.scope?.authorizedIssueIds?.map(String) || Object.keys(config.work || {});
   const scope = sourceState.scope || null;
+  const delegated = sourceState.authorization?.kind === "delegated" && sourceState.authorization.allowedActions?.implement === true;
+  const extraState = {
+    ...(scope ? { scope } : {}),
+    ...(delegated ? { authorization: sourceState.authorization, parentRunId: sourceState.runId } : {})
+  };
   return runLifecycleBackfill(config, {
     repoPath,
     authorizedIssueIds,
     planOptions: { issueIds: authorizedIssueIds },
     verifySelection: (issueIds) => verifyExecutionSelection(config, repoPath, issueIds),
     runIdFactory: newRunId,
-    extraState: scope ? { scope } : {},
+    extraState,
     executeReserved: ({ runId, reservation }) => executeRun(config, {
       repoPath,
       runId,
@@ -593,6 +601,14 @@ async function main() {
       delegatedAuthorization = createDelegatedAuthorization({
         config, repoPath, runId: requestedRunId, issueIds: authorizedScopeIds,
         scope: scope ? { workset: scope.name, revision: scope.revision } : null,
+        limits: {
+          concurrency: candidatePlan.concurrency,
+          correction: {
+            enabled: args.includes("--auto-rework"),
+            retryLimit: args.includes("--auto-rework") ? DEFAULT_AUTO_REWORK_LIMIT : 0,
+            deadlineMs: args.includes("--auto-rework") ? DEFAULT_AUTO_REWORK_TIMEOUT_MS : 0
+          }
+        },
         renews: renewalId
       });
       if (args.includes("--preview")) {
@@ -629,7 +645,7 @@ async function main() {
     const authorizedIssueIds = delegatedIssues.length ? delegatedIssues : scope?.issueIds?.map(String) || Object.keys(config.work || {});
     const lifecycleOutcomes = [];
     const automaticRework = args.includes("--auto-rework");
-    const automaticTimeoutMs = 30 * 60 * 1000;
+    const automaticTimeoutMs = DEFAULT_AUTO_REWORK_TIMEOUT_MS;
     const automaticDeadlineAt = Date.now() + automaticTimeoutMs;
     const resumableCorrections = automaticRework
       ? candidatePlan.deferred
@@ -669,7 +685,10 @@ async function main() {
                 isRecoverableValidatorRework(current.evidence)
               ),
               planOptions,
-              extraState: authorizationState
+              extraState: {
+                ...authorizationState,
+                ...(delegatedAuthorization ? { parentRunId: resolved.runId } : {})
+              }
             });
             return {
               ...correctionReservation,
@@ -692,7 +711,10 @@ async function main() {
         } : {}),
         verifySelection: (issueIds) => verifyExecutionSelection(config, repoPath, issueIds),
         runIdFactory: newRunId,
-        extraState: authorizationState,
+        extraState: {
+          ...authorizationState,
+          ...(delegatedAuthorization ? { parentRunId: requestedRunId } : {})
+        },
         executeReserved: ({ runId, reservation: backfillReservation }) => executeRun(config, {
           repoPath,
           runId,
@@ -729,7 +751,7 @@ async function main() {
       const corrections = lifecycleOutcomes.filter((entry) => entry?.mode === "auto-rework");
       automatic = {
         mode: "auto-rework",
-        retryLimit: corrections[0]?.retryLimit || 3,
+        retryLimit: corrections[0]?.retryLimit || DEFAULT_AUTO_REWORK_LIMIT,
         capacity: reservation.capacity?.limit ?? candidatePlan.concurrency,
         timeoutMs: automaticTimeoutMs,
         issues: corrections.flatMap((entry) => entry.issues || [])

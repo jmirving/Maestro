@@ -2,7 +2,7 @@ const path = require("node:path");
 const { runChecked, runShell } = require("./process");
 const { isValidValidatorOverride } = require("./reviews");
 const { inspectGitOperation, captureConflict, safelyAbortConflict, contentConflictError } = require("./git-conflict");
-const { digest, validationContext } = require("./authorization");
+const { digest, validationContext, isDelegatedAssessment } = require("./authorization");
 
 async function ensureClean(repoPath, runner = runChecked) {
   const status = (await runner("git", ["status", "--porcelain"], { cwd: repoPath })).stdout.trim();
@@ -187,7 +187,9 @@ async function integrateApproved({
     const humanApproved = validation?.verdict === "approve" &&
       ["approve", "approve-with-follow-up"].includes(authorization.review?.disposition);
     const overridden = isValidValidatorOverride(authorization.review, validation);
-    return humanApproved || overridden || authorization.delegated?.eligible === true;
+    return humanApproved || overridden || (
+      authorization.delegated?.eligible === true && isDelegatedAssessment(authorization.delegated)
+    );
   });
   const unauthorized = workers.filter((worker) => {
     const validation = validationByIssue.get(String(worker.issue));

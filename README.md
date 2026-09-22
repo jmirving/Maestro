@@ -119,7 +119,7 @@ maestro start --workset scheduling
 maestro next --workset scheduling
 ```
 
-To delegate a bounded selection without creating a workset, or delegate a saved workset:
+To delegate a bounded selection without creating a workset, or delegate a saved workset. The preview includes the exact repository/branch/scope revision, permitted actions, checks, baseline policy, concurrency, and automatic-correction retry/deadline limits that renewal protects:
 
 ```bash
 maestro start 101 102 --delegate

@@ -3,7 +3,7 @@ const { effectiveIssueStates } = require("./run-resolver");
 const { ensureFollowUp, isValidValidatorOverride } = require("./reviews");
 const { integrateApproved } = require("./integrator");
 const { captureBaseline } = require("./baseline");
-const { loadAuthorization, assessDelegatedAuthorization } = require("./authorization");
+const { loadAuthorization, assessCurrentScope, assessDelegatedAuthorization } = require("./authorization");
 
 function assessRunItems(state, { effectiveByIssue = null, delegatedByIssue = new Map() } = {}) {
   const validationByIssue = new Map((state.validations || []).map((entry) => [String(entry.issue), entry]));
@@ -156,13 +156,17 @@ async function integrateExistingRun(config, {
   runId,
   closeIssues = false,
   runner,
-  shellRunner
+  shellRunner,
+  scopeAssessmentOptions = {}
 }) {
   const state = await loadRunState(repoPath, runId);
   const states = await loadPersistedRunStates(repoPath);
   const effectiveByIssue = effectiveIssueStates(config, states);
   let persistedAuthorization = null;
   if (state.authorization?.id) persistedAuthorization = await loadAuthorization(repoPath, state.authorization.id);
+  const scopeAssessment = state.authorization?.kind === "delegated"
+    ? await assessCurrentScope({ config, repoPath, authorization: state.authorization, ...scopeAssessmentOptions })
+    : null;
   const statesById = new Map(states.map((entry) => [String(entry.runId), entry]));
   const delegatedByIssue = new Map((state.workers || []).map((worker) => {
     const issue = String(worker.issue);
@@ -171,7 +175,8 @@ async function integrateExistingRun(config, {
       config, repoPath, state, issue, worker, validation,
       authorization: state.authorization,
       persistedAuthorization,
-      statesById
+      statesById,
+      scopeAssessment
     })];
   }));
   const { integrable, rework, gated, failed, discarded, completed, superseded } = classifyRunItems(state, { effectiveByIssue, delegatedByIssue });
@@ -221,6 +226,14 @@ async function integrateExistingRun(config, {
   };
 
   state.integration = state.integration || [];
+  if (state.authorization?.kind === "delegated") {
+    const immediateScopeAssessment = await assessCurrentScope({
+      config, repoPath, authorization: state.authorization, ...scopeAssessmentOptions
+    });
+    if (immediateScopeAssessment.current !== true) {
+      throw new Error(`Delegated integration authorization is stale: ${immediateScopeAssessment.reason}`);
+    }
+  }
   const newlyIntegrated = await integrateApproved({
     config: integrationConfig,
     repoPath,

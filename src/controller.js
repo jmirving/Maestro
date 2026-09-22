@@ -125,6 +125,8 @@ async function executeRun(config, {
           const worker = result.workers.find((entry) => String(entry.issue) === issue);
           const validation = result.validations.find((entry) => String(entry.issue) === issue);
           await persistLifecycle([issue], (current) => {
+            current.baseline = result.baseline;
+            current.preflights = result.preflights;
             current.workers = upsertIssueEvidence(current.workers, worker);
             current.validations = upsertIssueEvidence(current.validations, validation);
             if (current.capacity?.issues) {
@@ -146,6 +148,8 @@ async function executeRun(config, {
     result.status = "awaiting-review";
     await persistLifecycle(plan.selected.map((item) => item.id), (current) => {
       current.status = "awaiting-review";
+      current.baseline = result.baseline;
+      current.preflights = result.preflights;
       current.workers = result.workers;
       current.validations = result.validations;
       if (current.capacity?.issues) current.capacity.issues = [];
@@ -165,6 +169,8 @@ async function executeRun(config, {
     await persistLifecycle(plan.selected.map((item) => item.id), (current) => {
       current.status = "failed";
       current.failure = error.message;
+      current.baseline = result.baseline;
+      current.preflights = result.preflights;
       current.workers = result.workers;
       current.validations = result.validations;
       if (current.capacity?.issues) current.capacity.issues = [];
@@ -185,7 +191,11 @@ async function executeAndIntegrate(config, options = {}) {
     config,
     repoPath: options.repoPath,
     runId,
-    issueIds: plan.selected.map((item) => String(item.id))
+    issueIds: plan.selected.map((item) => String(item.id)),
+    limits: {
+      concurrency: plan.concurrency,
+      correction: { enabled: false, retryLimit: 0, deadlineMs: 0 }
+    }
   });
   await saveAuthorization(options.repoPath, authorization);
   const result = await executeRun(config, { ...options, runId, plan, scope: options.scope || null, reservedState: options.reservedState ? { ...options.reservedState, authorization } : null });
