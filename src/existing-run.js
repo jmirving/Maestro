@@ -7,6 +7,35 @@ const { digest, loadAuthorization, assessCurrentScope, assessDelegatedAuthorizat
 const { executeIntegrationCorrection } = require("./integration-correction");
 const { runChecked } = require("./process");
 
+async function reconcileClosures(config, state, { repoPath, runId, runner, stateSaver = saveRunState } = {}) {
+  state.closures = state.closures || {};
+  for (const integrated of state.integration || []) {
+    const issue = String(integrated.issue);
+    if (integrated.closureRequired === true && !state.closures[issue]) {
+      state.closures[issue] = {
+        version: 1,
+        issue,
+        repository: config.repository,
+        integratedSha: integrated.integratedSha,
+        state: "pending",
+        recoveredFromIntegration: true,
+        preparedAt: new Date().toISOString()
+      };
+      await stateSaver(repoPath, runId, state);
+    }
+  }
+  for (const closure of Object.values(state.closures || {})) {
+    if (closure.state === "confirmed") continue;
+    const issue = String(closure.issue);
+    const observed = await runner("gh", ["issue", "view", issue, "--repo", config.repository, "--json", "state", "--jq", ".state"], { cwd: repoPath });
+    if (observed.stdout.trim().toUpperCase() !== "CLOSED") {
+      await runner("gh", ["issue", "close", issue, "--repo", config.repository, "--reason", "completed", "--comment", `Integrated by Maestro at ${closure.integratedSha}.`], { cwd: repoPath });
+    }
+    state.closures[issue] = { ...closure, state: "confirmed", confirmedAt: new Date().toISOString() };
+    await stateSaver(repoPath, runId, state);
+  }
+}
+
 function assessRunItems(state, { effectiveByIssue = null, delegatedByIssue = new Map() } = {}) {
   const validationByIssue = new Map((state.validations || []).map((entry) => [String(entry.issue), entry]));
   const integrable = [];
@@ -187,6 +216,7 @@ async function integrateExistingRun(config, {
         branch: checkpoint.workerBranch,
         integratedSha: checkpoint.candidateSha,
         validationResults: checkpoint.validationResults || [],
+        closureRequired: checkpoint.closureRequired === true,
         publicationReconciled: true
       });
       state.publications[issue] = {
@@ -232,6 +262,7 @@ async function integrateExistingRun(config, {
     error.reconciliation = reconciliation;
     throw error;
   }
+  await reconcileClosures(config, state, { repoPath, runId, runner: gitRunner });
   const states = await loadPersistedRunStates(repoPath);
   const activeCorrection = states.filter((candidate) =>
     candidate.mode === "integration-correction" &&
@@ -419,6 +450,11 @@ async function integrateExistingRun(config, {
       state.integration.push(integrated);
       state.lastIntegratedAt = new Date().toISOString();
       await saveRunState(repoPath, runId, state);
+    },
+    onClosureCheckpoint: async (closure) => {
+      state.closures = state.closures || {};
+      state.closures[String(closure.issue)] = closure;
+      await saveRunState(repoPath, runId, state);
     }
     });
   } catch (error) {
@@ -466,4 +502,4 @@ async function integrateExistingRun(config, {
   };
 }
 
-module.exports = { assessRunItems, classifyRunItems, integrateExistingRun };
+module.exports = { assessRunItems, classifyRunItems, reconcileClosures, integrateExistingRun };

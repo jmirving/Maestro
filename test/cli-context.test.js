@@ -9,7 +9,8 @@ const {
   resolveRepoPath,
   resolveManifestPath,
   markManifestComplete,
-  persistManifestCompletion
+  persistManifestCompletion,
+  persistManifestCompletionDurably
 } = require("../src/cli-context");
 const { latestRunId, saveRunState } = require("../src/run-store");
 
@@ -140,6 +141,52 @@ test("persistManifestCompletion retains user-authored fields in a tracked dirty 
   assert.deepEqual(result, { changed: ["13"], committed: true });
   assert.deepEqual(saved.work["13"], { status: "complete", priority: 25, notes: "user-authored" });
   assert.equal(git(repoPath, "status", "--porcelain"), "");
+});
+
+test("durable manifest publication resumes a local commit after interruption without creating another commit", async () => {
+  const repoPath = initPushableRepo();
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  fs.writeFileSync(manifestPath, `${JSON.stringify({ repository: "owner/repo", work: { "13": { status: "ready" } } }, null, 2)}\n`);
+  let checkpoint;
+  await assert.rejects(persistManifestCompletionDurably({
+    repoPath, manifestPath, issueIds: ["13"],
+    onCheckpoint: async (value) => {
+      checkpoint = value;
+      if (value.state === "committed") throw new Error("crash after commit");
+    }
+  }), /crash after commit/);
+  const candidate = git(repoPath, "rev-parse", "HEAD");
+  const recovered = await persistManifestCompletionDurably({ repoPath, manifestPath, issueIds: ["13"], checkpoint });
+  assert.equal(recovered.recovered, true);
+  assert.equal(git(repoPath, "rev-parse", "HEAD"), candidate);
+  assert.equal(git(repoPath, "rev-parse", "@{upstream}"), candidate);
+});
+
+test("durable manifest publication gates remote movement instead of clearing pending bookkeeping", async () => {
+  const repoPath = initPushableRepo();
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  fs.writeFileSync(manifestPath, `${JSON.stringify({ repository: "owner/repo", work: { "13": { status: "ready" } } }, null, 2)}\n`);
+  let checkpoint;
+  await assert.rejects(persistManifestCompletionDurably({
+    repoPath, manifestPath, issueIds: ["13"],
+    onCheckpoint: async (value) => {
+      checkpoint = value;
+      if (value.state === "committed") throw new Error("interrupt");
+    }
+  }), /interrupt/);
+  const remotePath = git(repoPath, "remote", "get-url", "origin");
+  const other = tempDir();
+  git(other, "clone", "-q", remotePath, ".");
+  git(other, "config", "user.name", "Other");
+  git(other, "config", "user.email", "other@example.test");
+  fs.writeFileSync(path.join(other, "remote.txt"), "moved\n");
+  git(other, "add", "remote.txt");
+  git(other, "commit", "-qm", "remote movement");
+  git(other, "push", "-q");
+  await assert.rejects(
+    persistManifestCompletionDurably({ repoPath, manifestPath, issueIds: ["13"], checkpoint }),
+    (error) => error.code === "MANIFEST_PUBLICATION_UNCERTAIN"
+  );
 });
 
 test("latestRunId resolves the newest persisted run", async () => {

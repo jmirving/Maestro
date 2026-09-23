@@ -74,7 +74,7 @@ if (args.includes("read-only")) {
 }
 const issue = path.basename(process.cwd()).match(/^(\\d+)-/)[1];
 fs.appendFileSync(process.env.MAESTRO_TEST_EVENTS, "start " + issue + "\\n");
-Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, issue === "2" ? 1200 : 75);
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, issue === "2" ? 4000 : 75);
 const filename = "issue-" + issue + ".txt";
 fs.writeFileSync(filename, "issue " + issue + "\\n");
 spawnSync("git", ["add", filename], { stdio: "inherit" });
@@ -155,7 +155,7 @@ if (args.includes("read-only")) {
 const correction = issue === "1" && fs.existsSync("issue-1.txt");
 const phase = correction ? "correction" : "original";
 fs.appendFileSync(process.env.MAESTRO_TEST_EVENTS, "start " + issue + " " + phase + "\\n");
-Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, issue === "2" ? 1400 : 75);
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, issue === "2" ? 4000 : 75);
 const filename = correction ? "issue-1-correction.txt" : "issue-" + issue + ".txt";
 fs.writeFileSync(filename, issue + " " + phase + "\\n");
 spawnSync("git", ["add", filename], { stdio: "inherit" });

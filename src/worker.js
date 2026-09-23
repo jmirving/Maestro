@@ -4,13 +4,16 @@ const { runProcess } = require("./process");
 const { currentHead } = require("./worktrees");
 
 function buildWorkerPrompt({ repository, item, correctionContext = null }) {
+  const resume = item.mode === "resume"
+    ? "\nThis is a continuation of an interrupted worker in the same retained branch and worktree. Inspect and preserve all existing commits and edits, finish only the pending implementation, and do not restart or discard prior progress.\n"
+    : "";
   const correction = correctionContext
     ? `\nThis is a validator-guided rework of an existing implementation from Maestro run ${correctionContext.sourceRunId}. Preserve correct prior work and address the validator findings directly; do not restart the issue from scratch unless the findings require it.\n\nPrevious worker report:\n---\n${correctionContext.priorWorkerReport || "(none)"}\n---\n\nValidator findings that MUST be corrected:\n---\n${correctionContext.validatorReport || "(none)"}\n---\n${correctionContext.humanDecision ? `\nHuman decision resolving the validator gate:\n---\n${correctionContext.humanDecision}\n---\n` : ""}\nAfter correcting them, rerun the focused and repository-required suites and explicitly report how each validator finding was resolved.\n`
     : "";
 
   return `Implement ${repository} issue #${item.id} in this isolated worker branch.\n\n` +
     `Mode: ${item.mode || "execute"}.\n` +
-    `Required capabilities: ${(item.requires || []).join(", ") || "none"}.\n` + correction + `\n` +
+    `Required capabilities: ${(item.requires || []).join(", ") || "none"}.\n` + resume + correction + `\n` +
     `Read the issue, comments, repository AGENTS.md/instructions, current docs/specs, relevant code and tests before editing. ` +
     `Treat repository product/domain truth as authoritative. Work systemically at the correct shared boundary.\n\n` +
     `Safety constraints:\n` +
@@ -24,7 +27,7 @@ function buildWorkerPrompt({ repository, item, correctionContext = null }) {
     `End with a section titled exactly \"### Human review\". Keep it concise and practical. State where a human should expect to see any visual/behavior change, which user/persona/state to use if relevant, and the highest-value place to check for catastrophic regression or unintended side effects. If no meaningful manual review exists, say so explicitly.`;
 }
 
-async function executeWorker({ repository, item, worktree, runId, correctionContext = null, codexCommand = "codex", runner = runProcess, timeoutMs = null }) {
+async function executeWorker({ repository, item, worktree, runId, correctionContext = null, codexCommand = "codex", runner = runProcess, timeoutMs = null, onProcessStart = null }) {
   const reportDir = path.join(path.dirname(worktree.worktreePath), ".maestro-reports");
   await fs.mkdir(reportDir, { recursive: true });
   const reportPath = path.join(reportDir, `worker-${item.id}-${runId}.md`);
@@ -35,7 +38,8 @@ async function executeWorker({ repository, item, worktree, runId, correctionCont
     input: `${prompt}\n`,
     stream: true,
     streamPrefix: `[#${item.id} worker] `,
-    timeoutMs
+    timeoutMs,
+    onSpawn: onProcessStart
   });
   console.error(`[Maestro] worker #${item.id} finished with exit ${result.code}`);
   let report = "";

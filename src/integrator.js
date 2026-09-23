@@ -296,6 +296,7 @@ async function integrateApproved({
   onConflict = null,
   onCheckFailure = null,
   onPublicationCheckpoint = null,
+  onClosureCheckpoint = null,
   revalidateDelegated = null,
   coordinate = withRepositoryCoordination
 }) {
@@ -486,6 +487,7 @@ async function integrateApproved({
           candidateSha: integratedSha,
           workerBranch: worker.branch,
           validationResults,
+          closureRequired: integration.closeIssues === true && (permission.review != null || permission.delegated?.allowedActions?.closeIssue === true),
           state: "prepared",
           preparedAt: new Date().toISOString()
         };
@@ -520,6 +522,7 @@ async function integrateApproved({
           branch: worker.branch,
           integratedSha,
           validationResults,
+          closureRequired: integration.closeIssues === true && (permission.review != null || permission.delegated?.allowedActions?.closeIssue === true),
           authorization: permission.delegated?.eligible
             ? { kind: "delegated", id: permission.delegated.authorizationId }
             : { kind: permission.review?.disposition === "approve-override" ? "human-override" : "human-review", recordedAt: permission.review?.recordedAt || null }
@@ -532,7 +535,19 @@ async function integrateApproved({
         }
         const closureAuthorized = permission.review != null || permission.delegated?.allowedActions?.closeIssue === true;
         if (integration.closeIssues === true && closureAuthorized) {
+          const closure = {
+            version: 1,
+            issue: String(worker.issue),
+            repository: config.repository,
+            integratedSha,
+            state: "pending",
+            preparedAt: new Date().toISOString()
+          };
+          if (onClosureCheckpoint) await onClosureCheckpoint(closure);
           await runner("gh", ["issue", "close", String(worker.issue), "--repo", config.repository, "--reason", "completed", "--comment", `Integrated by Maestro at ${integratedSha}.`], { cwd: repoPath });
+          if (onClosureCheckpoint) {
+            await onClosureCheckpoint({ ...closure, state: "confirmed", confirmedAt: new Date().toISOString() });
+          }
         }
         console.error(`[Maestro] integrated #${worker.issue} at ${integratedSha}`);
       });

@@ -52,7 +52,8 @@ async function validateWorker({
   timeoutMs = null,
   maxOutputBytes = MAX_VALIDATOR_OUTPUT_BYTES,
   maxCaptureBytes = maxOutputBytes,
-  maxReportBytes = maxOutputBytes
+  maxReportBytes = maxOutputBytes,
+  onProcessStart = null
 }) {
   const reportDir = path.join(path.dirname(worker.worktreePath), ".maestro-reports");
   await fs.mkdir(reportDir, { recursive: true });
@@ -64,7 +65,8 @@ async function validateWorker({
     stream: true,
     streamPrefix: `[#${worker.issue} validator] `,
     timeoutMs,
-    maxCaptureBytes
+    maxCaptureBytes,
+    onSpawn: onProcessStart
   });
   console.error(`[Maestro] validator #${worker.issue} finished with exit ${result.code}`);
   let report = "";

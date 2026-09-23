@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { integrateExistingRun, classifyRunItems } = require("../src/existing-run");
+const { integrateExistingRun, classifyRunItems, reconcileClosures } = require("../src/existing-run");
 const { saveRunState, loadRunState } = require("../src/run-store");
 
 test("classifyRunItems allows approved work to integrate while rejected work is marked for rework", () => {
@@ -134,6 +134,36 @@ test("classifyRunItems refuses override approval without matching validator prov
     validations: [{ issue: "7", verdict: "rework" }],
     reviews: { "7": { disposition: "approve-override" } }
   }), /no valid integration authority/);
+});
+
+test("pending closure reconciliation observes a successful close before retrying and persists confirmation", async () => {
+  const state = { closures: { "27": { issue: "27", integratedSha: "abc", state: "pending" } } };
+  const calls = [];
+  await reconcileClosures({ repository: "owner/repo" }, state, {
+    repoPath: "/target", runId: "run-closure",
+    runner: async (command, args) => {
+      calls.push([command, ...args]);
+      return { code: 0, stdout: "CLOSED\n", stderr: "" };
+    },
+    stateSaver: async () => {}
+  });
+  assert.equal(state.closures["27"].state, "confirmed");
+  assert.equal(calls.filter((entry) => entry[1] === "issue" && entry[2] === "close").length, 0);
+});
+
+test("closure reconciliation reconstructs intent from durable integration when checkpoint persistence was interrupted", async () => {
+  const state = { integration: [{ issue: "27", integratedSha: "abc", closureRequired: true }] };
+  const calls = [];
+  await reconcileClosures({ repository: "owner/repo" }, state, {
+    repoPath: "/target", runId: "run-closure",
+    runner: async (command, args) => {
+      calls.push([command, ...args]);
+      return { code: 0, stdout: args[1] === "view" ? "OPEN\n" : "", stderr: "" };
+    },
+    stateSaver: async () => {}
+  });
+  assert.equal(calls.some((entry) => entry[1] === "issue" && entry[2] === "close"), true);
+  assert.equal(state.closures["27"].state, "confirmed");
 });
 
 test("integration guard rejects the same manifest/run conflict shown by status before invoking adapters", async (t) => {

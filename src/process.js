@@ -26,6 +26,15 @@ function runProcess(command, args = [], options = {}) {
     let timedOut = false;
     let outputLimitExceeded = false;
     let settled = false;
+    if (typeof options.onSpawn === "function") {
+      Promise.resolve().then(() => options.onSpawn(child.pid)).catch((error) => {
+        if (!settled) {
+          settled = true;
+          child.kill("SIGKILL");
+          reject(error);
+        }
+      });
+    }
     const maxOutputBytes = options.maxOutputBytes == null ? Number.POSITIVE_INFINITY : options.maxOutputBytes;
     const maxCaptureBytes = options.maxCaptureBytes == null ? Number.POSITIVE_INFINITY : options.maxCaptureBytes;
     const captureLimit = Math.min(maxOutputBytes, maxCaptureBytes);

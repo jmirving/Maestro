@@ -110,13 +110,73 @@ async function executeRun(config, {
     const settled = await Promise.allSettled(plan.selected.map(async (item) => {
       const issue = String(item.id);
       try {
-        const worktree = await worktreeFactory({ repoPath, item, runId, defaultBranch: config.defaultBranch || "main" });
-        const worker = await workerExecutor({ repository: config.repository, item, worktree, runId });
-        result.workers.push(worker);
-        if (worker.exitCode === 0 && worker.headSha !== worker.baseSha) {
+        let worker = result.workers.find((entry) => String(entry.issue) === issue);
+        let validation = result.validations.find((entry) => String(entry.issue) === issue);
+        if (!worker) {
+          result.operations = result.operations || {};
+          if (!result.operations[issue]?.worktree) {
+            result.operations[issue] = { stage: "worktree", preparedAt: new Date().toISOString() };
+            await persistLifecycle([issue], (current) => {
+              current.operations = current.operations || {};
+              current.operations[issue] = result.operations[issue];
+              return current;
+            });
+          }
+          const worktree = result.operations[issue]?.worktree || await worktreeFactory({ repoPath, item, runId, defaultBranch: config.defaultBranch || "main" });
+          result.operations[issue] = { ...result.operations[issue], stage: "worker", worktree, startedAt: new Date().toISOString() };
+          await persistLifecycle([issue], (current) => {
+            current.operations = current.operations || {};
+            current.operations[issue] = result.operations[issue];
+            return current;
+          });
+          worker = await workerExecutor({
+            repository: config.repository,
+            item: { ...item, ...(result.operations[issue].resumedAt ? { mode: "resume" } : {}) },
+            worktree,
+            runId,
+            onProcessStart: async (processId) => {
+              result.operations[issue].processId = processId;
+              await persistLifecycle([issue], (current) => {
+                current.operations = current.operations || {};
+                current.operations[issue] = result.operations[issue];
+                return current;
+              });
+            }
+          });
+          result.workers.push(worker);
+          result.operations[issue] = { ...result.operations[issue], stage: "validation", workerHeadSha: worker.headSha, workerFinishedAt: new Date().toISOString() };
+          await persistLifecycle([issue], (current) => {
+            current.workers = upsertIssueEvidence(current.workers, worker);
+            current.operations = current.operations || {};
+            current.operations[issue] = result.operations[issue];
+            return current;
+          });
+        }
+        if (!validation && worker.exitCode === 0 && worker.headSha !== worker.baseSha) {
           console.error(`[Maestro] run ${runId}: validating changed branch for #${issue}`);
-          const validation = await validatorExecutor({ repository: config.repository, worker, baseline: result.baseline, runId });
-          result.validations.push(bindValidation(config, worker, validation, { scopeRevision: result.authorization?.scope?.revision }));
+          validation = bindValidation(config, worker, await validatorExecutor({
+            repository: config.repository,
+            worker,
+            baseline: result.baseline,
+            runId,
+            onProcessStart: async (processId) => {
+              result.operations[issue] = { ...(result.operations[issue] || {}), stage: "validation", processId };
+              await persistLifecycle([issue], (current) => {
+                current.operations = current.operations || {};
+                current.operations[issue] = result.operations[issue];
+                return current;
+              });
+            }
+          }), { scopeRevision: result.authorization?.scope?.revision });
+          result.validations.push(validation);
+          result.operations = result.operations || {};
+          result.operations[issue] = { ...(result.operations[issue] || {}), stage: "complete", validationFinishedAt: new Date().toISOString() };
+          await persistLifecycle([issue], (current) => {
+            current.validations = upsertIssueEvidence(current.validations, validation);
+            current.operations = current.operations || {};
+            current.operations[issue] = result.operations[issue];
+            return current;
+          });
         }
       } catch (error) {
         if (!result.workers.some((worker) => String(worker.issue) === issue)) {

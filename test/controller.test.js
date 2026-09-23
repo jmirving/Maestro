@@ -57,15 +57,15 @@ test("executeRun preflights once, creates isolated worktrees, runs workers, vali
   assert.deepEqual(validatorCalls, ["1", "2"]);
   assert.deepEqual(result.workers.map((entry) => entry.headSha), ["head-1", "head-2"]);
   assert.deepEqual(result.validations.map((entry) => entry.verdict), ["approve", "approve"]);
-  assert.equal(saved.length, 2);
+  assert.ok(saved.length >= 2);
   assert.equal(saved[0].runId, "run-1");
   assert.equal(saved[0].state.status, "running");
   assert.equal(saved[0].state.plan.concurrency, 2);
   assert.equal(saved[0].state.plan.concurrencySource, "this invocation");
   assert.equal(saved[0].state.plan.savedDefaultConcurrency, 2);
   assert.deepEqual(saved[0].state.workers, []);
-  assert.equal(saved[1].state.status, "awaiting-review");
-  assert.deepEqual(saved[1].state.reviews, {});
+  assert.equal(saved.at(-1).state.status, "awaiting-review");
+  assert.deepEqual(saved.at(-1).state.reviews, {});
 });
 
 test("executeRun persists a failed lifecycle that requires an explicit retry", async () => {
@@ -79,6 +79,55 @@ test("executeRun persists a failed lifecycle that requires an explicit retry", a
 
   assert.deepEqual(saved.map((entry) => entry.state.status), ["running", "failed"]);
   assert.match(saved[1].state.failure, /Required capability 'node' failed preflight/);
+});
+
+test("executeRun resumes an interrupted validation from persisted worker evidence without rerunning the worker", async () => {
+  let workerCalls = 0;
+  let validations = 0;
+  const state = {
+    runId: "resume-validation", mode: "autonomous", status: "running", repoPath: "/target",
+    plan: { selected: [{ id: "1", requires: [] }] }, baseline: { enabled: false }, preflights: [],
+    workers: [{ issue: "1", exitCode: 0, baseSha: "base", headSha: "head", branch: "b-1", worktreePath: "/wt/1" }],
+    validations: [], reviews: {}, capacity: { issues: ["1"] },
+    operations: { "1": { stage: "validation", worktree: { baseSha: "base", branch: "b-1", worktreePath: "/wt/1" } } }
+  };
+  const result = await executeRun({ repository: "example/repo", work: { "1": { status: "ready" } } }, {
+    repoPath: "/target", runId: state.runId, plan: state.plan, reservedState: state,
+    preflightRunner: async () => ({ code: 0, stdout: "", stderr: "" }),
+    baselineRunner: async () => ({ enabled: false }),
+    workerExecutor: async () => { workerCalls += 1; throw new Error("must not rerun worker"); },
+    validatorExecutor: async ({ worker }) => { validations += 1; return { issue: worker.issue, exitCode: 0, verdict: "approve" }; },
+    stateSaver: async () => {}
+  });
+  assert.equal(workerCalls, 0);
+  assert.equal(validations, 1);
+  assert.equal(result.validations[0].verdict, "approve");
+});
+
+test("executeRun continues an interrupted worker in its retained worktree without allocating a duplicate", async () => {
+  let factories = 0;
+  let mode;
+  const state = {
+    runId: "resume-worker", mode: "autonomous", status: "running", repoPath: "/target",
+    plan: { selected: [{ id: "1", requires: [] }] }, baseline: { enabled: false }, preflights: [],
+    workers: [], validations: [], reviews: {}, capacity: { issues: ["1"] },
+    operations: { "1": { stage: "worker", resumedAt: new Date().toISOString(), worktree: { baseSha: "base", branch: "b-1", worktreePath: "/wt/1" } } }
+  };
+  const result = await executeRun({ repository: "example/repo", work: { "1": { status: "ready" } } }, {
+    repoPath: "/target", runId: state.runId, plan: state.plan, reservedState: state,
+    preflightRunner: async () => ({ code: 0, stdout: "", stderr: "" }),
+    baselineRunner: async () => ({ enabled: false }),
+    worktreeFactory: async () => { factories += 1; throw new Error("must not allocate"); },
+    workerExecutor: async ({ item, worktree }) => {
+      mode = item.mode;
+      return { issue: "1", exitCode: 0, baseSha: worktree.baseSha, headSha: "head", branch: worktree.branch, worktreePath: worktree.worktreePath };
+    },
+    validatorExecutor: async () => ({ issue: "1", exitCode: 0, verdict: "approve" }),
+    stateSaver: async () => {}
+  });
+  assert.equal(factories, 0);
+  assert.equal(mode, "resume");
+  assert.equal(result.status, "awaiting-review");
 });
 
 test("executeRun releases each persisted issue reservation when its validator settles", async () => {
