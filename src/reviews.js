@@ -19,7 +19,7 @@ function isValidValidatorOverride(review, validation) {
     review.validatorOverride?.report === (validation.report ?? null);
 }
 
-function isValidHumanGateResolution(review, validation, dispositions = ["rework"]) {
+function isValidHumanGateResolution(review, validation, dispositions = ["approve", "approve-with-follow-up", "rework", "discard"]) {
   return dispositions.includes(review?.disposition) &&
     validation?.verdict === "human_gate" &&
     Boolean(review?.notes?.trim()) &&
@@ -52,15 +52,21 @@ async function recordReview({
       const known = current.workers?.some((worker) => String(worker.issue) === String(issue));
       if (!known) throw new Error(`Issue #${issue} is not part of run ${runId}.`);
       const validation = (current.validations || []).find((entry) => String(entry.issue) === String(issue));
-      const resolvesHumanGate = disposition === "rework" && validation?.verdict === "human_gate";
-      if (disposition === "rework" && !resolvesHumanGate) {
-        throw new Error(`The rework disposition resolves validator HUMAN_GATE only; issue #${issue} has validator ${validation?.verdict || "missing"} evidence.`);
+      if (current.reviews?.[String(issue)]) {
+        throw new Error(`Issue #${issue} already has a human decision in run ${runId}; it cannot be replaced with a contradictory disposition.`);
       }
+      const resolvesHumanGate = validation?.verdict === "human_gate" && ["approve", "approve-with-follow-up", "rework", "discard"].includes(disposition);
       if (resolvesHumanGate && !notes?.trim()) {
         throw new Error(`Resolving validator HUMAN_GATE for issue #${issue} requires --notes with the actual human decision and context.`);
       }
-      if (disposition === "discard" && validation?.verdict !== "rework") {
-        throw new Error(`Issue #${issue} is not validator-REWORK and cannot be discarded.`);
+      if (disposition === "rework" && validation?.verdict !== "human_gate") {
+        throw new Error(`The rework disposition resolves validator HUMAN_GATE only; validator REWORK issue #${issue} is directly reworkable.`);
+      }
+      if (["approve", "approve-with-follow-up"].includes(disposition) && !["approve", "human_gate"].includes(validation?.verdict)) {
+        throw new Error(`Issue #${issue} cannot be approved from validator ${validation?.verdict || "missing"} evidence.`);
+      }
+      if (disposition === "discard" && !["rework", "human_gate"].includes(validation?.verdict)) {
+        throw new Error(`Issue #${issue} is neither validator-REWORK nor validator-HUMAN_GATE and cannot be discarded.`);
       }
       if (disposition === "approve-override" && !isValidValidatorOverride({ disposition, validatorOverride }, validation)) {
         throw new Error(`Validator override provenance does not match issue #${issue} in run ${runId}.`);

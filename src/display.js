@@ -72,13 +72,15 @@ const external = effective?.completion?.source === "external";
     group = "attention";
     integrationState = "not eligible; conflict recovery and fresh evidence are required";
     action = conflict.continuationAction || `maestro details ${issue}`;
-  } else if (review?.disposition === "discard") {
+  } else if (review?.disposition === "discard" && (
+    validation?.verdict === "rework" || isValidHumanGateResolution(review, validation, ["discard"])
+  )) {
     state = discardedManifestState(issue, manifest, plan, selected);
     group = planEntry(plan.humanGates, issue) ? "attention" : planEntry(plan.blocked, issue) ? "blocked" : "ready";
     integrationState = "discarded; branch/worktree preserved and excluded from integration";
     action = selected ? "maestro start" : null;
-  } else if (review?.disposition === "rework-original") {
-    state = "human rework disposition recorded, excluded from integration";
+  } else if (review?.disposition === "rework-original" && ["rework", "human_gate"].includes(validation?.verdict)) {
+    state = "legacy rework disposition recorded, excluded from integration";
     group = "attention";
     integrationState = "excluded; will be reworked";
     action = `maestro rework ${issue}`;
@@ -106,7 +108,11 @@ const external = effective?.completion?.source === "external";
     state = `validator approved, not eligible under delegated policy: ${delegated.reason || "authorization evidence is invalid"}`;
     group = "attention";
     integrationState = "not eligible under delegated policy";
-  } else if (review && validation?.verdict === "approve") {
+  } else if (isValidHumanGateResolution(review, validation, ["approve", "approve-with-follow-up"])) {
+    state = "human gate resolved with acceptance, ready to integrate";
+    group = "ready-integrate";
+    integrationState = "eligible through recorded human gate resolution";
+  } else if (["approve", "approve-with-follow-up"].includes(review?.disposition) && validation?.verdict === "approve") {
     state = "human approved, ready to integrate";
     group = "ready-integrate";
     integrationState = "eligible when every item in its run has a human disposition";
@@ -120,13 +126,15 @@ const external = effective?.completion?.source === "external";
     integrationState = "not eligible until human approval";
     action = `maestro approve ${issue}`;
   } else if (validation?.verdict === "rework") {
-    state = "validator requested rework, awaiting human rework disposition";
+    state = "validator requested rework, awaiting correction";
     group = "attention";
     integrationState = "not eligible; correct, override, or discard it";
+    action = `maestro rework ${issue}`;
   } else if (validation?.verdict === "human_gate") {
-    state = "validator requested a human decision, awaiting human disposition";
+    state = "validator requested a human decision, awaiting explicit resolution context";
     group = "attention";
-    integrationState = "not eligible until human disposition";
+    integrationState = "not eligible until a human records the actual decision";
+    action = `maestro review --run ${evidence.runId} --issue ${issue} --disposition rework --notes decision-context`;
   } else if (resumableReworkSetup) {
     const stage = evidence.correction?.failureStage || evidence.runState?.failureStage || "setup";
     state = `correction attempt ${evidence.correction.number} stopped during ${stage} before its worker started; safe to resume`;

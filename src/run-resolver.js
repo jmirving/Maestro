@@ -30,12 +30,16 @@ function lifecycleState(state, { worker, validation, review, integration, select
   if (conflict && !["completed", "resolved", "manually-resolved"].includes(conflict.operationState)) return "technical-conflict";
   if (worker) return classifyRunIssue(state, worker).state;
   if (integration) return "integrated-pending-manifest";
-  if (review?.disposition === "discard") return "discarded";
+  if (review?.disposition === "discard" && (
+    validation?.verdict === "rework" || isValidHumanGateResolution(review, validation, ["discard"])
+  )) return "discarded";
   if (isValidValidatorOverride(review, validation)) return "awaiting-integration";
+  if (isValidHumanGateResolution(review, validation, ["approve", "approve-with-follow-up"])) return "awaiting-integration";
   if (isValidHumanGateResolution(review, validation, ["rework"])) return "awaiting-rework";
-  if (review?.disposition === "rework-original" || validation?.verdict === "rework") return "awaiting-rework";
-  if (review && validation?.verdict === "approve") return "awaiting-integration";
-  if (["approve", "human_gate"].includes(validation?.verdict)) return "awaiting-human-review";
+  if ((review?.disposition === "rework-original" && ["rework", "human_gate"].includes(validation?.verdict)) || validation?.verdict === "rework") return "awaiting-rework";
+  if (["approve", "approve-with-follow-up"].includes(review?.disposition) && validation?.verdict === "approve") return "awaiting-integration";
+  if (validation?.verdict === "approve") return "awaiting-human-review";
+  if (validation?.verdict === "human_gate") return "awaiting-human-decision";
   if (selected && state.status === "running") return state.mode === "rework" ? "rework-running" : "running";
   if (selected && state.status === "failed") return "failed-awaiting-retry";
   if (selected) return state.status || "selected";

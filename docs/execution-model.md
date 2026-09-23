@@ -61,8 +61,10 @@ Completed worker runs are persisted so human review can happen after execution w
 - `approve` — integrate the existing approved worker commit;
 - `approve-override` — explicitly integrate a validator-REWORK worker commit, retaining a snapshot of the overridden validator verdict, exit code, and report;
 - `discard` — exclude a validator-REWORK implementation from integration and return a still-ready manifest item to fresh-run eligibility;
-- `rework-original` — do not integrate; return the source issue to implementation;
+- `rework` — resolve a genuine validator HUMAN_GATE with recorded decision context and return the source issue to implementation;
 - `approve-with-follow-up` — integrate the source issue and create a linked follow-up issue from the review note.
+
+A validator `REWORK` is already a complete, non-integrable technical state and needs no human disposition. `maestro rework <issue>` launches its correction directly; doing nothing leaves it safely parked. Persisted `rework-original` records remain supported as legacy awaiting-rework evidence, but the CLI no longer creates them in the routine path. A validator `HUMAN_GATE` instead remains at `awaiting-human-decision` until `maestro review` records the actual decision and context with `--notes`; supported decisions route to rework, acceptance, discard, or acceptance with follow-up.
 
 Override and discard are issue-explicit actions: bulk plain approval cannot select them. Rework remains the primary recommendation. Discard does not mutate GitHub or the manifest and does not delete the isolated branch/worktree; persisted evidence stays auditable while the discarded run stops deferring new execution for that issue. Repeated planning after discard therefore deterministically selects the item according to the normal manifest dependency and concurrency rules.
 
@@ -99,7 +101,7 @@ Continuous execution pauses when:
 - the worker discovers a new long-lived product/domain decision;
 - validation rejects the change;
 - automatic validator correction reaches a human gate, fails, or exhausts its three-attempt budget;
-- required human review chooses `rework-original`;
+- a genuine human gate remains unresolved;
 - integration cannot safely rebase/merge;
 - a live or destructive mutation lacks explicit authorization;
 - configured retry limits are exhausted.

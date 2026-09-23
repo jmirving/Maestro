@@ -43,7 +43,23 @@ test("unreviewed validator rework remains recoverable", () => {
   }), true);
 });
 
-test("contextual human gate correction becomes recoverable", () => {
+test("unresolved human gate stays distinct and recommends contextual resolution", () => {
+  const state = {
+    runId: "20260917155803-6fcd79",
+    status: "awaiting-review",
+    workers: [{ issue: "19", exitCode: 0 }],
+    validations: [{ issue: "19", verdict: "human_gate" }],
+    reviews: {},
+    integration: []
+  };
+
+  assert.deepEqual(classifyRunIssue(state, state.workers[0]), {
+    state: "awaiting-human-decision",
+    action: "maestro review --run 20260917155803-6fcd79 --issue 19 --disposition rework --notes decision-context"
+  });
+});
+
+test("contextual human gate rework resolution becomes recoverable", () => {
   const validation = { issue: "19", verdict: "human_gate", exitCode: 0, report: "Choose a fallback" };
   const review = {
     disposition: "rework",

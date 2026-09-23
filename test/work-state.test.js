@@ -386,7 +386,7 @@ test("a HUMAN_GATE recommendation is an executable review resolution", async (t)
   const recommendation = plan.recommendations[0];
   assert.equal(
     recommendation,
-    `maestro review --run ${runId} --issue 14 --disposition rework-original`
+    `maestro review --run ${runId} --issue 14 --disposition rework --notes decision-context`
   );
 
   const cli = path.resolve(__dirname, "../bin/maestro.js");

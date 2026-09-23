@@ -4,7 +4,7 @@ const { recordReview } = require("./reviews");
 const { isRecoverableValidatorRework } = require("./run-lifecycle");
 
 function isDiscardable(evidence) {
-  return isRecoverableValidatorRework(evidence);
+  return isRecoverableValidatorRework(evidence) && evidence.verdict === "rework" && !evidence.review;
 }
 
 async function discardIssues({ repoPath, runId = null, requestedIssues = [], reviewRecorder = recordReview }) {
@@ -30,7 +30,7 @@ async function discardIssues({ repoPath, runId = null, requestedIssues = [], rev
     const details = refused.map((entry) => (
       `#${entry.issue} (${entry.evidence?.state || "unknown"}; validator=${entry.evidence?.verdict || "missing"}; run ${entry.runId})`
     )).join(", ");
-    throw new Error(`Cannot discard the current workflow state for ${details}. Only unreviewed validator-REWORK items can be discarded.`);
+    throw new Error(`Cannot discard the current workflow state for ${details}. Only current, undecided validator-REWORK items can be discarded.`);
   }
 
   const discarded = [];

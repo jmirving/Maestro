@@ -4,7 +4,8 @@ const { retryableValidationFailure } = require("./validator");
 function isRecoverableValidatorRework(evidence) {
   const reviewDisposition = evidence?.review?.disposition;
   const humanRequestedRework = reviewDisposition === "rework-original";
-  const validatorRequestedRework = evidence?.verdict === "rework" && !evidence?.review;
+  const validatorRequestedRework = evidence?.verdict === "rework" &&
+    (!evidence?.review || humanRequestedRework);
   const resolvedHumanGate = evidence?.verdict === "human_gate" &&
     isValidHumanGateResolution(evidence.review, evidence.validation, ["rework"]);
   return ["awaiting-rework", "rework-exhausted"].includes(evidence?.state) &&
@@ -66,10 +67,12 @@ function classifyRunIssue(state, worker) {
       action: "maestro status"
     };
   }
-  if (review?.disposition === "discard") {
+  if (review?.disposition === "discard" && (
+    validation?.verdict === "rework" || isValidHumanGateResolution(review, validation, ["discard"])
+  )) {
     return { state: "discarded", action: "maestro start" };
   }
-  if (review?.disposition === "rework-original") {
+  if (review?.disposition === "rework-original" && ["rework", "human_gate"].includes(validation?.verdict)) {
     return { state: "awaiting-rework", action: `maestro rework ${issue}` };
   }
   if (isValidHumanGateResolution(review, validation, ["rework"])) {
@@ -78,13 +81,16 @@ function classifyRunIssue(state, worker) {
   if (isValidValidatorOverride(review, validation)) {
     return { state: "awaiting-integration", action: `maestro commit --run ${state.runId}` };
   }
+  if (isValidHumanGateResolution(review, validation, ["approve", "approve-with-follow-up"])) {
+    return { state: "awaiting-integration", action: `maestro commit --run ${state.runId}` };
+  }
   if (state.autoRework?.[issue]?.status === "retry-exhausted") {
     return { state: "rework-exhausted", action: `maestro details ${issue}` };
   }
   if (["worker-failure", "validator-failure", "infrastructure-failure", "technical-conflict", "human-required", "timeout", "no-progress"].includes(state.autoRework?.[issue]?.status)) {
     return { state: "failed-awaiting-retry", action: `maestro details ${issue}` };
   }
-  if (review && validation?.verdict === "approve") {
+  if (["approve", "approve-with-follow-up"].includes(review?.disposition) && validation?.verdict === "approve") {
     return { state: "awaiting-integration", action: `maestro commit --run ${state.runId}` };
   }
   if (validation?.verdict === "rework") {
@@ -92,8 +98,8 @@ function classifyRunIssue(state, worker) {
   }
   if (validation?.verdict === "human_gate") {
     return {
-      state: "awaiting-human-review",
-      action: `maestro review --run ${state.runId} --issue ${issue} --disposition rework-original`
+      state: "awaiting-human-decision",
+      action: `maestro review --run ${state.runId} --issue ${issue} --disposition rework --notes decision-context`
     };
   }
   if (validation?.verdict === "approve") {

@@ -1,6 +1,6 @@
 const path = require("node:path");
 const { runChecked, runShell } = require("./process");
-const { isValidValidatorOverride } = require("./reviews");
+const { isValidValidatorOverride, isValidHumanGateResolution } = require("./reviews");
 const { inspectGitOperation, captureConflict, safelyAbortConflict, contentConflictError } = require("./git-conflict");
 const { digest, validationContext, isDelegatedAssessment } = require("./authorization");
 const { withRepositoryCoordination } = require("./repository-coordination");
@@ -312,7 +312,12 @@ async function integrateApproved({
     const humanApproved = validation?.verdict === "approve" &&
       ["approve", "approve-with-follow-up"].includes(authorization.review?.disposition);
     const overridden = isValidValidatorOverride(authorization.review, validation);
-    return humanApproved || overridden || (
+    const humanGateApproved = isValidHumanGateResolution(
+      authorization.review,
+      validation,
+      ["approve", "approve-with-follow-up"]
+    );
+    return humanApproved || overridden || humanGateApproved || (
       authorization.delegated?.eligible === true && isDelegatedAssessment(authorization.delegated)
     );
   });

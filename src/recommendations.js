@@ -85,18 +85,9 @@ function buildRecommendations(items, readiness, selected, {
   }
 
   for (const item of humanGates) {
-    const action = { command: reviewCommand(item, "rework-original") };
+    const action = { command: `${reviewCommand(item, "rework")} --notes decision-context` };
     (primary.length ? alternatives : primary).push(action);
     alternatives.push({ command: `maestro details ${item.issue}` });
-  }
-
-  for (const run of readiness) {
-    for (const missing of run.missing.filter((entry) => entry.kind === "human rework disposition")) {
-      const action = {
-        command: `maestro review --run ${run.runId} --issue ${missing.issue} --disposition rework-original`
-      };
-      (primary.length ? alternatives : primary).push(action);
-    }
   }
 
   for (const run of readiness.filter((entry) => entry.ready)) {

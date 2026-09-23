@@ -81,7 +81,9 @@ maestro approve 63
 maestro status
 ```
 
-Passing siblings remain approvable while rejected work moves through child rework runs. Integration remains fail-closed until every item in the run being committed has a valid disposition. Once status reports commit readiness, `maestro commit` integrates only eligible approved items; rework and discarded items stay out.
+Passing siblings remain approvable while rejected work moves through child rework runs. Integration remains fail-closed until every item in the run is safely classified and every item selected for integration has affirmative authority. Once status reports commit readiness, `maestro commit` integrates only eligible approved items; rework, gated, and discarded items stay out.
+
+Validator `REWORK` itself is a safe parked state: it needs no redundant review acknowledgment and does not block an independently approved sibling from integrating. Run `maestro rework <issue>` when capacity should be spent on correction, or leave it parked. Validator `HUMAN_GATE` similarly excludes only that implementation, but requires a real decision with context before it can move: for example, `maestro review --run <run-id> --issue <issue> --disposition rework --notes "use the owner-approved fallback"`. Use `approve`, `discard`, or `approve-with-follow-up` instead when that is the actual gate resolution; HUMAN_GATE decisions always require notes.
 
 Use `maestro approve 57 --override` only for an intentional, audited human override of a current validator-REWORK verdict. Use `maestro discard 57` to settle and preserve rejected evidence without integrating, completing the manifest item, deleting its worktree, or closing its GitHub issue.
 

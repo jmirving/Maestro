@@ -18,8 +18,7 @@ test("classifyRunItems allows approved work to integrate while rejected work is 
       { issue: "47", verdict: "rework" }
     ],
     reviews: {
-      "33": { disposition: "approve" },
-      "47": { disposition: "rework-original" }
+      "33": { disposition: "approve" }
     }
   };
 
@@ -28,13 +27,59 @@ test("classifyRunItems allows approved work to integrate while rejected work is 
   assert.deepEqual(result.rework.map((entry) => entry.issue), ["47"]);
 });
 
-test("classifyRunItems refuses non-approved work unless human review explicitly marks it for rework", () => {
+test("classifyRunItems refuses contradictory approval of validator-rejected work", () => {
   assert.throws(() => classifyRunItems({
     runId: "run-2",
     workers: [{ issue: "47", exitCode: 0 }],
     validations: [{ issue: "47", verdict: "rework" }],
     reviews: { "47": { disposition: "approve" } }
-  }), /not validator-approved/);
+  }), /no valid integration authority/);
+});
+
+test("classifyRunItems allows approved work to integrate while HUMAN_GATE stays unresolved", () => {
+  const result = classifyRunItems({
+    runId: "run-gate",
+    workers: [{ issue: "33" }, { issue: "47" }],
+    validations: [
+      { issue: "33", verdict: "approve" },
+      { issue: "47", verdict: "human_gate" }
+    ],
+    reviews: { "33": { disposition: "approve" } }
+  });
+
+  assert.deepEqual(result.integrable.map((entry) => entry.issue), ["33"]);
+  assert.deepEqual(result.gated.map((entry) => entry.issue), ["47"]);
+});
+
+test("classifyRunItems accepts only provenance-bound HUMAN_GATE acceptance", () => {
+  const validation = { issue: "47", verdict: "human_gate", exitCode: 0, report: "Owner decides" };
+  const result = classifyRunItems({
+    runId: "run-gate-approved",
+    workers: [{ issue: "47" }],
+    validations: [validation],
+    reviews: {
+      "47": {
+        disposition: "approve",
+        notes: "Owner accepted the documented risk",
+        humanGateResolution: { verdict: "human_gate", exitCode: 0, report: "Owner decides" }
+      }
+    }
+  });
+  assert.deepEqual(result.integrable.map((entry) => entry.issue), ["47"]);
+
+  const mismatched = {
+    runId: "run-gate-invalid",
+    workers: [{ issue: "47" }],
+    validations: [validation],
+    reviews: {
+      "47": {
+        disposition: "approve",
+        notes: "Owner accepted the documented risk",
+        humanGateResolution: { verdict: "human_gate", exitCode: 0, report: "different evidence" }
+      }
+    }
+  };
+  assert.throws(() => classifyRunItems(mismatched), /no valid integration authority/);
 });
 
 test("classifyRunItems integrates an audited override and excludes discarded work", () => {
@@ -65,7 +110,7 @@ test("classifyRunItems refuses override approval without matching validator prov
     workers: [{ issue: "7" }],
     validations: [{ issue: "7", verdict: "rework" }],
     reviews: { "7": { disposition: "approve-override" } }
-  }), /not validator-approved/);
+  }), /no valid integration authority/);
 });
 
 test("integration guard rejects the same manifest/run conflict shown by status before invoking adapters", async (t) => {

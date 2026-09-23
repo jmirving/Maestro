@@ -27,7 +27,8 @@ function assessRunItems(state, { effectiveByIssue = null, delegatedByIssue = new
     const validation = validationByIssue.get(issue);
     const review = state.reviews?.[issue];
     return (validation?.verdict === "approve" && !["rework-original", "discard"].includes(review?.disposition)) ||
-      isValidValidatorOverride(review, validation);
+      isValidValidatorOverride(review, validation) ||
+      isValidHumanGateResolution(review, validation, ["approve", "approve-with-follow-up"]);
   });
 
   for (const worker of state.workers || []) {
@@ -67,16 +68,16 @@ function assessRunItems(state, { effectiveByIssue = null, delegatedByIssue = new
     }
 
     if (!review) {
-      if (delegated?.eligible && isCurrent) {
-        integrable.push({ issue, worker, validation, review: null, delegated });
-        continue;
-      }
-      if (state.authorization?.kind === "delegated" && validation?.verdict === "rework") {
+      if (validation?.verdict === "rework") {
         rework.push({ issue, worker, validation, review: null, delegated: delegated || null });
         continue;
       }
-      if (state.authorization?.kind === "delegated" && validation?.verdict === "human_gate") {
+      if (validation?.verdict === "human_gate") {
         gated.push({ issue, worker, validation, review: null, delegated: delegated || null });
+        continue;
+      }
+      if (delegated?.eligible && isCurrent) {
+        integrable.push({ issue, worker, validation, review: null, delegated });
         continue;
       }
       if (state.authorization?.kind === "delegated") {
@@ -89,14 +90,14 @@ function assessRunItems(state, { effectiveByIssue = null, delegatedByIssue = new
           ? `valid delegated authorization (${delegated?.reason || "unknown authorization evidence"})`
           : validation?.verdict === "approve"
           ? "human approval"
-          : ["rework", "human_gate"].includes(validation?.verdict) ? "human rework disposition" : "validator result"
+          : "validator result"
       });
       problems.push({ issue, message: `Human review is missing for issue #${issue}. Record it before integration.` });
       continue;
     }
 
     if (review.disposition === "discard") {
-      if (validation?.verdict !== "rework") {
+      if (validation?.verdict !== "rework" && !isValidHumanGateResolution(review, validation, ["discard"])) {
         problems.push({
           issue,
           kind: "consistent validator/review state",
@@ -109,7 +110,7 @@ function assessRunItems(state, { effectiveByIssue = null, delegatedByIssue = new
     }
 
     if (review.disposition === "rework-original") {
-      if (validation?.verdict === "approve") {
+      if (!["rework", "human_gate"].includes(validation?.verdict)) {
         problems.push({
           issue,
           kind: "consistent validator/review state",
@@ -127,11 +128,12 @@ function assessRunItems(state, { effectiveByIssue = null, delegatedByIssue = new
     }
 
     const validOverride = isValidValidatorOverride(review, validation);
-    if ((!validation || validation.verdict !== "approve") && !validOverride) {
+    const validGateApproval = isValidHumanGateResolution(review, validation, ["approve", "approve-with-follow-up"]);
+    if ((!validation || validation.verdict !== "approve") && !validOverride && !validGateApproval) {
       problems.push({
         issue,
         kind: "consistent validator/review state",
-        message: `Run ${state.runId} issue #${issue} is not validator-approved. Use rework-original for rejected work before integrating the approved items.`
+        message: `Run ${state.runId} issue #${issue} has no valid integration authority for its validator state.`
       });
       continue;
     }

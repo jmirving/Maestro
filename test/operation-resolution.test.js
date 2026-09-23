@@ -246,7 +246,7 @@ test("issue-associated adoption fails closed at manifest and persisted human gat
     repoPath: lifecycleGate.root,
     issue: "7",
     resolver: async () => assert.fail("persisted human gate must block the resolver")
-  }), /current lifecycle ownership \(awaiting-human-review\)/);
+  }), /current lifecycle ownership \(awaiting-human-decision\)/);
 });
 
 test("eligible issue association is atomically admitted and reserved under that issue", async (t) => {

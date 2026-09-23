@@ -217,11 +217,12 @@ test("issue-oriented rework accepts a contextual HUMAN_GATE correction decision"
   const runId = "20260910030303-cccccc";
   await fs.mkdir(repoPath);
   t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const validation = { issue: "14", verdict: "human_gate", exitCode: 0, report: "Owner must choose" };
   await saveRunState(repoPath, runId, {
     runId,
     status: "awaiting-review",
     workers: [{ issue: "14", exitCode: 0 }],
-    validations: [{ issue: "14", verdict: "human_gate", exitCode: 0, report: "Owner must choose" }],
+    validations: [validation],
     reviews: {
       "14": {
         disposition: "rework",

@@ -5,7 +5,7 @@ const { currentHead } = require("./worktrees");
 
 function buildWorkerPrompt({ repository, item, correctionContext = null }) {
   const correction = correctionContext
-    ? `\nThis is a validator-guided rework of an existing implementation from Maestro run ${correctionContext.sourceRunId}. Preserve correct prior work and address the validator findings directly; do not restart the issue from scratch unless the findings require it.\n\nPrevious worker report:\n---\n${correctionContext.priorWorkerReport || "(none)"}\n---\n\nValidator findings that MUST be corrected:\n---\n${correctionContext.validatorReport || "(none)"}\n---\n\nAfter correcting them, rerun the focused and repository-required suites and explicitly report how each validator finding was resolved.\n`
+    ? `\nThis is a validator-guided rework of an existing implementation from Maestro run ${correctionContext.sourceRunId}. Preserve correct prior work and address the validator findings directly; do not restart the issue from scratch unless the findings require it.\n\nPrevious worker report:\n---\n${correctionContext.priorWorkerReport || "(none)"}\n---\n\nValidator findings that MUST be corrected:\n---\n${correctionContext.validatorReport || "(none)"}\n---\n${correctionContext.humanDecision ? `\nHuman decision resolving the validator gate:\n---\n${correctionContext.humanDecision}\n---\n` : ""}\nAfter correcting them, rerun the focused and repository-required suites and explicitly report how each validator finding was resolved.\n`
     : "";
 
   return `Implement ${repository} issue #${item.id} in this isolated worker branch.\n\n` +

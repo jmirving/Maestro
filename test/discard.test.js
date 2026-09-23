@@ -145,7 +145,7 @@ test("discard CLI is explicit, refuses non-REWORK work, and leaves the manifest 
     cli, "discard", manifestPath, "7", "--repo-path", repoPath
   ], { encoding: "utf8" });
   assert.equal(refused.status, 1);
-  assert.match(refused.stderr, /Only unreviewed validator-REWORK items can be discarded/);
+  assert.match(refused.stderr, /Only current, undecided validator-REWORK items can be discarded/);
   assert.equal(await fs.readFile(manifestPath, "utf8"), before);
   assert.deepEqual((await loadRunState(repoPath, runId)).reviews, {});
 });

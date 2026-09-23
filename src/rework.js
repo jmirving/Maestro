@@ -1126,7 +1126,7 @@ async function autoRework(config, {
         action: outcome.action || (["approved"].includes(outcome.status)
           ? `maestro approve ${issue}`
           : outcome.status === "human-gate"
-            ? `maestro review --run ${runId} --issue ${issue} --disposition rework-original`
+            ? `maestro review --run ${runId} --issue ${issue} --disposition rework --notes decision-context`
             : `maestro details ${issue}`)
       };
       await stateSaver(repoPath, runId, state);

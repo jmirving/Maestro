@@ -7,7 +7,7 @@ function approvalReason(evidence) {
   if (isRecoverableValidatorRework(evidence)) return "rework-required";
   if (evidence.state === "awaiting-integration") return "already-reviewed";
   if (evidence.state === "integrated-pending-manifest") return "already-integrated";
-  if (evidence.state === "awaiting-human-review" && evidence.verdict === "human_gate") return "human-decision-required";
+  if (evidence.state === "awaiting-human-decision") return "human-decision-required";
   if (evidence.state === "running" || evidence.state === "rework-running") return evidence.state;
   if (evidence.state === "failed-awaiting-retry") return "retry-required";
   return evidence.verdict === "approve" ? "not-unreviewed" : `not-validator-approved:${evidence.verdict || "missing"}`;
@@ -18,7 +18,7 @@ function isNormallyApprovable(evidence) {
 }
 
 function isOverrideApprovable(evidence) {
-  return isRecoverableValidatorRework(evidence);
+  return isRecoverableValidatorRework(evidence) && evidence.verdict === "rework" && !evidence.review;
 }
 
 function summarizeEntry(resolved) {

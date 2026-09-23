@@ -37,7 +37,7 @@ const config = {
   }
 };
 
-test("mixed status separates validator results from missing human dispositions", async () => {
+test("mixed status parks validator rework without blocking passing siblings", async () => {
   const snapshot = await statusSnapshot(config, "/unused", [], { stateLoader: async () => [mixedRun()] });
   const text = formatStatus(snapshot);
 
@@ -46,10 +46,10 @@ test("mixed status separates validator results from missing human dispositions",
   assert.match(text, /Blocked \(1\)[\s\S]*#13 - blocked, waiting on #2/);
   assert.match(text, /Complete: 1 \(history collapsed; use maestro status --completed\)/);
   assert.doesNotMatch(text, /#12 .*integrated\/complete/);
-  assert.match(text, /Commit: not ready — #2 needs human approval; #7 needs human rework disposition/);
+  assert.match(text, /Commit: not ready — #2 needs human approval/);
   assert.match(text, /Recommended: `maestro rework 7`/);
   assert.match(text, /Also available: `maestro details 7`, `maestro approve 7 --override`, `maestro discard 7`, `maestro approve 2`/);
-  assert.match(text, /`maestro review --run 20260910010101-aaaaaa --issue 7 --disposition rework-original`/);
+  assert.doesNotMatch(text, /rework-original/);
   assert.doesNotMatch(text, /Issue #2 .*— approved$/m);
 });
 
@@ -92,20 +92,19 @@ test("reviewed mixed status shows exactly what commit integrates and skips", asy
   const text = formatStatus(snapshot);
 
   assert.match(text, /Ready to integrate \(1\)[\s\S]*#2 Passing change - human approved, ready to integrate/);
-  assert.match(text, /Needs attention \(1\)[\s\S]*#7 Needs correction - human rework disposition recorded/);
+  assert.match(text, /Needs attention \(1\)[\s\S]*#7 Needs correction - legacy rework disposition recorded/);
   assert.match(text, /Commit: ready — integrates #2; skips #7 for rework/);
   assert.match(text, /Recommended: `maestro commit`/);
   assert.match(text, /Also available: `maestro rework 7`/);
 });
 
-test("reviewed work is not labeled ready to integrate while its run still needs a disposition", async () => {
+test("approved work is ready while an unreviewed REWORK sibling stays parked", async () => {
   const run = mixedRun();
   run.reviews["2"] = { disposition: "approve" };
   const text = formatStatus(await statusSnapshot(config, "/unused", [], { stateLoader: async () => [run] }));
 
-  assert.match(text, /Awaiting integration readiness \(1\)[\s\S]*#2 Passing change - human approved, awaiting other run dispositions/);
-  assert.doesNotMatch(text, /Ready to integrate \(1\)/);
-  assert.match(text, /Commit: not ready/);
+  assert.match(text, /Ready to integrate \(1\)[\s\S]*#2 Passing change - human approved, ready to integrate/);
+  assert.match(text, /Commit: ready — integrates #2; skips #7 for rework/);
 });
 
 test("resolved HUMAN_GATE correction remains available beside an approved sibling", async () => {
@@ -133,7 +132,7 @@ test("focused issue status includes commit, validator, human review, integration
   const snapshot = await statusSnapshot(config, "/unused", ["7"], { stateLoader: async () => [mixedRun()] });
   const text = formatStatus(snapshot);
 
-  assert.match(text, /Issue #7 — Needs correction — validator requested rework, awaiting human rework disposition/);
+  assert.match(text, /Issue #7 — Needs correction — validator requested rework, awaiting correction/);
   assert.match(text, /Worker commit: rework-commit/);
   assert.match(text, /Validator: rework/);
   assert.match(text, /Human review: none/);
@@ -141,8 +140,8 @@ test("focused issue status includes commit, validator, human review, integration
   assert.doesNotMatch(text, /Issue #2 —/);
   assert.match(text, /Recommended: `maestro rework 7`/);
   assert.match(text, /Also available: `maestro details 7`, `maestro approve 7 --override`, `maestro discard 7`/);
-  assert.match(text, /`maestro review --run 20260910010101-aaaaaa --issue 7 --disposition rework-original`/);
-  assert.match(text, /Commit: not ready — #2 needs human approval; #7 needs human rework disposition/);
+  assert.doesNotMatch(text, /rework-original/);
+  assert.match(text, /Commit: not ready — #2 needs human approval/);
 });
 
 test("status CLI accepts issue positionals and resolves the latest relevant run", async (t) => {
@@ -278,7 +277,7 @@ test("focused status rejects issues absent from both manifest and persisted work
   );
 });
 
-test("a child run does not hide the source disposition still required for sibling integration", async () => {
+test("a rejected child does not block approved source-run sibling integration", async () => {
   const source = mixedRun({ reviewed: false });
   source.reviews["2"] = { disposition: "approve" };
   const child = {
@@ -297,8 +296,8 @@ test("a child run does not hide the source disposition still required for siblin
     stateLoader: async () => [source, child]
   }));
 
-  assert.match(text, /Commit: not ready — #7 needs human rework disposition/);
-  assert.match(text, /maestro review --run 20260910010101-aaaaaa --issue 7 --disposition rework-original/);
+  assert.match(text, /Commit: ready — integrates #2; skips #7 for rework/);
+  assert.doesNotMatch(text, /rework-original/);
 });
 
 test("manifest completion without integration evidence is a reconciliation conflict, never a stale commit or review action", async () => {
