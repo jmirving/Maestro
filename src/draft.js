@@ -108,17 +108,8 @@ function closureOutcome(stateReason) {
 
 function hasCurrentLifecycle(entry) {
   if (!entry?.state?.status) return false;
-  return new Set([
-    "running",
-    "rework-running",
-    "awaiting-validation-or-review",
-    "awaiting-review",
-    "awaiting-human-review",
-    "awaiting-human-decision",
-    "awaiting-rework",
-    "awaiting-integration",
-    "integrating"
-  ]).has(entry.evidence?.state || entry.state.status);
+  const lifecycle = entry.evidence?.state || entry.state.status;
+  return !new Set(["discarded", "integrated-pending-manifest"]).has(lifecycle);
 }
 
 function externalCompletion(snapshot, executionStates, issue) {

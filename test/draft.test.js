@@ -369,6 +369,68 @@ test("unresolved validator HUMAN_GATE preserves Maestro ownership against extern
   assert.match(result.conflicts[0].reason, /adopt external completion.*preserve Maestro ownership/i);
 });
 
+test("every current nonterminal Maestro lifecycle blocks external completion adoption", () => {
+  const currentStates = [
+    {
+      name: "technical conflict",
+      state: {
+        runId: "run-conflict",
+        status: "failed",
+        mode: "execute",
+        plan: { selected: [{ id: "7" }] },
+        workers: [{ issue: "7", exitCode: 0, headSha: "candidate" }],
+        validations: [],
+        reviews: {},
+        integration: [],
+        conflicts: { "7": { operationState: "active", continuationAction: "maestro details 7" } }
+      },
+      expected: "technical-conflict"
+    },
+    {
+      name: "failed work awaiting retry",
+      state: {
+        runId: "run-failed",
+        status: "failed",
+        mode: "execute",
+        plan: { selected: [{ id: "7" }] },
+        workers: [{ issue: "7", exitCode: 1 }],
+        validations: [],
+        reviews: {},
+        integration: []
+      },
+      expected: "failed-awaiting-retry"
+    },
+    {
+      name: "exhausted rework",
+      state: {
+        runId: "run-exhausted",
+        status: "awaiting-review",
+        mode: "rework",
+        plan: { selected: [{ id: "7" }] },
+        workers: [{ issue: "7", exitCode: 0, headSha: "candidate" }],
+        validations: [{ issue: "7", verdict: "rework" }],
+        reviews: {},
+        integration: [],
+        autoRework: { "7": { status: "retry-exhausted" } }
+      },
+      expected: "rework-exhausted"
+    }
+  ];
+
+  for (const { name, state, expected } of currentStates) {
+    const result = proposeDraft({
+      repository: "owner/repo",
+      existingConfig: { repository: "owner/repo", work: { "7": { status: "complete" } } },
+      issues: [{ ...issue(7, "CLOSED"), stateReason: "COMPLETED" }],
+      executionStates: [state]
+    });
+
+    assert.equal(result.manifest.work["7"].completion, undefined, name);
+    assert.equal(result.conflicts.length, 1, name);
+    assert.match(result.conflicts[0].reason, new RegExp(expected), name);
+  }
+});
+
 test("not-planned closure remains inactive and reopening removes adopted external completion", () => {
   const notPlanned = proposeDraft({
     repository: "owner/repo",
