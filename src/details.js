@@ -154,11 +154,25 @@ function appendEvidence(lines, state, evidence, { heading = null } = {}) {
     lines.push(`  Automatic: ${evidence.correction.automatic === true ? "yes" : "no"}`);
     lines.push(`  Root run: ${valueOrNone(evidence.correction.rootRunId)}`);
     lines.push(`  Source run: ${valueOrNone(evidence.correction.sourceRunId)}`);
+    lines.push(`  Retry limit: ${valueOrNone(evidence.correction.retryLimit)}`);
+    lines.push(`  Charged at: ${valueOrNone(evidence.correction.chargedAt)}`);
     lines.push(`  Phase: ${valueOrNone(evidence.correction.phase)}`);
     lines.push(`  Outcome: ${valueOrNone(evidence.correction.outcome)}`);
     if (evidence.correction.failureStage) lines.push(`  Failure stage: ${evidence.correction.failureStage}`);
     if (evidence.correction.failureCode) lines.push(`  Failure code: ${evidence.correction.failureCode}`);
     if (evidence.correction.workerExecution) lines.push(`  Worker execution: ${valueOrNone(evidence.correction.workerExecution.status)}`);
+    if (evidence.correction.failure) {
+      lines.push(`  Failure classification: ${valueOrNone(evidence.correction.failure.classification)}`);
+      lines.push(`  Failure phase: ${valueOrNone(evidence.correction.failure.phase)}`);
+      lines.push(`  Failure code: ${valueOrNone(evidence.correction.failure.code)}`);
+      lines.push(`  Failure message: ${valueOrNone(evidence.correction.failure.message)}`);
+    }
+    if (evidence.correction.settings) {
+      lines.push(`  Effective concurrency: ${valueOrNone(evidence.correction.settings.concurrency)}`);
+      lines.push(`  Concurrency source: ${valueOrNone(evidence.correction.settings.concurrencySource)}`);
+      lines.push(`  Capacity limit: ${valueOrNone(evidence.correction.settings.capacityLimit)}`);
+      lines.push(`  Correction deadline: ${valueOrNone(evidence.correction.settings.deadlineAt)}`);
+    }
     if (evidence.correction.timeoutStage) lines.push(`  Timeout stage: ${evidence.correction.timeoutStage}`);
     if (evidence.correction.implementation) {
       lines.push(`  Implementation branch: ${valueOrNone(evidence.correction.implementation.branch)}`);

@@ -65,6 +65,88 @@ function validationSnapshot(validation) {
   };
 }
 
+function automaticAttemptFailure(error, classification, phase) {
+  return {
+    classification,
+    code: error.code || null,
+    message: error.message,
+    phase: error.maestroPhase || error.timeoutStage || phase || "executor"
+  };
+}
+
+async function persistAutomaticChild(config, {
+  repoPath,
+  runId,
+  resolved,
+  issue,
+  worker,
+  validation,
+  lineage,
+  retryLimit,
+  reworkOptions,
+  prepared,
+  stateSaver
+}) {
+  const issueId = String(issue);
+  const item = { id: issueId, ...(config.work?.[issueId] || {}), mode: "rework" };
+  const concurrency = reworkOptions.concurrency?.value
+    ? reworkOptions.concurrency
+    : resolveConcurrency({ savedDefault: config.defaultConcurrency });
+  const state = prepared?.reservedState || {
+    runId,
+    parentRunId: resolved.runId,
+    mode: "rework",
+    status: "running",
+    repoPath,
+    plan: {
+      concurrency: concurrency.value,
+      concurrencySource: concurrency.source,
+      savedDefaultConcurrency: concurrency.savedDefault,
+      ready: [item],
+      selected: [item],
+      advisoryDeferred: []
+    },
+    baseline: null,
+    preflights: [],
+    workers: [],
+    validations: [],
+    reviews: {}
+  };
+  state.parentRunId = String(resolved.runId);
+  state.correction = state.correction || { attempts: {} };
+  state.correction.attempts = state.correction.attempts || {};
+  if (!state.correction.attempts[issueId]) {
+    state.correction.attempts[issueId] = {
+      number: lineage.attempts.length + 1,
+      automatic: true,
+      sourceRunId: String(resolved.runId),
+      rootRunId: lineage.rootRunId,
+      retryLimit,
+      deadlineAt: reworkOptions.deadlineAt || null,
+      workerExecution: { status: "not-started" },
+      chargedAt: "child-run-created-before-preflight",
+      phase: "executor-pending",
+      outcome: null,
+      trigger: validationSnapshot(validation),
+      implementation: {
+        branch: worker?.branch || null,
+        worktreePath: worker?.worktreePath || null,
+        baseSha: worker?.baseSha || null,
+        targetBranch: config.defaultBranch || "main"
+      },
+      settings: {
+        retryLimit,
+        deadlineAt: reworkOptions.deadlineAt || null,
+        concurrency: state.plan?.concurrency ?? concurrency.value,
+        concurrencySource: state.plan?.concurrencySource ?? concurrency.source,
+        capacityLimit: state.capacity?.limit ?? null
+      }
+    };
+  }
+  await stateSaver(repoPath, runId, state);
+  return state;
+}
+
 function resultOutcome(result, issue) {
   const worker = (result.workers || []).find((entry) => String(entry.issue) === String(issue));
   const validation = (result.validations || []).find((entry) => String(entry.issue) === String(issue));
@@ -939,6 +1021,7 @@ async function executeReworkRun(config, {
       error.code = "AUTOMATION_TIMEOUT";
       error.timeoutStage = currentStage;
     }
+    error.maestroPhase = currentStage;
     result.status = "failed";
     result.failure = error.message;
     result.failureStage = currentStage;
@@ -948,6 +1031,7 @@ async function executeReworkRun(config, {
     if (currentStage === "baseline" && error.baseline) result.baseline = error.baseline;
     for (const [issue, attempt] of Object.entries(result.correction.attempts)) {
       if (attempt.phase !== "completed") {
+        const failurePhase = currentStage;
         attempt.phase = "stopped";
         if (timedOut) {
           attempt.outcome = "timeout";
@@ -960,9 +1044,14 @@ async function executeReworkRun(config, {
         }
         attempt.failureStage = currentStage;
         attempt.failureCode = result.failureCode;
+        attempt.failure = automaticAttemptFailure(error, attempt.outcome, failurePhase);
       }
     }
-    await persistTerminalState();
+    try {
+      await persistTerminalState();
+    } catch (persistenceError) {
+      error.persistenceError = persistenceError;
+    }
     throw error;
   }
 }
@@ -1113,8 +1202,23 @@ async function autoReworkIssue(config, {
     }
 
     const runId = prepared?.runId || newRunId();
+    const reservedState = await persistAutomaticChild(config, {
+      repoPath,
+      runId,
+      resolved,
+      issue,
+      worker,
+      validation,
+      lineage,
+      retryLimit,
+      reworkOptions,
+      prepared,
+      stateSaver
+    });
+    prepared = null;
+    let result;
     try {
-      const result = await reworkExecutor(config, {
+      result = await reworkExecutor(config, {
         repoPath,
         sourceRunId: resolved.runId,
         issueIds: [String(issue)],
@@ -1123,54 +1227,68 @@ async function autoReworkIssue(config, {
         stateSaver,
         automatic: true,
         retryLimit,
-        ...(prepared?.reservedState ? { reservedState: prepared.reservedState } : {}),
+        reservedState,
         ...reworkOptions
       });
-      prepared = null;
-      runs.push(result);
-      const outcome = resultOutcome(result, issue);
-      if (["worker-failure", "validator-failure", "timeout", "no-progress"].includes(outcome.status)) {
-        await recordOutcome(result.runId, issue, {
-          status: outcome.status,
-          finalVerdict: outcome.verdict,
-          timeoutStage: outcome.timeoutStage
-        });
-        return {
-          issue: String(issue),
-          outcome: outcome.status,
-          finalRunId: result.runId,
-          finalVerdict: outcome.verdict,
-          ...(outcome.timeoutStage ? { timeoutStage: outcome.timeoutStage } : {}),
-          runs
-        };
-      }
     } catch (error) {
       if (error.code === "CAPACITY_UNAVAILABLE") {
-        return finishWithoutExecution({
+        return {
           issue: String(issue),
           outcome: "capacity-unavailable",
           finalRunId: resolved.runId,
           finalVerdict: "rework",
           error: error.message,
           runs
-        }, "capacity-unavailable");
+        };
       }
       const outcome = error.code === "AUTOMATION_TIMEOUT"
         ? "timeout"
         : error.code === "REWORK_REFRESH_CONFLICT" ? (error.outcome || "human-required") : "infrastructure-failure";
-      await recordOutcome(runId, issue, {
-        status: outcome,
-        finalVerdict: null,
-        timeoutStage: error.timeoutStage
-      });
-      return finishWithoutExecution({
+      let outcomePersistenceError = error.persistenceError || null;
+      try {
+        await recordOutcome(runId, issue, {
+          status: outcome,
+          finalVerdict: null,
+          timeoutStage: error.timeoutStage,
+          executionFailure: automaticAttemptFailure(error, outcome, "executor")
+        });
+      } catch (persistenceError) {
+        outcomePersistenceError = outcomePersistenceError
+          ? new Error(`${outcomePersistenceError.message}; ${persistenceError.message}`)
+          : persistenceError;
+      }
+      return {
         issue: String(issue),
         outcome,
         finalRunId: runId,
         error: error.message,
         ...(error.timeoutStage ? { timeoutStage: error.timeoutStage } : {}),
+        ...(outcomePersistenceError ? { outcomePersistenceError: outcomePersistenceError.message } : {}),
         runs
-      }, `execution-${outcome}`);
+      };
+    }
+    runs.push(result);
+    const outcome = resultOutcome(result, issue);
+    if (["worker-failure", "validator-failure", "timeout", "no-progress"].includes(outcome.status)) {
+      let outcomePersistenceError = null;
+      try {
+        await recordOutcome(result.runId, issue, {
+          status: outcome.status,
+          finalVerdict: outcome.verdict,
+          timeoutStage: outcome.timeoutStage
+        });
+      } catch (persistenceError) {
+        outcomePersistenceError = persistenceError;
+      }
+      return {
+        issue: String(issue),
+        outcome: outcome.status,
+        finalRunId: result.runId,
+        finalVerdict: outcome.verdict,
+        ...(outcome.timeoutStage ? { timeoutStage: outcome.timeoutStage } : {}),
+        ...(outcomePersistenceError ? { outcomePersistenceError: outcomePersistenceError.message } : {}),
+        runs
+      };
     }
   }
 }
@@ -1205,9 +1323,22 @@ async function autoRework(config, {
   let cursor = 0;
   let outcomeWrite = Promise.resolve();
   function recordOutcome(runId, issue, outcome) {
-    outcomeWrite = outcomeWrite.then(async () => {
+    const write = outcomeWrite.catch(() => {}).then(async () => {
       const state = await stateLoader(repoPath, runId);
       const attempt = correctionAttempt(state, issue);
+      if (outcome.executionFailure) {
+        state.status = "failed";
+        state.failure = outcome.executionFailure.message;
+        if (state.capacity?.issues) {
+          state.capacity.issues = state.capacity.issues.filter((entry) => String(entry) !== String(issue));
+        }
+        if (attempt) {
+          if (attempt.phase !== "completed") attempt.phase = "stopped";
+          attempt.outcome = outcome.status;
+          attempt.failure = { ...(attempt.failure || {}), ...outcome.executionFailure };
+          if (outcome.timeoutStage) attempt.timeoutStage = outcome.timeoutStage;
+        }
+      }
       state.autoRework = state.autoRework || {};
       state.autoRework[String(issue)] = {
         status: outcome.status,
@@ -1223,7 +1354,8 @@ async function autoRework(config, {
       };
       await stateSaver(repoPath, runId, state);
     });
-    return outcomeWrite;
+    outcomeWrite = write;
+    return write;
   }
   async function runNext() {
     for (;;) {

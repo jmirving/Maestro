@@ -86,6 +86,8 @@ Workers must provide a `### Human review` section that identifies where a visual
 
 `integrate-run` consumes the exact persisted worker branches and validator verdicts. It must not respawn implementation workers. Follow-up issues are created before integration with source issue, run ID, and implementation commit provenance.
 
+Automatic rework durably creates its charged child before invoking executor-owned setup. That minimal state records lineage, trigger, attempt/budget, implementation location, effective concurrency/capacity, and the phase reached without inventing worker or validator evidence. Early failures retain their original classification, code, and message; a separate failure to persist outcome diagnostics is reported alongside the execution failure and never replaces it.
+
 ## Baseline policy
 
 A failing target-repository baseline blocks execution by default. A repository or explicit runtime flag may allow execution against a known failing baseline, but validators may only tolerate failures that are demonstrably unchanged from that captured baseline. New or changed failures remain blocking.

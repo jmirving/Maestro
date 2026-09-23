@@ -15,6 +15,7 @@ const {
 const { saveRunState, loadRunState, loadPersistedRunStates } = require("../src/run-store");
 const { resolveCurrentIssueStates } = require("../src/run-resolver");
 const { capacitySnapshot, runLifecycleBackfill } = require("../src/scheduler");
+const { loadIssueDetails, formatDetails } = require("../src/details");
 
 function parseLeadingJson(stdout) {
   return JSON.parse(stdout.split("\n\nIssue #", 1)[0]);
@@ -1103,13 +1104,212 @@ test("automatic rework fails safely on worker, validator, and pre-worker refresh
   const refreshFailure = await autoRework(refreshFixture.config, {
     repoPath: refreshFixture.repoPath,
     issueIds: ["7"],
-    reworkOptions: { runner: async () => { throw new Error("refresh failed"); } }
+    reworkOptions: { runner: async (command, args, options) => {
+      if (args[0] === "fetch") throw new Error("refresh failed");
+      return refreshFixture.runner(command, args, options);
+    } }
   });
   assert.equal(refreshFailure.issues[0].outcome, "infrastructure-failure");
   const refreshState = await loadRunState(refreshFixture.repoPath, refreshFailure.issues[0].finalRunId);
   assert.equal(refreshState.correction.attempts["7"].number, 1);
   assert.equal(refreshState.correction.attempts["7"].phase, "stopped");
   assert.equal(refreshState.correction.attempts["7"].outcome, "infrastructure-failure");
+});
+
+test("automatic rework persists and reuses an inspectable charged child when the executor fails before its first write", async (t) => {
+  const fixture = await autoFixture(t, ["7", "8"]);
+  const sourceBefore = await loadRunState(fixture.repoPath, fixture.sourceRunId);
+  sourceBefore.validations.find((entry) => entry.issue === "8").verdict = "approve";
+  await saveRunState(fixture.repoPath, fixture.sourceRunId, sourceBefore);
+  let executorCalls = 0;
+
+  const first = await autoRework(fixture.config, {
+    repoPath: fixture.repoPath,
+    issueIds: ["7"],
+    retryLimit: 3,
+    reworkExecutor: async () => {
+      executorCalls += 1;
+      throw new Error("credential helper unavailable before preflight");
+    }
+  });
+
+  assert.equal(first.issues[0].outcome, "infrastructure-failure");
+  assert.equal(first.issues[0].error, "credential helper unavailable before preflight");
+  assert.doesNotMatch(first.issues[0].error, /No Maestro run/);
+  const child = await loadRunState(fixture.repoPath, first.issues[0].finalRunId);
+  const attempt = child.correction.attempts["7"];
+  assert.equal(child.parentRunId, fixture.sourceRunId);
+  assert.equal(child.status, "failed");
+  assert.equal(child.failure, "credential helper unavailable before preflight");
+  assert.equal(attempt.number, 1);
+  assert.equal(attempt.retryLimit, 3);
+  assert.equal(attempt.chargedAt, "child-run-created-before-preflight");
+  assert.equal(attempt.phase, "stopped");
+  assert.equal(attempt.outcome, "infrastructure-failure");
+  assert.equal(attempt.failure.classification, "infrastructure-failure");
+  assert.equal(attempt.failure.phase, "executor");
+  assert.equal(attempt.failure.message, "credential helper unavailable before preflight");
+  assert.equal(attempt.settings.concurrency, 2);
+  assert.deepEqual(child.workers, []);
+  assert.deepEqual(child.validations, []);
+  assert.equal(child.autoRework["7"].attemptsUsed, 1);
+  const [current] = await resolveCurrentIssueStates(fixture.repoPath, ["7"]);
+  assert.equal(current.runId, child.runId);
+  assert.equal(current.evidence.state, "failed-awaiting-retry");
+  const details = formatDetails(await loadIssueDetails(fixture.repoPath, ["7"]));
+  assert.match(details, /Failure classification: infrastructure-failure/);
+  assert.match(details, /Failure phase: executor/);
+  assert.match(details, /Failure message: credential helper unavailable before preflight/);
+  assert.match(details, /Worker:\n  \(not recorded\)/);
+  assert.match(details, /Validator:\n  \(not recorded\)/);
+  assert.deepEqual(
+    (await loadRunState(fixture.repoPath, fixture.sourceRunId)).validations.find((entry) => entry.issue === "8"),
+    sourceBefore.validations.find((entry) => entry.issue === "8")
+  );
+
+  const resumed = await autoRework(fixture.config, {
+    repoPath: fixture.repoPath,
+    issueIds: ["7"],
+    retryLimit: 3,
+    reworkExecutor: async () => { executorCalls += 1; }
+  });
+  assert.equal(resumed.issues[0].outcome, "infrastructure-failure");
+  assert.equal(resumed.issues[0].finalRunId, child.runId);
+  assert.equal(executorCalls, 1);
+  assert.equal((await loadCorrectionLineage(fixture.repoPath, child.runId, "7")).attempts.length, 1);
+});
+
+test("automatic rework fault stages preserve the original classification and only real evidence", async (t) => {
+  const scenarios = [
+    {
+      name: "preflight",
+      configure: (config) => {
+        config.work["7"].requires = ["node"];
+        config.capabilities = { node: { preflight: "node --version", required: true } };
+      },
+      options: { preflightRunner: async () => { throw new Error("preflight probe exploded"); } },
+      message: "Required capability 'node' failed preflight.",
+      phase: "preflight",
+      workers: 0
+    },
+    {
+      name: "baseline",
+      configure: (config) => { config.baseline = { commands: ["npm test"] }; },
+      options: { baselineRunner: async () => { throw new Error("baseline capture exploded"); } },
+      message: "baseline capture exploded",
+      phase: "baseline",
+      workers: 0
+    },
+    {
+      name: "refresh",
+      options: { runner: async (_command, args) => {
+        if (args[0] === "fetch") throw new Error("refresh exploded");
+        return { stdout: args[0] === "rev-parse" ? "head-current\n" : args[0] === "branch" ? "maestro/test\n" : "" };
+      } },
+      message: "refresh exploded",
+      phase: "refresh",
+      workers: 0
+    },
+    {
+      name: "after-worker",
+      options: {
+        workerExecutor: async ({ worktree }) => ({ issue: "7", exitCode: 0, ...worktree, headSha: "changed", report: "worker durable" }),
+        validatorExecutor: async () => { throw new Error("validator launch exploded"); }
+      },
+      message: "validator launch exploded",
+      phase: "validator",
+      workers: 1
+    }
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async (t) => {
+      const fixture = await autoFixture(t);
+      scenario.configure?.(fixture.config);
+      const result = await autoRework(fixture.config, {
+        repoPath: fixture.repoPath,
+        issueIds: ["7"],
+        reworkOptions: { runner: fixture.runner, ...scenario.options }
+      });
+      const outcome = result.issues[0];
+      assert.equal(outcome.outcome, "infrastructure-failure");
+      assert.equal(outcome.error, scenario.message);
+      assert.doesNotMatch(outcome.error, /No Maestro run/);
+      const child = await loadRunState(fixture.repoPath, outcome.finalRunId);
+      const attempt = child.correction.attempts["7"];
+      assert.equal(attempt.failure.phase, scenario.phase);
+      assert.equal(attempt.failure.message, scenario.message);
+      assert.equal(child.workers.length, scenario.workers);
+      assert.deepEqual(child.validations, []);
+      if (["preflight", "baseline"].includes(scenario.phase)) {
+        const [source] = await resolveIssueReworkSources(fixture.repoPath, ["7"]);
+        assert.equal(source.resumeRunId, child.runId);
+        assert.equal(source.resumeSetupFailure, true);
+        assert.equal(attempt.deadlineAt, attempt.settings.deadlineAt);
+        assert.deepEqual(attempt.workerExecution, { status: "not-started" });
+      }
+    });
+  }
+});
+
+test("automatic rework reports outcome-storage failure separately from the original executor failure", async (t) => {
+  const fixture = await autoFixture(t, ["7", "8"]);
+  let rejectedDiagnostic = false;
+  const stateSaver = async (repoPath, runId, state) => {
+    if (!rejectedDiagnostic && state.status === "failed" && state.correction?.attempts?.["7"]) {
+      rejectedDiagnostic = true;
+      throw new Error("diagnostic volume read-only");
+    }
+    return saveRunState(repoPath, runId, state);
+  };
+
+  const result = await autoRework(fixture.config, {
+    repoPath: fixture.repoPath,
+    issueIds: ["7", "8"],
+    capacity: 2,
+    stateSaver,
+    reworkExecutor: async (_config, options) => {
+      throw new Error(`executor ${options.issueIds[0]} failed`);
+    }
+  });
+
+  assert.equal(result.issues[0].outcome, "infrastructure-failure");
+  assert.equal(result.issues[0].error, "executor 7 failed");
+  assert.equal(result.issues[0].outcomePersistenceError, "diagnostic volume read-only");
+  assert.doesNotMatch(result.issues[0].error, /diagnostic volume|No Maestro run/);
+  assert.equal(result.issues[1].error, "executor 8 failed");
+  const sibling = await loadRunState(fixture.repoPath, result.issues[1].finalRunId);
+  assert.equal(sibling.failure, "executor 8 failed");
+  assert.equal(sibling.correction.attempts["8"].outcome, "infrastructure-failure");
+});
+
+test("executor terminal-state storage failure cannot replace the triggering stage failure", async (t) => {
+  const fixture = await autoFixture(t);
+  let rejectedTerminal = false;
+  const stateSaver = async (repoPath, runId, state) => {
+    if (!rejectedTerminal && state.status === "failed" && state.failure === "refresh root cause") {
+      rejectedTerminal = true;
+      throw new Error("terminal state write failed");
+    }
+    return saveRunState(repoPath, runId, state);
+  };
+
+  const result = await autoRework(fixture.config, {
+    repoPath: fixture.repoPath,
+    issueIds: ["7"],
+    stateSaver,
+    reworkOptions: { runner: async (command, args, options) => {
+      if (args[0] === "fetch") throw new Error("refresh root cause");
+      return fixture.runner(command, args, options);
+    } }
+  });
+
+  const outcome = result.issues[0];
+  assert.equal(outcome.error, "refresh root cause");
+  assert.equal(outcome.outcomePersistenceError, "terminal state write failed");
+  const child = await loadRunState(fixture.repoPath, outcome.finalRunId);
+  assert.equal(child.failure, "refresh root cause");
+  assert.equal(child.correction.attempts["7"].failure.message, "refresh root cause");
 });
 
 test("automatic rework records no-progress when a successful worker creates no commit", async (t) => {
