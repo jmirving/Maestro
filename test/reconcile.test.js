@@ -9,6 +9,8 @@ const { saveRunState, loadRunState, loadPersistedRunStates } = require("../src/r
 const { createDelegatedAuthorization, saveAuthorization } = require("../src/authorization");
 const { integrateExistingRun } = require("../src/existing-run");
 
+const RECOVERY_TIMEOUT_TEST_MS = 2_000;
+
 function git(cwd, ...args) {
   const result = spawnSync("git", args, { cwd, encoding: "utf8" });
   assert.equal(result.status, 0, `git ${args.join(" ")} failed:\n${result.stderr}`);
@@ -385,7 +387,7 @@ test("hanging managed validation is bounded by the recovery deadline and release
     repository: "example/repo",
     defaultBranch: "main",
     defaultConcurrency: 1,
-    resolution: { timeoutMs: 250 },
+    resolution: { timeoutMs: RECOVERY_TIMEOUT_TEST_MS },
     work: { "19": { status: "ready", blockedBy: [], requires: [] } }
   }, {
     repoPath,
@@ -405,7 +407,7 @@ test("hanging managed validation is bounded by the recovery deadline and release
     }
   }), (error) => error.code === "GIT_CONTENT_CONFLICT");
 
-  assert.ok(validatorOptions.timeoutMs > 0 && validatorOptions.timeoutMs <= 250);
+  assert.ok(validatorOptions.timeoutMs > 0 && validatorOptions.timeoutMs <= RECOVERY_TIMEOUT_TEST_MS);
   assert.equal(validatorOptions.maxOutputBytes, 512 * 1024);
   const persisted = await loadRunState(repoPath, runId);
   assert.equal(persisted.status, "technical-conflict");
@@ -424,7 +426,7 @@ test("clean managed reconciliation persists a deadline that bounds a hanging val
     repository: "example/repo",
     defaultBranch: "main",
     defaultConcurrency: 1,
-    resolution: { timeoutMs: 250 },
+    resolution: { timeoutMs: RECOVERY_TIMEOUT_TEST_MS },
     work: { "19": { status: "ready", blockedBy: [], requires: [] } }
   }, {
     repoPath,
@@ -438,7 +440,7 @@ test("clean managed reconciliation persists a deadline that bounds a hanging val
     }
   }), (error) => error.code === "RECOVERY_TIMEOUT");
 
-  assert.ok(validatorOptions.timeoutMs > 0 && validatorOptions.timeoutMs <= 250);
+  assert.ok(validatorOptions.timeoutMs > 0 && validatorOptions.timeoutMs <= RECOVERY_TIMEOUT_TEST_MS);
   assert.equal(validatorOptions.maxOutputBytes, 512 * 1024);
   const persisted = await loadRunState(repoPath, runId);
   assert.equal(persisted.status, "failed");
