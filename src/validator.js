@@ -1,5 +1,6 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const { StringDecoder } = require("node:string_decoder");
 const { runProcess } = require("./process");
 const { summarizeBaseline } = require("./baseline");
 
@@ -27,6 +28,10 @@ function parseVerdict(report) {
   return match ? match[1].toLowerCase() : "invalid";
 }
 
+function decodeUtf8Prefix(contents) {
+  return new StringDecoder("utf8").write(contents);
+}
+
 async function validateWorker({
   repository,
   worker,
@@ -35,7 +40,9 @@ async function validateWorker({
   codexCommand = "codex",
   runner = runProcess,
   timeoutMs = null,
-  maxOutputBytes = MAX_VALIDATOR_OUTPUT_BYTES
+  maxOutputBytes = MAX_VALIDATOR_OUTPUT_BYTES,
+  maxCaptureBytes = maxOutputBytes,
+  maxReportBytes = maxOutputBytes
 }) {
   const reportDir = path.join(path.dirname(worker.worktreePath), ".maestro-reports");
   await fs.mkdir(reportDir, { recursive: true });
@@ -47,22 +54,40 @@ async function validateWorker({
     stream: true,
     streamPrefix: `[#${worker.issue} validator] `,
     timeoutMs,
-    maxOutputBytes
+    maxCaptureBytes
   });
   console.error(`[Maestro] validator #${worker.issue} finished with exit ${result.code}`);
   let report = "";
   let reportLimitExceeded = false;
   try {
-    const contents = await fs.readFile(reportPath);
-    reportLimitExceeded = contents.length > maxOutputBytes;
-    report = contents.subarray(0, maxOutputBytes).toString("utf8");
+    const handle = await fs.open(reportPath, "r");
+    try {
+      const { size } = await handle.stat();
+      reportLimitExceeded = size > maxReportBytes;
+      const contents = Buffer.alloc(Math.min(size, maxReportBytes));
+      let bytesRead = 0;
+      while (bytesRead < contents.length) {
+        const read = await handle.read(contents, bytesRead, contents.length - bytesRead, bytesRead);
+        if (read.bytesRead === 0) break;
+        bytesRead += read.bytesRead;
+      }
+      report = decodeUtf8Prefix(contents.subarray(0, bytesRead));
+    } finally {
+      await handle.close();
+    }
   } catch {}
+  const reportedVerdict = parseVerdict(report);
+  const validVerdict = ["approve", "rework", "human_gate"].includes(reportedVerdict);
   return {
     issue: worker.issue,
     exitCode: result.code,
     timedOut: result.timedOut === true,
-    outputLimitExceeded: result.outputLimitExceeded === true || reportLimitExceeded,
-    verdict: result.code === 0 && !result.outputLimitExceeded && !reportLimitExceeded ? parseVerdict(report) : "failed",
+    outputLimitExceeded: reportLimitExceeded,
+    outputTruncated: result.outputTruncated === true,
+    stdoutTruncated: result.stdoutTruncated === true,
+    stderrTruncated: result.stderrTruncated === true,
+    reportLimitExceeded,
+    verdict: result.code === 0 && !result.timedOut && !reportLimitExceeded && validVerdict ? reportedVerdict : "failed",
     report,
     stderr: result.stderr.trim()
   };

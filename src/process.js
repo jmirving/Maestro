@@ -1,4 +1,5 @@
 const { spawn } = require("node:child_process");
+const { StringDecoder } = require("node:string_decoder");
 
 function writeStream(target, chunk, prefix) {
   if (!target) return;
@@ -20,29 +21,39 @@ function runProcess(command, args = [], options = {}) {
       env: { ...process.env, ...(options.env || {}) },
       stdio: [options.input == null ? "ignore" : "pipe", "pipe", "pipe"]
     });
-    let stdout = "";
-    let stderr = "";
+    const stdoutCapture = { chunks: [], bytes: 0, seenBytes: 0, truncated: false };
+    const stderrCapture = { chunks: [], bytes: 0, seenBytes: 0, truncated: false };
     let timedOut = false;
     let outputLimitExceeded = false;
     let settled = false;
     const maxOutputBytes = options.maxOutputBytes == null ? Number.POSITIVE_INFINITY : options.maxOutputBytes;
+    const maxCaptureBytes = options.maxCaptureBytes == null ? Number.POSITIVE_INFINITY : options.maxCaptureBytes;
+    const captureLimit = Math.min(maxOutputBytes, maxCaptureBytes);
     const timeout = options.timeoutMs > 0 ? setTimeout(() => {
       timedOut = true;
       child.kill("SIGKILL");
     }, options.timeoutMs) : null;
-    function capture(current, chunk) {
-      const next = current + chunk;
-      if (Buffer.byteLength(next) <= maxOutputBytes) return next;
-      outputLimitExceeded = true;
-      child.kill("SIGKILL");
-      return next.slice(0, maxOutputBytes);
+    function capture(target, chunk) {
+      target.seenBytes += chunk.length;
+      const remaining = Math.max(0, captureLimit - target.bytes);
+      if (remaining > 0) {
+        const retained = Buffer.from(chunk.subarray(0, remaining));
+        target.chunks.push(retained);
+        target.bytes += retained.length;
+      }
+      if (chunk.length <= remaining) return;
+      target.truncated = true;
+      if (target.seenBytes > maxOutputBytes) {
+        outputLimitExceeded = true;
+        child.kill("SIGKILL");
+      }
     }
     child.stdout.on("data", (chunk) => {
-      stdout = capture(stdout, chunk.toString());
+      capture(stdoutCapture, chunk);
       if (options.stream) writeStream(process.stdout, chunk, options.streamPrefix || "");
     });
     child.stderr.on("data", (chunk) => {
-      stderr = capture(stderr, chunk.toString());
+      capture(stderrCapture, chunk);
       if (options.stream) writeStream(process.stderr, chunk, options.streamPrefix || "");
     });
     child.on("error", (error) => {
@@ -56,7 +67,18 @@ function runProcess(command, args = [], options = {}) {
       if (timeout) clearTimeout(timeout);
       if (!settled) {
         settled = true;
-        resolve({ code: code ?? 1, stdout, stderr, timedOut, outputLimitExceeded });
+        const stdoutTruncated = stdoutCapture.truncated;
+        const stderrTruncated = stderrCapture.truncated;
+        resolve({
+          code: code ?? 1,
+          stdout: decodeCapturedUtf8(stdoutCapture),
+          stderr: decodeCapturedUtf8(stderrCapture),
+          timedOut,
+          outputLimitExceeded,
+          outputTruncated: stdoutTruncated || stderrTruncated,
+          stdoutTruncated,
+          stderrTruncated
+        });
       }
     });
     if (options.input != null && child.stdin) {
@@ -72,6 +94,17 @@ function runProcess(command, args = [], options = {}) {
       child.stdin.end(options.input);
     }
   });
+}
+
+function decodeCapturedUtf8(capture) {
+  const decoder = new StringDecoder("utf8");
+  const decoded = decoder.write(Buffer.concat(capture.chunks, capture.bytes));
+  if (Buffer.byteLength(decoded) <= capture.bytes) return decoded;
+
+  // Invalid input bytes may expand to a three-byte replacement character.
+  // Re-bound the normalized UTF-8 without ever returning a partial code point.
+  const normalized = Buffer.from(decoded);
+  return new StringDecoder("utf8").write(normalized.subarray(0, capture.bytes));
 }
 
 async function runChecked(command, args = [], options = {}) {
