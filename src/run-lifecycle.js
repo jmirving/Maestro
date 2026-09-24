@@ -1,4 +1,5 @@
 const { isValidValidatorOverride } = require("./reviews");
+const { retryableValidationFailure } = require("./validator");
 
 function isRecoverableValidatorRework(evidence) {
   const reviewDisposition = evidence?.review?.disposition;
@@ -55,6 +56,9 @@ function classifyRunIssue(state, worker) {
   }
   if (validation?.verdict === "approve") {
     return { state: "awaiting-human-review", action: `maestro approve ${issue} --run ${state.runId}` };
+  }
+  if (worker.exitCode === 0 && retryableValidationFailure(validation)) {
+    return { state: "failed-awaiting-retry", action: `maestro validate ${issue} --retry` };
   }
   if (worker.exitCode !== 0 || state.status === "failed") {
     return { state: "failed-awaiting-retry", action: "maestro start --rerun" };

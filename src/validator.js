@@ -28,6 +28,16 @@ function parseVerdict(report) {
   return match ? match[1].toLowerCase() : "invalid";
 }
 
+function retryableValidationFailure(validation) {
+  if (!validation || validation.verdict !== "failed") return null;
+  if (validation.outputLimitExceeded === true && validation.reportLimitExceeded !== true) return "validator diagnostic output limit";
+  if (validation.timedOut === true) return "validator timeout";
+  if (validation.infrastructureFailure === true) return validation.failureKind || "validator infrastructure failure";
+  if (Number(validation.exitCode) !== 0) return "validator process/provider failure";
+  if (validation.exitCode === 0) return "validator returned no valid verdict";
+  return null;
+}
+
 function decodeUtf8Prefix(contents) {
   return new StringDecoder("utf8").write(contents);
 }
@@ -93,4 +103,4 @@ async function validateWorker({
   };
 }
 
-module.exports = { MAX_VALIDATOR_OUTPUT_BYTES, buildValidatorPrompt, parseVerdict, validateWorker };
+module.exports = { MAX_VALIDATOR_OUTPUT_BYTES, buildValidatorPrompt, parseVerdict, retryableValidationFailure, validateWorker };

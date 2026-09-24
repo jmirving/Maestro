@@ -78,4 +78,6 @@ Integration eligibility is one shared contract across persisted, historical, del
 
 Validator evidence records the implementation SHA, base SHA, and acceptance/policy digest. Manual edits and any rebase that changes the examined implementation invalidate that evidence and require fresh independent validation.
 
+Validator-only recovery is represented as a normal child run (`mode: validator-retry`), not sidecar state. Admission resolves authoritative issue evidence under the repository coordination lock, claims shared runtime capacity, and verifies the recorded branch/worktree, base object, exact branch and worktree HEAD, cleanliness, failed-validator class, and acceptance digest. The child copies immutable worker, baseline, preflight, scope, and authorization provenance; it creates no worker or correction record. Before accepting the result, Maestro repeats lifecycle, Git, and context checks. The parent failure remains durable, while descendant precedence makes the new validator result authoritative for status, review, delegated authorization, and integration guards.
+
 The original planning milestone stopped before automatic default-branch integration. Current integration remains serialized and is available only through explicit human review/override or the bounded delegated authorization described above.

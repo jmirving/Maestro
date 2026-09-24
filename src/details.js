@@ -83,6 +83,18 @@ function appendEvidence(lines, state, evidence, { heading = null } = {}) {
   lines.push(`Mode: ${valueOrNone(state.mode)}`);
   lines.push(`Run status: ${valueOrNone(state.status)}`);
   if (state.failure) lines.push(`Run failure: ${state.failure}`);
+  if (state.validationRetry) {
+    lines.push("Validator retry provenance:");
+    lines.push(`  Source run: ${valueOrNone(state.validationRetry.sourceRunId)}`);
+    lines.push(`  Source validator attempt: ${valueOrNone(state.validationRetry.sourceValidatorAttempt)}`);
+    lines.push(`  Retry attempt: ${valueOrNone(state.validationRetry.attempt)}`);
+    lines.push(`  Implementation: ${valueOrNone(state.validationRetry.implementationSha)}`);
+    lines.push(`  Base: ${valueOrNone(state.validationRetry.baseSha)}`);
+    lines.push(`  Acceptance context: ${valueOrNone(state.validationRetry.acceptanceDigest)}`);
+    lines.push(`  Reason: ${valueOrNone(state.validationRetry.reason)}`);
+    lines.push(`  Started: ${valueOrNone(state.validationRetry.startedAt)}`);
+    lines.push(`  Completed: ${valueOrNone(state.validationRetry.completedAt)}`);
+  }
   if (state.authorization) {
     lines.push("Delegated authorization:");
     lines.push(`  Id: ${valueOrNone(state.authorization.id)}`);
@@ -160,6 +172,10 @@ function appendEvidence(lines, state, evidence, { heading = null } = {}) {
   if (evidence.validation) {
     lines.push(`  Verdict: ${valueOrNone(evidence.validation.verdict)}`);
     lines.push(`  Exit code: ${valueOrNone(evidence.validation.exitCode)}`);
+    if (evidence.validation.outputTruncated !== undefined) lines.push(`  Diagnostic output truncated: ${evidence.validation.outputTruncated === true ? "yes" : "no"}`);
+    if (evidence.validation.stdoutTruncated !== undefined) lines.push(`  Stdout truncated: ${evidence.validation.stdoutTruncated === true ? "yes" : "no"}`);
+    if (evidence.validation.stderrTruncated !== undefined) lines.push(`  Stderr truncated: ${evidence.validation.stderrTruncated === true ? "yes" : "no"}`);
+    if (evidence.validation.reportLimitExceeded !== undefined) lines.push(`  Authoritative report limit exceeded: ${evidence.validation.reportLimitExceeded === true ? "yes" : "no"}`);
     if (evidence.validation.evidence) {
       lines.push(`  Examined implementation: ${valueOrNone(evidence.validation.evidence.implementationSha)}`);
       lines.push(`  Examined base: ${valueOrNone(evidence.validation.evidence.baseSha)}`);

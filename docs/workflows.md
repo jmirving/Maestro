@@ -55,6 +55,8 @@ maestro output
 
 `status` is the canonical decision surface and ends with state-derived next commands. Its default action-first groups include the effective scheduler selection, while issue previews, run-readiness diagnostics, and recommendation actions are bounded with exact omitted counts and completed history is collapsed to a count. Displayed integration sets always include their exact commit command. Use `status --all` for the full effective inventory and expanded readiness/actions, `status --completed` for completed history, or `status <issue...>` for focused lifecycle evidence; expansion filters cannot be combined with focused issue numbers. `plan` remains available for manifest-only or hypothetical planning/debugging previews. `details` reads issue-level worker, validator, review, and integration evidence. `output` prints and copies the latest combined report. None reruns work.
 
+When the current implementation succeeded but its validator failed for a retryable infrastructure or execution reason, status recommends `maestro validate <issue> --retry`. This command reserves normal shared capacity, reuses the exact clean persisted implementation HEAD, and records a validation-only child run without launching a worker or consuming correction budget. It refuses semantic `REWORK`/`HUMAN_GATE`, stale acceptance policy, moved or dirty Git state, supersession, completion, and competing lifecycle ownership. A successful retry returns to the ordinary approval, rework, or human-decision state; `details` retains both validator attempts through parent lineage.
+
 Resolve every item in the wave, integrate reviewed work, and continue:
 
 ```bash

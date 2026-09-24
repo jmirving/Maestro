@@ -217,6 +217,25 @@ const COMMANDS = [
     requiresIssuesWith: ["--override"]
   },
   {
+    name: "validate",
+    category: "Review",
+    summary: "Retry only a failed validator against the authoritative existing implementation.",
+    when: "Use when status recommends validator recovery after a retryable validator infrastructure or execution failure.",
+    usages: ["maestro validate [manifest.json] <issue> --retry [--repo-path <path>]"],
+    positionals: "Exactly one issue number, optionally preceded by a manifest path.",
+    options: {
+      "--repo-path": COMMON_REPO_OPTION,
+      "--retry": { description: "Explicitly authorize a fresh validator attempt without rerunning implementation.", required: true }
+    },
+    prerequisites: "The issue's current authoritative worker must be successful, unchanged, clean, and bound to a retryable failed validator under the current acceptance context.",
+    effects: "Creates a validation-only child run, preserves the failed validator evidence, reuses the exact worker commit/worktree, and consumes shared runtime capacity without charging correction attempts.",
+    cautions: "Never treats REWORK or HUMAN_GATE as infrastructure failure. Refuses superseded, moved, dirty, complete, actively owned, or context-stale implementations.",
+    next: ["maestro approve <issue>", "maestro rework <issue>", "maestro details <issue>"],
+    examples: [["validate", "31", "--retry"]],
+    positionalKind: "manifest-issues",
+    minIssues: 1
+  },
+  {
     name: "rework",
     category: "Review",
     summary: "Create correction runs for current validator- or human-rejected work.",

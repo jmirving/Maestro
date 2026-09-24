@@ -6,6 +6,7 @@ const { isValidValidatorOverride } = require("./reviews");
 const { capacitySnapshot } = require("./scheduler");
 const { formatConcurrency } = require("./concurrency");
 const { loadAuthorization, assessCurrentScope, assessDelegatedAuthorization } = require("./authorization");
+const { retryableValidationFailure } = require("./validator");
 
 function numericSort(left, right) {
   return String(left).localeCompare(String(right), undefined, { numeric: true });
@@ -146,7 +147,9 @@ const external = effective?.completion?.source === "external";
   } else if (evidence?.state === "failed-awaiting-retry" || evidence?.worker?.exitCode > 0) {
     state = "failed, awaiting explicit retry";
     group = "attention";
-    action = "maestro start --rerun";
+    action = evidence?.worker?.exitCode === 0 && retryableValidationFailure(validation)
+      ? `maestro validate ${issue} --retry`
+      : "maestro start --rerun";
   } else if (evidence) {
     state = "pending validation or review";
     group = "in-progress";

@@ -22,6 +22,7 @@ const { resolveReconcileSource, executeReconcileRun } = require("../src/reconcil
 const { executeAdoptedResolution } = require("../src/operation-resolution");
 const { latestRunId, loadRunState } = require("../src/run-store");
 const { resolveCurrentIssueStates } = require("../src/run-resolver");
+const { executeValidatorRetry, formatValidatorRetry } = require("../src/validator-retry");
 const { isRecoverableValidatorRework } = require("../src/run-lifecycle");
 const { statusSnapshot, formatStatus, watchStatus } = require("../src/display");
 const { formatRecommendationFooter, appendRecommendationFooter } = require("../src/recommendations");
@@ -79,7 +80,7 @@ function issuePositionals(rest) {
       index += 1;
       continue;
     }
-    if (["--override", "--delegate", "--preview", "--auto-rework", "--rerun"].includes(value)) continue;
+    if (["--override", "--delegate", "--preview", "--auto-rework", "--rerun", "--retry"].includes(value)) continue;
     if (value.startsWith("--")) throw new Error(`Unknown review option: ${value}`);
     if (!/^[1-9]\d*$/.test(value)) throw new Error(`Invalid issue number: ${value}`);
     issues.push(value);
@@ -793,6 +794,16 @@ async function main() {
       override: args.includes("--override")
     });
     process.stdout.write(await workflowFooter(config, repoPath));
+    return;
+  }
+
+  if (command === "validate") {
+    const requestedIssues = issuePositionals(rest);
+    if (requestedIssues.length !== 1) throw new Error("maestro validate --retry requires exactly one issue number.");
+    const result = await executeValidatorRetry(config, { repoPath, issue: requestedIssues[0] });
+    process.stdout.write(formatValidatorRetry(result));
+    process.stdout.write(await workflowFooter(config, repoPath));
+    if (result.validation.verdict === "failed") process.exitCode = 1;
     return;
   }
 
