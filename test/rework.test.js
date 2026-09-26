@@ -689,6 +689,127 @@ if (index >= 0) fs.writeFileSync(process.argv[index + 1], process.argv.includes(
   assert.match(invalid.stderr, /Invalid issue number: not-an-issue/);
 });
 
+test("explicit whole-run rework expands only effective eligible lifecycle states", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-explicit-run-lifecycle-"));
+  const repoPath = path.join(root, "target");
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  const binPath = path.join(root, "bin");
+  const sourceRunId = "20260910010101-e1c1aa";
+  await fs.mkdir(repoPath);
+  await fs.mkdir(binPath);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(manifestPath, `${JSON.stringify({
+    repository: "example/repo",
+    work: { "7": { status: "ready" }, "8": { status: "ready" }, "9": { status: "ready" } }
+  })}\n`);
+  const humanGate = { issue: "8", verdict: "human_gate", exitCode: 0, report: "Choose the safe fallback" };
+  const overridden = { issue: "11", verdict: "rework", exitCode: 0, report: "Validator rejected it" };
+  await saveRunState(repoPath, sourceRunId, {
+    runId: sourceRunId,
+    status: "awaiting-review",
+    plan: { selected: ["7", "8", "9", "10", "11"].map((id) => ({ id })) },
+    workers: ["7", "8", "9", "10", "11"].map((issue) => ({
+      issue,
+      exitCode: 0,
+      baseSha: "base",
+      headSha: `head-${issue}`,
+      branch: `maestro/${issue}`,
+      worktreePath: repoPath,
+      report: `prior ${issue}`
+    })),
+    validations: [
+      { issue: "7", verdict: "rework", report: "fix 7" },
+      humanGate,
+      { issue: "9", verdict: "rework", report: "fix 9" },
+      { issue: "10", verdict: "rework", report: "fix 10" },
+      overridden
+    ],
+    reviews: {
+      "8": {
+        disposition: "rework",
+        notes: "Use the owner-approved fallback",
+        humanGateResolution: { verdict: humanGate.verdict, exitCode: humanGate.exitCode, report: humanGate.report }
+      },
+      "9": { disposition: "rework-original" },
+      "10": { disposition: "discard" },
+      "11": {
+        disposition: "approve-override",
+        validatorOverride: { verdict: overridden.verdict, exitCode: overridden.exitCode, report: overridden.report }
+      }
+    }
+  });
+  await fs.writeFile(path.join(binPath, "git"), `#!/usr/bin/env node
+if (process.argv[2] === "rev-parse") process.stdout.write(process.argv[3] === "HEAD" ? "head-new\\n" : "base\\n");
+`);
+  await fs.writeFile(path.join(binPath, "codex"), `#!/usr/bin/env node
+const fs = require("node:fs");
+const index = process.argv.indexOf("--output-last-message");
+if (index >= 0) fs.writeFileSync(process.argv[index + 1], process.argv.includes("read-only") ? "VERDICT: APPROVE\\n" : "Result: complete\\n");
+`);
+  await fs.chmod(path.join(binPath, "git"), 0o755);
+  await fs.chmod(path.join(binPath, "codex"), 0o755);
+
+  const result = spawnSync(process.execPath, [
+    path.resolve(__dirname, "../bin/maestro.js"), "rework", manifestPath,
+    "--run", sourceRunId, "--repo-path", repoPath
+  ], {
+    encoding: "utf8",
+    env: { ...process.env, PATH: `${binPath}${path.delimiter}${process.env.PATH}` }
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const rework = parseLeadingJson(result.stdout);
+  assert.deepEqual(rework.map((entry) => entry.plan.selected[0].id).sort(), ["7", "8", "9"]);
+  assert.equal(rework.some((entry) => ["10", "11"].includes(entry.plan.selected[0].id)), false);
+
+  for (const issue of ["10", "11"]) {
+    const settled = spawnSync(process.execPath, [
+      path.resolve(__dirname, "../bin/maestro.js"), "rework", manifestPath, issue,
+      "--run", sourceRunId, "--repo-path", repoPath
+    ], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${binPath}${path.delimiter}${process.env.PATH}` }
+    });
+    assert.equal(settled.status, 1);
+    assert.match(settled.stderr, new RegExp(`no eligible REWORK evidence for issue #${issue}`));
+  }
+});
+
+test("execution admission rejects settled and superseded explicit-run evidence", async (t) => {
+  const fixture = await autoFixture(t, ["7", "8", "9"]);
+  const source = await loadRunState(fixture.repoPath, fixture.sourceRunId);
+  source.reviews["7"] = { disposition: "discard" };
+  source.reviews["8"] = {
+    disposition: "approve-override",
+    validatorOverride: {
+      verdict: source.validations[1].verdict,
+      exitCode: source.validations[1].exitCode,
+      report: source.validations[1].report
+    }
+  };
+  await saveRunState(fixture.repoPath, fixture.sourceRunId, source);
+
+  for (const issue of ["7", "8"]) {
+    await assert.rejects(
+      executeReworkRun(fixture.config, { repoPath: fixture.repoPath, sourceRunId: fixture.sourceRunId, issueIds: [issue] }),
+      /Cannot rework non-REWORK issue state/
+    );
+  }
+
+  await saveRunState(fixture.repoPath, "20260910020202-c0ffee", {
+    runId: "20260910020202-c0ffee",
+    parentRunId: fixture.sourceRunId,
+    status: "awaiting-review",
+    workers: [{ issue: "9", exitCode: 0 }],
+    validations: [{ issue: "9", verdict: "approve" }],
+    reviews: {}
+  });
+  await assert.rejects(
+    executeReworkRun(fixture.config, { repoPath: fixture.repoPath, sourceRunId: fixture.sourceRunId, issueIds: ["9"] }),
+    /Cannot rework superseded or settled implementation evidence.*#9 is current/
+  );
+});
+
 test("automatic rework corrects and revalidates until approval while persisting trigger lineage", async (t) => {
   const fixture = await autoFixture(t);
   const verdicts = ["rework", "approve"];

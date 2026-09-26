@@ -92,7 +92,7 @@ const external = effective?.completion?.source === "external";
   } else if (isValidValidatorOverride(review, validation)) {
     state = "human override approved, ready to integrate";
     group = "ready-integrate";
-    integrationState = "eligible when every item in its run has a human disposition";
+    integrationState = "eligible when every run item is safely classified";
   } else if (evidence?.autoRework?.status === "retry-exhausted") {
     const attempts = evidence.autoRework.attemptsUsed;
     const limit = evidence.autoRework.retryLimit;
@@ -115,7 +115,7 @@ const external = effective?.completion?.source === "external";
   } else if (["approve", "approve-with-follow-up"].includes(review?.disposition) && validation?.verdict === "approve") {
     state = "human approved, ready to integrate";
     group = "ready-integrate";
-    integrationState = "eligible when every item in its run has a human disposition";
+    integrationState = "eligible when every run item is safely classified";
   } else if (review) {
     state = `blocked: human ${review.disposition} conflicts with validator ${validation?.verdict || "state"}`;
     group = "attention";

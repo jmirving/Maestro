@@ -426,7 +426,7 @@ test("override-approved status remains visibly distinct from ordinary approval",
 
   assert.match(text, /human override approved, ready to integrate/);
   assert.match(text, /Human review: approve-override/);
-  assert.match(text, /Integration: eligible when every item in its run has a human disposition/);
+  assert.match(text, /Integration: eligible when every run item is safely classified/);
 });
 
 test("retry exhaustion is a human-review stop with lineage details instead of another automatic recommendation", async () => {

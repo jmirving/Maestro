@@ -93,6 +93,31 @@ test("other human dispositions remain non-recoverable", () => {
   }), false);
 });
 
+test("accepted, discarded, overridden, and terminal rework evidence is not recoverable", () => {
+  const validation = { verdict: "rework", exitCode: 0, report: "fix it" };
+  for (const review of [
+    { disposition: "approve" },
+    { disposition: "discard" },
+    {
+      disposition: "approve-override",
+      validatorOverride: { verdict: "rework", exitCode: 0, report: "fix it" }
+    }
+  ]) {
+    assert.equal(isRecoverableValidatorRework({
+      state: review.disposition === "discard" ? "discarded" : "awaiting-integration",
+      verdict: "rework",
+      validation,
+      review
+    }), false);
+  }
+  assert.equal(isRecoverableValidatorRework({
+    state: "integrated-pending-manifest",
+    verdict: "rework",
+    validation,
+    review: null
+  }), false);
+});
+
 test("resolver ambiguity is a failed correction awaiting explicit human action", () => {
   const state = {
     runId: "20260920101010-aaaaaa",

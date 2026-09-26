@@ -21,7 +21,7 @@ const {
 const { resolveReconcileSource, executeReconcileRun } = require("../src/reconcile");
 const { executeAdoptedResolution } = require("../src/operation-resolution");
 const { latestRunId, loadRunState } = require("../src/run-store");
-const { resolveCurrentIssueStates } = require("../src/run-resolver");
+const { evidenceForIssue, resolveCurrentIssueStates } = require("../src/run-resolver");
 const { executeValidatorRetry, formatValidatorRetry } = require("../src/validator-retry");
 const { isRecoverableValidatorRework } = require("../src/run-lifecycle");
 const { statusSnapshot, formatStatus, watchStatus } = require("../src/display");
@@ -686,7 +686,7 @@ async function main() {
               planOptions,
               extraState: {
                 ...authorizationState,
-                ...(delegatedAuthorization ? { parentRunId: resolved.runId } : {})
+                parentRunId: resolved.runId
               }
             });
             return {
@@ -841,7 +841,21 @@ async function main() {
     const requestedIssues = reworkArgs.issues;
     let sources;
     if (sourceRunId) {
-      const issueIds = requestedIssues.length ? requestedIssues : null;
+      const sourceState = await loadRunState(repoPath, sourceRunId);
+      let issueIds = requestedIssues.length ? requestedIssues : null;
+      if (!issueIds) {
+        issueIds = (sourceState.workers || [])
+          .map((worker) => String(worker.issue))
+          .filter((issue) => isRecoverableValidatorRework(evidenceForIssue(sourceState, issue)));
+        if (!issueIds.length) throw new Error(`Run ${sourceRunId} has no eligible REWORK issues.`);
+      } else {
+        const ineligible = issueIds.filter((issue) => !isRecoverableValidatorRework(evidenceForIssue(sourceState, issue)));
+        if (ineligible.length) {
+          throw new Error(
+            `Run ${sourceRunId} has no eligible REWORK evidence for ${ineligible.map((issue) => `issue #${issue}`).join(", ")}.`
+          );
+        }
+      }
       const parentRunId = await resolveReworkParentRunId(repoPath, sourceRunId, issueIds);
       sources = [{ sourceRunId, parentRunId, issueIds }];
     } else {
@@ -853,12 +867,6 @@ async function main() {
       const sourceState = await loadRunState(repoPath, source.sourceRunId);
       sourceStates.push(sourceState);
       let issueIds = source.issueIds;
-      if (!issueIds) {
-        const validationByIssue = new Map((sourceState.validations || []).map((entry) => [String(entry.issue), entry]));
-        issueIds = (sourceState.workers || [])
-          .map((worker) => String(worker.issue))
-          .filter((issue) => validationByIssue.get(issue)?.verdict === "rework" || sourceState.reviews?.[issue]?.disposition === "rework-original");
-      }
       correctionTasks.push(...issueIds.map((issue) => ({ ...source, issueIds: [String(issue)], authorization: sourceState.authorization || null })));
     }
     const inheritedScope = sourceStates.flatMap((state) => state.scope?.authorizedIssueIds || []);
@@ -886,7 +894,7 @@ async function main() {
           extraState: resumeState
             ? { ...resumeState, status: "running" }
             : {
-                parentRunId: source.parentRunId,
+                parentRunId: source.parentRunId || source.sourceRunId,
                 ...(source.authorization?.allowedActions?.correct === true ? { authorization: source.authorization } : {})
               }
         });

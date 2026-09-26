@@ -92,6 +92,12 @@ test("command help documents operational state boundaries and realistic next act
   assert.match(approve.stdout, /Validator approval is not human approval/);
   assert.match(approve.stdout, /--override requires explicit issues/);
 
+  const commit = invoke(tempDir(), "commit", "--help");
+  assert.equal(commit.status, 0, commit.stderr);
+  assert.match(commit.stdout, /Every run item must be safely classified/);
+  assert.match(commit.stdout, /every item selected for integration must have affirmative authority/);
+  assert.doesNotMatch(commit.stdout, /Every run item needs a valid human disposition/);
+
   const workflow = invoke(tempDir(), "help", "workflow");
   assert.equal(workflow.status, 0, workflow.stderr);
   assert.match(workflow.stdout, /A saved draft is scope, not launch or integration authorization/);

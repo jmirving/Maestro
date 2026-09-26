@@ -8,7 +8,7 @@ const { executeWorker } = require("./worker");
 const { validateWorker } = require("./validator");
 const { runChecked } = require("./process");
 const { newRunId } = require("./controller");
-const { resolveCurrentIssueStates, runDescendsFrom } = require("./run-resolver");
+const { evidenceForIssue, resolveCurrentIssueStates, runDescendsFrom } = require("./run-resolver");
 const { isRecoverableValidatorRework, isSafelyResumableReworkSetup } = require("./run-lifecycle");
 const { reserveExplicitWork } = require("./scheduler");
 const { commitLifecycleTransition } = require("./lifecycle-coordination");
@@ -16,7 +16,6 @@ const { selectReady } = require("./planner");
 const { loadExecutionStates, unresolvedWork } = require("./work-state");
 const { boundedText, executeConflictResolver } = require("./conflict-resolver");
 const { bindValidation } = require("./authorization");
-const { isValidHumanGateResolution } = require("./reviews");
 
 const DEFAULT_AUTO_REWORK_LIMIT = 3;
 const DEFAULT_AUTO_REWORK_TIMEOUT_MS = 30 * 60 * 1000;
@@ -140,27 +139,29 @@ async function resolveIssueReworkSources(repoPath, issueIds) {
 
 async function resolveReworkParentRunId(repoPath, sourceRunId, issueIds) {
   const issues = [...new Set((issueIds || []).map(String))];
-  if (issues.length !== 1) return sourceRunId;
-  const [current] = await resolveCurrentIssueStates(repoPath, issues);
-  const correction = current?.evidence?.correction;
-  const descendsFromSource = String(current?.runId) === String(sourceRunId) ||
-    await runDescendsFrom(repoPath, current?.state, sourceRunId);
-  if (
-    descendsFromSource &&
-    current?.state?.status === "failed" &&
-    ["technical-conflict", "human-required"].includes(correction?.outcome) &&
-    String(correction.sourceRunId) === String(sourceRunId)
-  ) {
-    throw new Error(
-      `Run ${sourceRunId} has a current interrupted correction for issue #${current.issue} in ${current.runId}. ` +
-      `Resume authoritative current state with \`maestro rework ${current.issue}\`; --run is only for explicit historical selection.`
-    );
-  }
-  if (String(current?.runId) !== String(sourceRunId)) {
-    throw new Error(
-      `Cannot rework superseded implementation evidence from run ${sourceRunId}: ` +
-      `#${current.issue} is current in ${current.runId} (${current.evidence?.state || "unknown"}).`
-    );
+  if (!issues.length) return sourceRunId;
+  const currentIssues = await resolveCurrentIssueStates(repoPath, issues);
+  for (const current of currentIssues) {
+    const correction = current?.evidence?.correction;
+    const descendsFromSource = String(current?.runId) === String(sourceRunId) ||
+      await runDescendsFrom(repoPath, current?.state, sourceRunId);
+    if (
+      descendsFromSource &&
+      current?.state?.status === "failed" &&
+      ["technical-conflict", "human-required"].includes(correction?.outcome) &&
+      String(correction.sourceRunId) === String(sourceRunId)
+    ) {
+      throw new Error(
+        `Run ${sourceRunId} has a current interrupted correction for issue #${current.issue} in ${current.runId}. ` +
+        `Resume authoritative current state with \`maestro rework ${current.issue}\`; --run is only for explicit historical selection.`
+      );
+    }
+    if (String(current?.runId) !== String(sourceRunId)) {
+      throw new Error(
+        `Cannot rework superseded implementation evidence from run ${sourceRunId}: ` +
+        `#${current.issue} is current in ${current.runId} (${current.evidence?.state || "unknown"}).`
+      );
+    }
   }
   return sourceRunId;
 }
@@ -472,6 +473,7 @@ async function executeReworkRun(config, {
   stateSaver = saveRunState,
   stateLoader = loadRunState,
   executionStateLoader = loadExecutionStates,
+  currentStateResolver = resolveCurrentIssueStates,
   automatic = false,
   retryLimit = null,
   deadlineAt = null,
@@ -502,14 +504,7 @@ async function executeReworkRun(config, {
     if (ambiguous.length) {
       throw new Error(`Run ${sourceRunId} has ambiguous worker evidence for ${ambiguous.map((issue) => `issue #${issue}`).join(", ")}.`);
     }
-    const ineligible = [...requested].filter((issue) => {
-      const validation = validationByIssue.get(issue);
-      const review = source.reviews?.[issue];
-      const validationRequiresRework = validation?.verdict === "rework";
-      const humanRequestedRework = review?.disposition === "rework-original" ||
-        isValidHumanGateResolution(review, validation, ["rework"]);
-      return !validationRequiresRework && !humanRequestedRework;
-    });
+    const ineligible = [...requested].filter((issue) => !isRecoverableValidatorRework(evidenceForIssue(source, issue)));
     if (ineligible.length) {
       const details = ineligible.map((issue) => {
         const verdict = validationByIssue.get(issue)?.verdict || "missing";
@@ -521,14 +516,27 @@ async function executeReworkRun(config, {
   }
   const eligibleCandidates = (source.workers || []).filter((worker) => {
     const issue = String(worker.issue);
-    const validation = validationByIssue.get(issue);
-    const review = source.reviews?.[issue];
-    const validationRequiresRework = validation?.verdict === "rework";
-    const humanRequestedRework = review?.disposition === "rework-original" ||
-      isValidHumanGateResolution(review, validation, ["rework"]);
-    return (!requested || requested.has(issue)) && (validationRequiresRework || humanRequestedRework);
+    return (!requested || requested.has(issue)) && isRecoverableValidatorRework(evidenceForIssue(source, issue));
   });
   if (!eligibleCandidates.length) throw new Error(`Run ${sourceRunId} has no selected REWORK issues.`);
+  const currentIssues = await currentStateResolver(repoPath, eligibleCandidates.map((worker) => String(worker.issue)));
+  const stale = currentIssues.filter((current) => {
+    if (String(current.runId) === String(sourceRunId) && isRecoverableValidatorRework(current.evidence)) return false;
+    const reservedAttempt = reservedState?.correction?.attempts?.[String(current.issue)];
+    const ownsReservedChild = String(current.runId) === String(reservedState?.runId) &&
+      String(reservedState?.parentRunId) === String(sourceRunId) &&
+      reservedState?.plan?.selected?.some((item) => String(item.id) === String(current.issue));
+    return !(
+      ownsReservedChild &&
+      (!reservedAttempt || String(reservedAttempt.sourceRunId) === String(sourceRunId))
+    );
+  });
+  if (stale.length) {
+    const details = stale
+      .map((entry) => `#${entry.issue} is current in ${entry.runId} (${entry.evidence?.state || "unknown"})`)
+      .join(", ");
+    throw new Error(`Cannot rework superseded or settled implementation evidence from run ${sourceRunId}: ${details}.`);
+  }
   const concurrencySetting = concurrency?.value
     ? concurrency
     : resolveConcurrency({ savedDefault: config.defaultConcurrency });

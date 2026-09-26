@@ -298,7 +298,7 @@ const COMMANDS = [
     usages: ["maestro commit [manifest.json] [--repo-path <path>] [--run <run-id>] [--close-issues]"],
     positionals: "Optional manifest path; defaults to .maestro.json in the target repository.",
     options: { "--repo-path": COMMON_REPO_OPTION, "--run": RUN_OPTION, "--close-issues": { description: "Also close integrated GitHub issues when repository integration policy permits it." } },
-    prerequisites: "Every run item needs a valid human disposition; integration gates and repository cleanliness must pass.",
+    prerequisites: "Every run item must be safely classified, every item selected for integration must have affirmative authority, and integration gates and repository cleanliness must pass.",
     effects: "Integrates eligible commits one at a time, runs configured gates, advances and commits the manifest, and pushes progress.",
     cautions: "This is the everyday integration boundary and can mutate Git/GitHub state. Rework and discarded items are not integrated.",
     next: ["maestro status", "maestro next"],
