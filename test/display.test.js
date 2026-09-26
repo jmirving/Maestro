@@ -74,6 +74,27 @@ test("reviewed work is not labeled ready to integrate while its run still needs 
   assert.match(text, /Commit: not ready/);
 });
 
+test("resolved HUMAN_GATE correction remains available beside an approved sibling", async () => {
+  const run = mixedRun();
+  const validation = { issue: "7", verdict: "human_gate", exitCode: 0, report: "Owner must choose" };
+  run.validations[1] = validation;
+  run.reviews = {
+    "2": { disposition: "approve" },
+    "7": {
+      disposition: "rework",
+      notes: "Use the owner-selected fallback",
+      humanGateResolution: { verdict: "human_gate", exitCode: 0, report: "Owner must choose" }
+    }
+  };
+
+  const text = formatStatus(await statusSnapshot(config, "/unused", [], { stateLoader: async () => [run] }));
+
+  assert.match(text, /#7 Needs correction - human gate resolved with correction decision, awaiting rework/);
+  assert.match(text, /Commit: ready — integrates #2; skips #7 for rework/);
+  assert.match(text, /Recommended: `maestro commit`/);
+  assert.match(text, /Also available: `maestro rework 7`/);
+});
+
 test("focused issue status includes commit, validator, human review, integration, and next action", async () => {
   const snapshot = await statusSnapshot(config, "/unused", ["7"], { stateLoader: async () => [mixedRun()] });
   const text = formatStatus(snapshot);

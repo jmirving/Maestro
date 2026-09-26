@@ -34,8 +34,8 @@ function buildRecommendations(items, readiness, selected, {
   const available = actionable.filter((item) => !technicalConflicts.includes(item));
   const exhaustedRework = limitIssues(available.filter((item) => item.autoReworkStatus === "retry-exhausted" && !item.humanReview));
   const humanRequiredConflicts = limitIssues(available.filter((item) => item.autoReworkStatus === "human-required"));
-  const currentRework = limitIssues(available.filter((item) => item.validator === "rework" && !item.humanReview && item.autoReworkStatus !== "retry-exhausted"));
-  const reviewedRework = limitIssues(available.filter((item) => item.humanReview === "rework-original"));
+  const currentRework = limitIssues(available.filter((item) => item.lifecycleState === "awaiting-rework" && !item.humanReview));
+  const reviewedRework = limitIssues(available.filter((item) => item.lifecycleState === "awaiting-rework" && item.humanReview));
   const approvals = limitIssues(available.filter((item) => item.validator === "approve" && !item.humanReview));
   const humanGates = limitIssues(available.filter((item) => item.validator === "human_gate" && !item.humanReview));
   const visibleTechnicalConflicts = limitIssues(technicalConflicts);

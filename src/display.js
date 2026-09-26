@@ -178,6 +178,7 @@ const external = effective?.completion?.source === "external";
     issue,
     title: titleFor(config, issue, evidence),
     state,
+    lifecycleState: evidence?.state || null,
     group,
     action,
     workerCommit: evidence?.worker?.headSha || null,

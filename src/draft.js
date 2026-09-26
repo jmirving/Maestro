@@ -114,6 +114,7 @@ function hasCurrentLifecycle(entry) {
     "awaiting-validation-or-review",
     "awaiting-review",
     "awaiting-human-review",
+    "awaiting-human-decision",
     "awaiting-rework",
     "awaiting-integration",
     "integrating"

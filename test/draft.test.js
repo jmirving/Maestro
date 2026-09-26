@@ -346,6 +346,29 @@ test("active Maestro lifecycle conflicts with external completion instead of bei
   assert.match(result.conflicts[0].reason, /adopt external completion.*preserve Maestro ownership/i);
 });
 
+test("unresolved validator HUMAN_GATE preserves Maestro ownership against external completion", () => {
+  const active = {
+    runId: "run-human-gate",
+    status: "awaiting-review",
+    mode: "execute",
+    plan: { selected: [{ id: "7" }] },
+    workers: [{ issue: "7", exitCode: 0, headSha: "gated-candidate" }],
+    validations: [{ issue: "7", verdict: "human_gate", report: "Owner must choose" }],
+    reviews: {},
+    integration: []
+  };
+  const result = proposeDraft({
+    repository: "owner/repo",
+    existingConfig: { repository: "owner/repo", work: { "7": { status: "complete" } } },
+    issues: [{ ...issue(7, "CLOSED"), stateReason: "COMPLETED" }],
+    executionStates: [active]
+  });
+
+  assert.equal(result.manifest.work["7"].completion, undefined);
+  assert.equal(result.conflicts.length, 1);
+  assert.match(result.conflicts[0].reason, /adopt external completion.*preserve Maestro ownership/i);
+});
+
 test("not-planned closure remains inactive and reopening removes adopted external completion", () => {
   const notPlanned = proposeDraft({
     repository: "owner/repo",

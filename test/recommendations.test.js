@@ -17,7 +17,7 @@ test("mixed validator results recommend rework and keep inspect and approval com
   const recommendations = buildRecommendations([
     { issue: "2", validator: "approve", humanReview: null },
     { issue: "5", validator: "approve", humanReview: null },
-    { issue: "7", validator: "rework", humanReview: null, runId: "run-1" },
+    { issue: "7", validator: "rework", humanReview: null, lifecycleState: "awaiting-rework", runId: "run-1" },
     { issue: "12", validator: "approve", humanReview: null }
   ], [{ runId: "run-1", ready: false, missing: [], blocked: [] }], []);
 
@@ -60,6 +60,34 @@ test("validator approval, human approval, and completed integration produce acce
     buildRecommendations([], [], [{ id: "8" }]),
     { recommended: "maestro start", alternatives: [] }
   );
+});
+
+test("resolved HUMAN_GATE rework remains recommended beside an integrable sibling", () => {
+  assert.deepEqual(buildRecommendations([
+    {
+      issue: "7",
+      validator: "human_gate",
+      humanReview: "rework",
+      lifecycleState: "awaiting-rework",
+      runId: "run-1"
+    },
+    {
+      issue: "2",
+      validator: "approve",
+      humanReview: "approve",
+      lifecycleState: "awaiting-integration",
+      runId: "run-1"
+    }
+  ], [{
+    runId: "run-1",
+    ready: true,
+    command: "maestro commit",
+    missing: [],
+    blocked: []
+  }], []), {
+    recommended: "maestro commit",
+    alternatives: ["maestro rework 7", "maestro details 7"]
+  });
 });
 
 test("terminal and inconsistent items cannot produce stale review or rework recommendations", () => {
