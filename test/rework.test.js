@@ -211,6 +211,31 @@ test("issue-oriented rework resolves current states and groups diverged source r
   ]);
 });
 
+test("issue-oriented rework accepts a contextual HUMAN_GATE correction decision", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-gate-source-"));
+  const repoPath = path.join(root, "target");
+  const runId = "20260910030303-cccccc";
+  await fs.mkdir(repoPath);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await saveRunState(repoPath, runId, {
+    runId,
+    status: "awaiting-review",
+    workers: [{ issue: "14", exitCode: 0 }],
+    validations: [{ issue: "14", verdict: "human_gate", exitCode: 0, report: "Owner must choose" }],
+    reviews: {
+      "14": {
+        disposition: "rework",
+        notes: "Use the owner-approved fallback",
+        humanGateResolution: { verdict: "human_gate", exitCode: 0, report: "Owner must choose" }
+      }
+    }
+  });
+
+  assert.deepEqual(await resolveIssueReworkSources(repoPath, ["14"]), [
+    { sourceRunId: runId, issueIds: ["14"] }
+  ]);
+});
+
 test("issue-oriented rework refuses to revive stale rework evidence", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-stale-rework-"));
   const repoPath = path.join(root, "target");

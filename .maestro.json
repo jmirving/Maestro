@@ -448,10 +448,10 @@
       "status": "complete",
       "priority": 110,
       "github": {
-        "state": "OPEN",
+        "state": "CLOSED",
         "stateReason": null,
-        "closedAt": null,
-        "updatedAt": "2026-09-11T21:18:42Z",
+        "closedAt": "2026-09-20T16:08:39Z",
+        "updatedAt": "2026-09-20T16:08:39Z",
         "title": "Keep worker capacity filled across rework/review/integration lifecycle states",
         "labels": [],
         "blockedBy": []
@@ -461,10 +461,10 @@
       "status": "complete",
       "priority": 30,
       "github": {
-        "state": "OPEN",
+        "state": "CLOSED",
         "stateReason": null,
-        "closedAt": null,
-        "updatedAt": "2026-09-11T21:15:48Z",
+        "closedAt": "2026-09-21T00:51:02Z",
+        "updatedAt": "2026-09-21T00:51:02Z",
         "title": "Handle Git conflicts as recoverable lifecycle state across rework and integration",
         "labels": [],
         "blockedBy": []
@@ -474,10 +474,10 @@
       "status": "complete",
       "priority": 130,
       "github": {
-        "state": "OPEN",
+        "state": "CLOSED",
         "stateReason": null,
-        "closedAt": null,
-        "updatedAt": "2026-09-11T20:29:41Z",
+        "closedAt": "2026-09-12T19:45:11Z",
+        "updatedAt": "2026-09-12T19:45:11Z",
         "title": "Make draft output compact by default with readable dependency summaries",
         "labels": [],
         "blockedBy": []
@@ -487,10 +487,10 @@
       "status": "complete",
       "priority": 120,
       "github": {
-        "state": "OPEN",
+        "state": "CLOSED",
         "stateReason": null,
-        "closedAt": null,
-        "updatedAt": "2026-09-11T21:19:21Z",
+        "closedAt": "2026-09-20T16:41:06Z",
+        "updatedAt": "2026-09-20T16:41:06Z",
         "title": "Add per-run concurrency overrides and a CLI command to save the manifest default",
         "labels": [],
         "blockedBy": []
@@ -500,10 +500,10 @@
       "status": "complete",
       "priority": 10,
       "github": {
-        "state": "OPEN",
+        "state": "CLOSED",
         "stateReason": null,
-        "closedAt": null,
-        "updatedAt": "2026-09-11T20:47:57Z",
+        "closedAt": "2026-09-12T20:44:23Z",
+        "updatedAt": "2026-09-12T20:44:23Z",
         "title": "Fix status and commit eligibility resurrecting completed or superseded run items",
         "labels": [],
         "blockedBy": []
@@ -513,10 +513,10 @@
       "status": "complete",
       "priority": 140,
       "github": {
-        "state": "OPEN",
+        "state": "CLOSED",
         "stateReason": null,
-        "closedAt": null,
-        "updatedAt": "2026-09-11T20:48:31Z",
+        "closedAt": "2026-09-22T02:41:42Z",
+        "updatedAt": "2026-09-22T02:41:42Z",
         "title": "Group status by actionable state and collapse completed history by default",
         "labels": [],
         "blockedBy": []
@@ -529,10 +529,10 @@
         "17"
       ],
       "github": {
-        "state": "OPEN",
+        "state": "CLOSED",
         "stateReason": null,
-        "closedAt": null,
-        "updatedAt": "2026-09-11T21:12:34Z",
+        "closedAt": "2026-09-17T17:15:40Z",
+        "updatedAt": "2026-09-17T17:15:40Z",
         "title": "Add named worksets, epic scope resolution, and workset-aware agent drafting",
         "labels": [],
         "blockedBy": [
@@ -553,10 +553,10 @@
         "22"
       ],
       "github": {
-        "state": "OPEN",
+        "state": "CLOSED",
         "stateReason": null,
-        "closedAt": null,
-        "updatedAt": "2026-09-11T21:13:04Z",
+        "closedAt": "2026-09-22T02:16:21Z",
+        "updatedAt": "2026-09-22T02:16:21Z",
         "title": "Add scoped delegated review and integration authorization",
         "labels": [],
         "blockedBy": [
@@ -580,10 +580,10 @@
         "22"
       ],
       "github": {
-        "state": "OPEN",
+        "state": "CLOSED",
         "stateReason": null,
-        "closedAt": null,
-        "updatedAt": "2026-09-11T21:13:45Z",
+        "closedAt": "2026-09-22T03:26:22Z",
+        "updatedAt": "2026-09-22T03:26:22Z",
         "title": "Unify agent-assisted Git conflict resolution and integration-failure recovery",
         "labels": [],
         "blockedBy": [
@@ -636,7 +636,11 @@
             "11"
           ]
         }
-      }
+      },
+      "mode": "execute",
+      "requires": [
+        "node"
+      ]
     },
     "28": {
       "status": "ready",
@@ -668,28 +672,64 @@
             "22"
           ]
         }
-      }
+      },
+      "mode": "execute",
+      "requires": [
+        "node"
+      ]
     },
     "29": {
       "status": "complete",
       "priority": 15,
       "github": {
-        "state": "OPEN",
+        "state": "CLOSED",
         "stateReason": null,
-        "closedAt": null,
-        "updatedAt": "2026-09-12T16:53:21Z",
+        "closedAt": "2026-09-12T20:44:35Z",
+        "updatedAt": "2026-09-12T20:44:35Z",
         "title": "Fix `draft --agent` failing with Codex `invalid_json_schema` / unsupported `uniqueItems`",
         "labels": [],
         "blockedBy": []
       }
     },
-    "32": {
-      "status": "complete",
+    "30": {
+      "status": "ready",
       "github": {
         "state": "OPEN",
         "stateReason": null,
         "closedAt": null,
-        "updatedAt": "2026-09-13T00:38:35Z",
+        "updatedAt": "2026-09-12T19:06:54Z",
+        "title": "Auto-rework masks early child-run failures with `No Maestro run ... found`",
+        "labels": [],
+        "blockedBy": []
+      },
+      "mode": "execute",
+      "requires": [
+        "node"
+      ]
+    },
+    "31": {
+      "status": "ready",
+      "github": {
+        "state": "OPEN",
+        "stateReason": null,
+        "closedAt": null,
+        "updatedAt": "2026-09-13T00:30:18Z",
+        "title": "Simplify validator REWORK lifecycle and remove redundant human rework disposition",
+        "labels": [],
+        "blockedBy": []
+      },
+      "mode": "execute",
+      "requires": [
+        "node"
+      ]
+    },
+    "32": {
+      "status": "complete",
+      "github": {
+        "state": "CLOSED",
+        "stateReason": null,
+        "closedAt": "2026-09-20T21:58:36Z",
+        "updatedAt": "2026-09-20T21:58:37Z",
         "title": "Make persisted run-state writes atomic under concurrent readers/writers",
         "labels": [],
         "blockedBy": []
@@ -699,14 +739,563 @@
       "status": "complete",
       "priority": 5,
       "github": {
-        "state": "OPEN",
+        "state": "CLOSED",
         "stateReason": null,
-        "closedAt": null,
-        "updatedAt": "2026-09-20T16:09:28Z",
+        "closedAt": "2026-09-20T18:33:09Z",
+        "updatedAt": "2026-09-20T18:33:09Z",
         "title": "Serialize lifecycle transitions with scheduler reservations",
         "labels": [],
         "blockedBy": []
       }
+    },
+    "34": {
+      "status": "ready",
+      "github": {
+        "state": "OPEN",
+        "stateReason": null,
+        "closedAt": null,
+        "updatedAt": "2026-09-20T17:28:52Z",
+        "title": "Adopt externally completed work during reconciliation",
+        "labels": [],
+        "blockedBy": []
+      },
+      "mode": "validate",
+      "requires": [
+        "node"
+      ]
+    },
+    "35": {
+      "status": "ready",
+      "github": {
+        "state": "OPEN",
+        "stateReason": null,
+        "closedAt": null,
+        "updatedAt": "2026-09-20T19:00:15Z",
+        "title": "Automatically resolve rework-refresh rebase conflicts",
+        "labels": [],
+        "blockedBy": []
+      },
+      "mode": "validate",
+      "requires": [
+        "node"
+      ]
+    },
+    "36": {
+      "status": "ready",
+      "github": {
+        "state": "OPEN",
+        "stateReason": null,
+        "closedAt": null,
+        "updatedAt": "2026-09-20T22:12:16Z",
+        "title": "Identify and eliminate the intermittent flaky test",
+        "labels": [],
+        "blockedBy": []
+      },
+      "mode": "research",
+      "requires": [
+        "node"
+      ]
+    },
+    "37": {
+      "status": "ready",
+      "github": {
+        "state": "OPEN",
+        "stateReason": null,
+        "closedAt": null,
+        "updatedAt": "2026-09-20T22:39:38Z",
+        "title": "Copy status and details output to the system clipboard",
+        "labels": [],
+        "blockedBy": []
+      },
+      "mode": "execute",
+      "requires": [
+        "node"
+      ]
+    },
+    "38": {
+      "status": "ready",
+      "github": {
+        "state": "OPEN",
+        "stateReason": null,
+        "closedAt": null,
+        "updatedAt": "2026-09-20T22:39:40Z",
+        "title": "Make status and details operator-readable while preserving audit evidence",
+        "labels": [],
+        "blockedBy": []
+      },
+      "mode": "execute",
+      "requires": [
+        "node"
+      ]
+    },
+    "39": {
+      "status": "ready",
+      "github": {
+        "state": "OPEN",
+        "stateReason": null,
+        "closedAt": null,
+        "updatedAt": "2026-09-21T01:55:55Z",
+        "title": "Resume rework after transient preflight/baseline failure without charging a new attempt",
+        "labels": [],
+        "blockedBy": []
+      },
+      "mode": "execute",
+      "requires": [
+        "node"
+      ]
     }
+  },
+  "planning": {
+    "agentAnalysis": {
+      "analyzer": "agent",
+      "provider": "codex",
+      "contextDigest": "91144337922c37254dea849209b1e3bd365655bd26cb5793e23f7531c6fcce12",
+      "outputDigest": "9f9ed3aec52abd2f6bebc562cbb0bc08b683801bf2fc35b3de92300ab5dcfa85",
+      "attempts": 1,
+      "issueIds": [
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+        "10",
+        "11",
+        "12",
+        "13",
+        "14",
+        "15",
+        "16",
+        "17",
+        "18",
+        "19",
+        "20",
+        "21",
+        "22",
+        "23",
+        "24",
+        "25",
+        "26",
+        "27",
+        "28",
+        "29",
+        "30",
+        "31",
+        "32",
+        "33",
+        "34",
+        "35",
+        "36",
+        "37",
+        "38",
+        "39"
+      ],
+      "files": [
+        {
+          "path": "AGENTS.md",
+          "sha256": "49a14d940b5c8afc7553c06b4daa9e759ddbc0be582331bdf9fbac1b62d30502",
+          "truncated": false
+        },
+        {
+          "path": "README.md",
+          "sha256": "1f7963bea7f39dfb6b404b03fae5a4f69753cee83842f390996d9216ff83d293",
+          "truncated": true
+        }
+      ],
+      "recommendations": {
+        "version": 1,
+        "dependencies": [
+          {
+            "issue": "28",
+            "blockedBy": "27",
+            "confidence": "high",
+            "reason": "Completion verification consumes the controller's persisted session and integration evidence. This existing prerequisite remains outstanding.",
+            "evidence": [
+              "manifest.work.28.blockedBy includes 27.",
+              "Issue #28 explicitly requires persisted session/integration evidence from #27.",
+              "Issue #27 is OPEN and has active awaiting-rework evidence."
+            ]
+          }
+        ],
+        "conflicts": [
+          {
+            "issues": [
+              "30",
+              "39"
+            ],
+            "confidence": "high",
+            "reason": "Both change failed rework-child persistence and attempt handling; serialize implementation to keep failure and resume semantics consistent.",
+            "evidence": [
+              "Issue #30 identifies autoReworkIssue() and recordOutcome() in src/rework.js.",
+              "Issue #39 identifies executeReworkRun(), resumedState, and persisted correction attempts."
+            ]
+          },
+          {
+            "issues": [
+              "31",
+              "39"
+            ],
+            "confidence": "high",
+            "reason": "Both change which existing lifecycle states issue-oriented rework can resume.",
+            "evidence": [
+              "Issue #31 addresses rework-original preventing ordinary issue-oriented rework.",
+              "Issue #39 addresses resolveIssueReworkSources() rejecting failed-awaiting-retry."
+            ]
+          },
+          {
+            "issues": [
+              "27",
+              "31"
+            ],
+            "confidence": "medium",
+            "reason": "The controller and review simplification share correction and integration eligibility semantics; coordinate changes with the active controller correction.",
+            "evidence": [
+              "Issue #27 coordinates validation, correction, and integration through authoritative lifecycle state.",
+              "Issue #31 changes the human-review requirements used by assessRunItems().",
+              "deterministicFindings.activeWork lists #27 as awaiting-rework."
+            ]
+          },
+          {
+            "issues": [
+              "27",
+              "39"
+            ],
+            "confidence": "medium",
+            "reason": "Durable controller continuation must agree with rework resume and attempt-accounting behavior.",
+            "evidence": [
+              "Issue #27 requires persisted checkpoints and owned rework/recovery lineage.",
+              "Issue #39 requires resuming an already-charged correction attempt after a preflight failure."
+            ]
+          },
+          {
+            "issues": [
+              "28",
+              "34"
+            ],
+            "confidence": "medium",
+            "reason": "Both define evidence for externally completed work; coordinate the completion contract without assuming a hard dependency.",
+            "evidence": [
+              "Issue #28 requires a documented verification path for externally completed work.",
+              "Issue #34 requires external completion reconciliation without fabricated Maestro integration records."
+            ]
+          },
+          {
+            "issues": [
+              "37",
+              "38"
+            ],
+            "confidence": "high",
+            "reason": "Both modify status/details output behavior; serialize changes so clipboard contents match the final rendered text.",
+            "evidence": [
+              "Issue #37 requires copying the exact user-facing status/details output.",
+              "Issue #38 restructures status/details summaries, actions, and audit evidence."
+            ]
+          }
+        ],
+        "work": [
+          {
+            "issue": "27",
+            "confidence": "high",
+            "reason": "Continue the existing correction lineage rather than launching a fresh controller implementation. Listed manifest prerequisites are complete.",
+            "evidence": [
+              "deterministicFindings.activeWork records run 20260922032626-06ab08 as awaiting-rework with action maestro rework 27.",
+              "manifest.work.27.blockedBy references only complete entries."
+            ],
+            "mode": "execute",
+            "requires": [
+              "node"
+            ]
+          },
+          {
+            "issue": "28",
+            "confidence": "high",
+            "reason": "Implement acceptance verification after #27 supplies current session evidence.",
+            "evidence": [
+              "Issue #28 defines required-member accounting and evidence-backed completion.",
+              "manifest.work.28.blockedBy includes the unfinished #27.",
+              "The configured baseline and integration check are npm test."
+            ],
+            "mode": "execute",
+            "requires": [
+              "node"
+            ]
+          },
+          {
+            "issue": "30",
+            "confidence": "high",
+            "reason": "Implement and regression-test durable early child-attempt evidence while preserving the original failure.",
+            "evidence": [
+              "Issue #30 supplies a concrete missing-child-state failure path through recordOutcome().",
+              "Issue #32's atomic persistence work is complete but does not establish that missing-child initialization is fixed."
+            ],
+            "mode": "execute",
+            "requires": [
+              "node"
+            ]
+          },
+          {
+            "issue": "31",
+            "confidence": "high",
+            "reason": "Separate validator rejection from human authority and correction intent, with coverage for mixed-run integration and legacy dispositions.",
+            "evidence": [
+              "Issue #31 identifies redundant human rework disposition and assessRunItems() as the mixed-run blocking mechanism."
+            ],
+            "mode": "execute",
+            "requires": [
+              "node"
+            ]
+          },
+          {
+            "issue": "34",
+            "confidence": "high",
+            "reason": "Validate existing external-completion behavior against the issue before adding implementation; supplied documentation and manifest already show this feature.",
+            "evidence": [
+              "README.md describes draft --write recording external completion provenance.",
+              "manifest.work.13.completion.source is external.",
+              "Issue #34 remains OPEN."
+            ],
+            "mode": "validate",
+            "requires": [
+              "node"
+            ]
+          },
+          {
+            "issue": "35",
+            "confidence": "medium",
+            "reason": "Validate whether completed shared recovery work already covers the bootstrap use case before introducing another resolver.",
+            "evidence": [
+              "Issue #35 describes a bootstrap path intended to unblock #19 and #26.",
+              "Issues #19 and #26 are now CLOSED and complete.",
+              "The repository tree contains src/conflict-resolver.js and test/conflict-resolver.test.js."
+            ],
+            "mode": "validate",
+            "requires": [
+              "node"
+            ]
+          },
+          {
+            "issue": "36",
+            "confidence": "high",
+            "reason": "Identify and reproduce the actual failing test before selecting a fix or assigning subsystem conflicts.",
+            "evidence": [
+              "Issue #36 explicitly states the flaky test has not been identified reliably.",
+              "Issue #36 requires repeated-suite diagnostics and serial versus concurrent comparison."
+            ],
+            "mode": "research",
+            "requires": [
+              "node"
+            ]
+          },
+          {
+            "issue": "37",
+            "confidence": "high",
+            "reason": "Reuse clipboard infrastructure for exact rendered snapshots and verify nonfatal failure behavior.",
+            "evidence": [
+              "Issue #37 explicitly requires helper reuse, unchanged terminal output, and nonfatal clipboard failures.",
+              "README.md describes existing output clipboard behavior."
+            ],
+            "mode": "execute",
+            "requires": [
+              "node"
+            ]
+          },
+          {
+            "issue": "38",
+            "confidence": "high",
+            "reason": "Improve current-result and next-action summaries while preserving audit evidence and the completed status grouping behavior.",
+            "evidence": [
+              "Issue #38 prioritizes current state, tangible outcome, blocking reason, and next action.",
+              "Issue #23 is CLOSED and complete."
+            ],
+            "mode": "execute",
+            "requires": [
+              "node"
+            ]
+          },
+          {
+            "issue": "39",
+            "confidence": "high",
+            "reason": "Add issue-oriented continuation for preflight-failed correction attempts without charging another attempt or selecting unrelated work.",
+            "evidence": [
+              "Issue #39 identifies the resolver predicate gap and existing resumedState machinery.",
+              "Issue #39 distinguishes resuming correction from maestro start --rerun."
+            ],
+            "mode": "execute",
+            "requires": [
+              "node"
+            ]
+          }
+        ],
+        "waves": [
+          {
+            "issues": [
+              "30",
+              "35",
+              "36"
+            ],
+            "confidence": "medium",
+            "reason": "Advisory fresh-work wave within concurrency three: implement failure persistence while recovery coverage validation and flake investigation remain read-only. Recalculate capacity if #27 resumes.",
+            "evidence": [
+              "manifest.defaultConcurrency is 3.",
+              "#35 is recommended for validation and #36 for research.",
+              "#27 already has an unresolved correction lineage."
+            ]
+          },
+          {
+            "issues": [
+              "31",
+              "34",
+              "37"
+            ],
+            "confidence": "medium",
+            "reason": "Separate review-lifecycle implementation, external-completion validation, and clipboard handling. Coordinate #31 with any active #27 correction before dispatch.",
+            "evidence": [
+              "Issue #31 targets rework/review eligibility.",
+              "Issue #34 has supplied evidence of existing implementation requiring validation.",
+              "Issue #37 targets status/details clipboard behavior."
+            ]
+          },
+          {
+            "issues": [
+              "39",
+              "38"
+            ],
+            "confidence": "medium",
+            "reason": "Follow the earlier rework and clipboard changes with retry continuation and output restructuring; coordinate shared next-action recommendations and any active controller correction.",
+            "evidence": [
+              "#39 overlaps rework behavior addressed by #30 and #31.",
+              "#38 changes the output copied by #37."
+            ]
+          },
+          {
+            "issues": [
+              "28"
+            ],
+            "confidence": "high",
+            "reason": "Conditional wave: dispatch only after #27 is complete and authoritative lifecycle checks permit it; earlier wave completion alone does not satisfy that prerequisite.",
+            "evidence": [
+              "manifest.work.28.blockedBy includes 27.",
+              "deterministicFindings.activeWork records #27 as awaiting-rework."
+            ]
+          }
+        ],
+        "unresolved": [
+          {
+            "issue": "13",
+            "question": "Does effective lifecycle reconciliation suppress the historical awaiting-integration candidate after external completion?",
+            "reason": "Supplied terminal product/manifest evidence conflicts with the active-work listing. Do not recommend reintegration from this context.",
+            "evidence": [
+              "Issue #13 is CLOSED and manifest.work.13.status is complete.",
+              "manifest.work.13.completion.source is external.",
+              "deterministicFindings.activeWork still lists #13 as awaiting-integration."
+            ]
+          },
+          {
+            "issue": "27",
+            "question": "What does the current validator feedback require, and which lifecycle surfaces does the correction modify?",
+            "reason": "The active correction's evidence is absent, so precise overlap and dispatch timing cannot be determined. Manifest-only expected waves must not trigger duplicate work.",
+            "evidence": [
+              "deterministicFindings.activeWork records #27 as awaiting-rework.",
+              "deterministicFindings.expectedWaves places #27 in a fresh projected wave.",
+              "No worker or validator report for the active run is supplied."
+            ]
+          },
+          {
+            "issue": "34",
+            "question": "Which acceptance requirements remain unmet by the documented external-completion implementation?",
+            "reason": "Existing behavior may partially or fully satisfy this open issue; documentation alone cannot prove completion.",
+            "evidence": [
+              "README.md documents external completion adoption.",
+              "manifest.work.13 contains external completion provenance.",
+              "The supplied #34 body ends before its full requirements."
+            ]
+          },
+          {
+            "issue": "35",
+            "question": "Does the completed #26 recovery path automatically handle rework-refresh conflicts and continue the interrupted correction?",
+            "reason": "The bootstrap rationale may be stale, but supplied filenames and closed issue state do not prove the required behavior.",
+            "evidence": [
+              "#35 says it exists to unblock completion of #19 and #26.",
+              "#19 and #26 are complete.",
+              "No recovery implementation source is supplied."
+            ]
+          },
+          {
+            "issue": "36",
+            "question": "Which test currently flakes, and is its cause related to the completed persistence or reservation fixes?",
+            "reason": "There is insufficient evidence to assign a cause or make flake elimination a hard prerequisite for other issues.",
+            "evidence": [
+              "#36 explicitly forbids assuming a subsystem before identifying the failure.",
+              "#32 and #33 are complete.",
+              "#39 reports a transient baseline failure without identifying the test."
+            ]
+          }
+        ]
+      }
+    },
+    "advisoryConflicts": [
+      {
+        "issues": [
+          "27",
+          "31"
+        ],
+        "confidence": "medium",
+        "source": "agent:codex context:91144337922c; evidence: Issue #27 coordinates validation, correction, and integration through authoritative lifecycle state. | Issue #31 changes the human-review requirements used by assessRunItems(). | deterministicFindings.activeWork lists #27 as awaiting-rework.",
+        "reason": "The controller and review simplification share correction and integration eligibility semantics; coordinate changes with the active controller correction.",
+        "analyzer": "agent"
+      },
+      {
+        "issues": [
+          "27",
+          "39"
+        ],
+        "confidence": "medium",
+        "source": "agent:codex context:91144337922c; evidence: Issue #27 requires persisted checkpoints and owned rework/recovery lineage. | Issue #39 requires resuming an already-charged correction attempt after a preflight failure.",
+        "reason": "Durable controller continuation must agree with rework resume and attempt-accounting behavior.",
+        "analyzer": "agent"
+      },
+      {
+        "issues": [
+          "28",
+          "34"
+        ],
+        "confidence": "medium",
+        "source": "agent:codex context:91144337922c; evidence: Issue #28 requires a documented verification path for externally completed work. | Issue #34 requires external completion reconciliation without fabricated Maestro integration records.",
+        "reason": "Both define evidence for externally completed work; coordinate the completion contract without assuming a hard dependency.",
+        "analyzer": "agent"
+      },
+      {
+        "issues": [
+          "30",
+          "39"
+        ],
+        "confidence": "high",
+        "source": "agent:codex context:91144337922c; evidence: Issue #30 identifies autoReworkIssue() and recordOutcome() in src/rework.js. | Issue #39 identifies executeReworkRun(), resumedState, and persisted correction attempts.",
+        "reason": "Both change failed rework-child persistence and attempt handling; serialize implementation to keep failure and resume semantics consistent.",
+        "analyzer": "agent"
+      },
+      {
+        "issues": [
+          "31",
+          "39"
+        ],
+        "confidence": "high",
+        "source": "agent:codex context:91144337922c; evidence: Issue #31 addresses rework-original preventing ordinary issue-oriented rework. | Issue #39 addresses resolveIssueReworkSources() rejecting failed-awaiting-retry.",
+        "reason": "Both change which existing lifecycle states issue-oriented rework can resume.",
+        "analyzer": "agent"
+      },
+      {
+        "issues": [
+          "37",
+          "38"
+        ],
+        "confidence": "high",
+        "source": "agent:codex context:91144337922c; evidence: Issue #37 requires copying the exact user-facing status/details output. | Issue #38 restructures status/details summaries, actions, and audit evidence.",
+        "reason": "Both modify status/details output behavior; serialize changes so clipboard contents match the final rendered text.",
+        "analyzer": "agent"
+      }
+    ]
   }
 }

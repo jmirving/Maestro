@@ -39,6 +39,32 @@ test("unreviewed validator rework remains recoverable", () => {
   }), true);
 });
 
+test("contextual human gate correction becomes recoverable", () => {
+  const validation = { issue: "19", verdict: "human_gate", exitCode: 0, report: "Choose a fallback" };
+  const review = {
+    disposition: "rework",
+    notes: "Use the owner-approved fallback",
+    humanGateResolution: { verdict: "human_gate", exitCode: 0, report: "Choose a fallback" }
+  };
+  const state = {
+    runId: "20260917155803-6fcd79",
+    status: "awaiting-review",
+    workers: [{ issue: "19", exitCode: 0 }],
+    validations: [validation],
+    reviews: { "19": review },
+    integration: []
+  };
+
+  const lifecycle = classifyRunIssue(state, state.workers[0]);
+  assert.deepEqual(lifecycle, { state: "awaiting-rework", action: "maestro rework 19" });
+  assert.equal(isRecoverableValidatorRework({
+    state: lifecycle.state,
+    verdict: "human_gate",
+    validation,
+    review
+  }), true);
+});
+
 test("other human dispositions remain non-recoverable", () => {
   assert.equal(isRecoverableValidatorRework({
     state: "awaiting-rework",

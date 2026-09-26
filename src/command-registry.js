@@ -358,15 +358,15 @@ const COMMANDS = [
     when: "Use for historical or human-gate dispositions not covered by everyday approve/discard commands.",
     usages: ["maestro review [manifest.json] --run <run-id> --issue <number> --disposition <value> [--title <title>] [--notes <notes>]"],
     positionals: "Optional manifest path.",
-    options: { "--repo-path": COMMON_REPO_OPTION, "--run": { ...RUN_OPTION, required: true }, "--issue": { value: "<number>", description: "Issue in the selected run.", required: true }, "--disposition": { value: "<approve|rework-original|approve-with-follow-up>", description: "Human decision to record.", required: true }, "--title": { value: "<title>", description: "Follow-up issue title; required with approve-with-follow-up." }, "--notes": { value: "<notes>", description: "Follow-up issue body; required with approve-with-follow-up." } },
-    prerequisites: "The issue must exist in the selected run. Follow-up approval requires both title and notes.",
+    options: { "--repo-path": COMMON_REPO_OPTION, "--run": { ...RUN_OPTION, required: true }, "--issue": { value: "<number>", description: "Issue in the selected run.", required: true }, "--disposition": { value: "<approve|rework|rework-original|approve-with-follow-up>", description: "Human decision to record.", required: true }, "--title": { value: "<title>", description: "Follow-up issue title; required with approve-with-follow-up." }, "--notes": { value: "<notes>", description: "Decision context; required with HUMAN_GATE rework and follow-up approval." } },
+    prerequisites: "The issue must exist in the selected run. HUMAN_GATE rework requires notes; follow-up approval requires both title and notes.",
     effects: "Writes persisted human review state; a follow-up GitHub issue is created later during integration.",
     cautions: "Recording a disposition does not itself integrate or complete work.",
     next: ["maestro status", "maestro integrate-run --run <run-id>", "maestro rework <issue>"],
-    examples: [["review", "--run", "20260910010101-aaaaaa", "--issue", "57", "--disposition", "rework-original"], ["review", "--run", "20260910010101-aaaaaa", "--issue", "57", "--disposition", "approve"]],
+    examples: [["review", "--run", "20260910010101-aaaaaa", "--issue", "57", "--disposition", "rework", "--notes", "Use the owner-approved fallback"], ["review", "--run", "20260910010101-aaaaaa", "--issue", "57", "--disposition", "approve"]],
     positionalKind: "optional-manifest",
     numericOptions: ["--issue"],
-    allowedValues: { "--disposition": ["approve", "rework-original", "approve-with-follow-up"] }
+    allowedValues: { "--disposition": ["approve", "rework", "rework-original", "approve-with-follow-up"] }
   },
   {
     name: "integrate-run",

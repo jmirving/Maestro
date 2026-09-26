@@ -16,6 +16,7 @@ const { selectReady } = require("./planner");
 const { loadExecutionStates, unresolvedWork } = require("./work-state");
 const { boundedText, executeConflictResolver } = require("./conflict-resolver");
 const { bindValidation } = require("./authorization");
+const { isValidHumanGateResolution } = require("./reviews");
 
 const DEFAULT_AUTO_REWORK_LIMIT = 3;
 const DEFAULT_AUTO_REWORK_TIMEOUT_MS = 30 * 60 * 1000;
@@ -493,8 +494,11 @@ async function executeReworkRun(config, {
       throw new Error(`Run ${sourceRunId} has ambiguous worker evidence for ${ambiguous.map((issue) => `issue #${issue}`).join(", ")}.`);
     }
     const ineligible = [...requested].filter((issue) => {
-      const validationRequiresRework = validationByIssue.get(issue)?.verdict === "rework";
-      const humanRequestedRework = source.reviews?.[issue]?.disposition === "rework-original";
+      const validation = validationByIssue.get(issue);
+      const review = source.reviews?.[issue];
+      const validationRequiresRework = validation?.verdict === "rework";
+      const humanRequestedRework = review?.disposition === "rework-original" ||
+        isValidHumanGateResolution(review, validation, ["rework"]);
       return !validationRequiresRework && !humanRequestedRework;
     });
     if (ineligible.length) {
@@ -508,8 +512,11 @@ async function executeReworkRun(config, {
   }
   const eligibleCandidates = (source.workers || []).filter((worker) => {
     const issue = String(worker.issue);
-    const validationRequiresRework = validationByIssue.get(issue)?.verdict === "rework";
-    const humanRequestedRework = source.reviews?.[issue]?.disposition === "rework-original";
+    const validation = validationByIssue.get(issue);
+    const review = source.reviews?.[issue];
+    const validationRequiresRework = validation?.verdict === "rework";
+    const humanRequestedRework = review?.disposition === "rework-original" ||
+      isValidHumanGateResolution(review, validation, ["rework"]);
     return (!requested || requested.has(issue)) && (validationRequiresRework || humanRequestedRework);
   });
   if (!eligibleCandidates.length) throw new Error(`Run ${sourceRunId} has no selected REWORK issues.`);
@@ -569,6 +576,13 @@ async function executeReworkRun(config, {
       phase: "preparing",
       outcome: null,
       trigger: validationSnapshot(validationByIssue.get(issue)),
+      ...(source.reviews?.[issue]?.humanGateResolution ? {
+        humanDecision: {
+          disposition: source.reviews[issue].disposition,
+          notes: source.reviews[issue].notes,
+          recordedAt: source.reviews[issue].recordedAt || null
+        }
+      } : {}),
       implementation: {
         branch: worker.branch || null,
         worktreePath: worker.worktreePath || null,
@@ -750,7 +764,10 @@ async function executeReworkRun(config, {
         correctionContext: {
           sourceRunId,
           priorWorkerReport: worker.report || "",
-          validatorReport: priorValidation?.report || ""
+          validatorReport: priorValidation?.report || "",
+          humanDecision: source.reviews?.[issue]?.humanGateResolution
+            ? source.reviews[issue].notes
+            : null
         },
         timeoutMs: remainingTime(deadlineAt)
       });

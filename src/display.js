@@ -2,7 +2,7 @@ const { loadExecutionStates } = require("./work-state");
 const { currentIssueEvidenceFromStates, effectiveIssueStates } = require("./run-resolver");
 const { assessRunItems } = require("./existing-run");
 const { buildRecommendations, formatRecommendations } = require("./recommendations");
-const { isValidValidatorOverride } = require("./reviews");
+const { isValidValidatorOverride, isValidHumanGateResolution } = require("./reviews");
 const { capacitySnapshot } = require("./scheduler");
 const { formatConcurrency } = require("./concurrency");
 const { loadAuthorization, assessCurrentScope, assessDelegatedAuthorization } = require("./authorization");
@@ -79,6 +79,11 @@ const external = effective?.completion?.source === "external";
     state = "human rework disposition recorded, excluded from integration";
     group = "attention";
     integrationState = "excluded; will be reworked";
+    action = `maestro rework ${issue}`;
+  } else if (isValidHumanGateResolution(review, validation, ["rework"])) {
+    state = "human gate resolved with correction decision, awaiting rework";
+    group = "attention";
+    integrationState = "excluded; will be reworked using the recorded decision context";
     action = `maestro rework ${issue}`;
   } else if (isValidValidatorOverride(review, validation)) {
     state = "human override approved, ready to integrate";

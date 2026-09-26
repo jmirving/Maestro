@@ -197,6 +197,10 @@ function appendEvidence(lines, state, evidence, { heading = null } = {}) {
         appendReport(lines, "Overridden validator report", evidence.review.validatorOverride.report);
       }
     }
+    if (evidence.review.humanGateResolution) {
+      lines.push(`  Resolved gate verdict: ${valueOrNone(evidence.review.humanGateResolution.verdict)}`);
+      lines.push(`  Resolved gate exit code: ${valueOrNone(evidence.review.humanGateResolution.exitCode)}`);
+    }
     if (evidence.review.title) lines.push(`  Follow-up title: ${evidence.review.title}`);
     if (evidence.review.notes) lines.push(`  Notes: ${evidence.review.notes}`);
     if (evidence.review.followUpUrl) lines.push(`  Follow-up: ${evidence.review.followUpUrl}`);

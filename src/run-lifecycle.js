@@ -1,12 +1,14 @@
-const { isValidValidatorOverride } = require("./reviews");
+const { isValidValidatorOverride, isValidHumanGateResolution } = require("./reviews");
 const { retryableValidationFailure } = require("./validator");
 
 function isRecoverableValidatorRework(evidence) {
   const reviewDisposition = evidence?.review?.disposition;
   const humanRequestedRework = reviewDisposition === "rework-original";
   const validatorRequestedRework = evidence?.verdict === "rework" && !evidence?.review;
+  const resolvedHumanGate = evidence?.verdict === "human_gate" &&
+    isValidHumanGateResolution(evidence.review, evidence.validation, ["rework"]);
   return ["awaiting-rework", "rework-exhausted"].includes(evidence?.state) &&
-    (humanRequestedRework || validatorRequestedRework);
+    (humanRequestedRework || validatorRequestedRework || resolvedHumanGate);
 }
 
 function classifyRunIssue(state, worker) {
@@ -31,6 +33,9 @@ function classifyRunIssue(state, worker) {
     return { state: "discarded", action: "maestro start" };
   }
   if (review?.disposition === "rework-original") {
+    return { state: "awaiting-rework", action: `maestro rework ${issue}` };
+  }
+  if (isValidHumanGateResolution(review, validation, ["rework"])) {
     return { state: "awaiting-rework", action: `maestro rework ${issue}` };
   }
   if (isValidValidatorOverride(review, validation)) {

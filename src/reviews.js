@@ -6,6 +6,7 @@ const DISPOSITIONS = new Set([
   "approve",
   "approve-override",
   "discard",
+  "rework",
   "rework-original",
   "approve-with-follow-up"
 ]);
@@ -16,6 +17,15 @@ function isValidValidatorOverride(review, validation) {
     review.validatorOverride?.verdict === validation.verdict &&
     review.validatorOverride?.exitCode === (validation.exitCode ?? null) &&
     review.validatorOverride?.report === (validation.report ?? null);
+}
+
+function isValidHumanGateResolution(review, validation, dispositions = ["rework"]) {
+  return dispositions.includes(review?.disposition) &&
+    validation?.verdict === "human_gate" &&
+    Boolean(review?.notes?.trim()) &&
+    review.humanGateResolution?.verdict === validation.verdict &&
+    review.humanGateResolution?.exitCode === (validation.exitCode ?? null) &&
+    review.humanGateResolution?.report === (validation.report ?? null);
 }
 
 async function recordReview({
@@ -42,6 +52,13 @@ async function recordReview({
       const known = current.workers?.some((worker) => String(worker.issue) === String(issue));
       if (!known) throw new Error(`Issue #${issue} is not part of run ${runId}.`);
       const validation = (current.validations || []).find((entry) => String(entry.issue) === String(issue));
+      const resolvesHumanGate = disposition === "rework" && validation?.verdict === "human_gate";
+      if (disposition === "rework" && !resolvesHumanGate) {
+        throw new Error(`The rework disposition resolves validator HUMAN_GATE only; issue #${issue} has validator ${validation?.verdict || "missing"} evidence.`);
+      }
+      if (resolvesHumanGate && !notes?.trim()) {
+        throw new Error(`Resolving validator HUMAN_GATE for issue #${issue} requires --notes with the actual human decision and context.`);
+      }
       if (disposition === "discard" && validation?.verdict !== "rework") {
         throw new Error(`Issue #${issue} is not validator-REWORK and cannot be discarded.`);
       }
@@ -54,6 +71,13 @@ async function recordReview({
         title,
         notes,
         ...(validatorOverride ? { validatorOverride } : {}),
+        ...(resolvesHumanGate ? {
+          humanGateResolution: {
+            verdict: validation.verdict,
+            exitCode: validation.exitCode ?? null,
+            report: validation.report ?? null
+          }
+        } : {}),
         recordedAt: new Date().toISOString()
       };
       return current;
@@ -84,4 +108,4 @@ async function ensureFollowUp({ config, repoPath, state, issue, runner = runChec
   return review.followUpUrl;
 }
 
-module.exports = { DISPOSITIONS, isValidValidatorOverride, recordReview, ensureFollowUp, followUpBody };
+module.exports = { DISPOSITIONS, isValidValidatorOverride, isValidHumanGateResolution, recordReview, ensureFollowUp, followUpBody };

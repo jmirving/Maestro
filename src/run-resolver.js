@@ -1,7 +1,7 @@
 const path = require("node:path");
 const { loadPersistedRunStates, loadRunState } = require("./run-store");
 const { classifyRunIssue } = require("./run-lifecycle");
-const { isValidValidatorOverride } = require("./reviews");
+const { isValidValidatorOverride, isValidHumanGateResolution } = require("./reviews");
 
 const FILTER_KEYS = new Set([
   "state",
@@ -32,6 +32,7 @@ function lifecycleState(state, { worker, validation, review, integration, select
   if (integration) return "integrated-pending-manifest";
   if (review?.disposition === "discard") return "discarded";
   if (isValidValidatorOverride(review, validation)) return "awaiting-integration";
+  if (isValidHumanGateResolution(review, validation, ["rework"])) return "awaiting-rework";
   if (review?.disposition === "rework-original" || validation?.verdict === "rework") return "awaiting-rework";
   if (review && validation?.verdict === "approve") return "awaiting-integration";
   if (["approve", "human_gate"].includes(validation?.verdict)) return "awaiting-human-review";

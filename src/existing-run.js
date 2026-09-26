@@ -1,6 +1,6 @@
 const { loadPersistedRunStates, loadRunState, saveRunState } = require("./run-store");
 const { effectiveIssueStates } = require("./run-resolver");
-const { ensureFollowUp, isValidValidatorOverride } = require("./reviews");
+const { ensureFollowUp, isValidValidatorOverride, isValidHumanGateResolution } = require("./reviews");
 const { integrateApproved, reconcilePublication, withPreservedManifest } = require("./integrator");
 const { captureBaseline } = require("./baseline");
 const { digest, loadAuthorization, assessCurrentScope, assessDelegatedAuthorization } = require("./authorization");
@@ -117,6 +117,11 @@ function assessRunItems(state, { effectiveByIssue = null, delegatedByIssue = new
         });
         continue;
       }
+      rework.push({ issue, worker, validation, review });
+      continue;
+    }
+
+    if (isValidHumanGateResolution(review, validation, ["rework"])) {
       rework.push({ issue, worker, validation, review });
       continue;
     }
