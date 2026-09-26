@@ -51,6 +51,29 @@ test("classifyRunItems allows approved work to integrate while HUMAN_GATE stays 
   assert.deepEqual(result.gated.map((entry) => entry.issue), ["47"]);
 });
 
+test("classifyRunItems excludes a HUMAN_GATE resolved to rework from an integrable sibling", () => {
+  const validation = { issue: "47", verdict: "human_gate", exitCode: 0, report: "Owner must choose" };
+  const result = classifyRunItems({
+    runId: "run-gate-rework",
+    workers: [{ issue: "33" }, { issue: "47" }],
+    validations: [
+      { issue: "33", verdict: "approve" },
+      validation
+    ],
+    reviews: {
+      "33": { disposition: "approve" },
+      "47": {
+        disposition: "rework",
+        notes: "Use the owner-selected fallback",
+        humanGateResolution: { verdict: "human_gate", exitCode: 0, report: "Owner must choose" }
+      }
+    }
+  });
+
+  assert.deepEqual(result.integrable.map((entry) => entry.issue), ["33"]);
+  assert.deepEqual(result.rework.map((entry) => entry.issue), ["47"]);
+});
+
 test("classifyRunItems accepts only provenance-bound HUMAN_GATE acceptance", () => {
   const validation = { issue: "47", verdict: "human_gate", exitCode: 0, report: "Owner decides" };
   const result = classifyRunItems({
