@@ -13,6 +13,7 @@ const { integrateExistingRun } = require("../src/existing-run");
 const {
   resolveIssueReworkSources,
   resolveReworkParentRunId,
+  reserveManualRework,
   executeReworkRun,
   autoRework,
   DEFAULT_AUTO_REWORK_LIMIT,
@@ -881,24 +882,12 @@ async function main() {
       initialTasks: correctionTasks,
       reserveInitial: async (source) => {
         const runId = source.resumeRunId || newRunId();
-        const items = source.issueIds.map((id) => ({ id, ...(config.work?.[id] || {}), mode: "rework" }));
-        const resumeState = source.resumeRunId ? await loadRunState(repoPath, source.resumeRunId) : null;
-        const reservation = await reserveExplicitWork(config, {
+        return reserveManualRework(config, {
           repoPath,
+          source,
           runId,
-          mode: "rework",
-          items,
-          planOptions,
-          expectedCurrent: source.resumeRunId ? [{ issue: source.issueIds[0], runId: source.resumeRunId }] : [],
-          existingState: resumeState,
-          extraState: resumeState
-            ? { ...resumeState, status: "running" }
-            : {
-                parentRunId: source.parentRunId || source.sourceRunId,
-                ...(source.authorization?.allowedActions?.correct === true ? { authorization: source.authorization } : {})
-              }
+          planOptions
         });
-        return { ...reservation, runId };
       },
       executeInitial: (source, prepared) => executeReworkRun(config, {
         repoPath,

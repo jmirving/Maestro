@@ -166,6 +166,43 @@ async function resolveReworkParentRunId(repoPath, sourceRunId, issueIds) {
   return sourceRunId;
 }
 
+async function reserveManualRework(config, {
+  repoPath,
+  source,
+  runId,
+  planOptions = {},
+  stateLoader = loadRunState,
+  reserver = reserveExplicitWork
+} = {}) {
+  const items = source.issueIds.map((id) => ({ id, ...(config.work?.[id] || {}), mode: "rework" }));
+  const resumeState = source.resumeRunId ? await stateLoader(repoPath, source.resumeRunId) : null;
+  const reservation = await reserver(config, {
+    repoPath,
+    runId,
+    mode: "rework",
+    items,
+    planOptions,
+    expectedCurrent: source.resumeRunId
+      ? [{ issue: source.issueIds[0], runId: source.resumeRunId }]
+      : source.issueIds.map((issue) => ({ issue, runId: source.sourceRunId })),
+    currentEligibility: source.resumeRunId
+      ? null
+      : (current) => isRecoverableValidatorRework(current.evidence),
+    existingState: resumeState,
+    extraState: resumeState
+      ? { ...resumeState, status: "running" }
+      : {
+          parentRunId: source.parentRunId || source.sourceRunId,
+          ...(source.authorization?.allowedActions?.correct === true ? { authorization: source.authorization } : {})
+        }
+  });
+  return {
+    ...reservation,
+    runId,
+    terminal: reservation.reason === "changed-evidence"
+  };
+}
+
 async function gitOutput(runner, args, options) {
   return (await runner("git", args, options)).stdout.trim();
 }
@@ -1171,6 +1208,7 @@ module.exports = {
   DEFAULT_CONFLICT_RESOLUTION_TIMEOUT_MS,
   resolveIssueReworkSources,
   resolveReworkParentRunId,
+  reserveManualRework,
   refreshWorker,
   loadCorrectionLineage,
   resultOutcome,

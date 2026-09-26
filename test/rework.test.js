@@ -8,12 +8,13 @@ const { buildWorkerPrompt } = require("../src/worker");
 const {
   executeReworkRun,
   resolveIssueReworkSources,
+  reserveManualRework,
   autoRework,
   loadCorrectionLineage
 } = require("../src/rework");
 const { saveRunState, loadRunState, loadPersistedRunStates } = require("../src/run-store");
 const { resolveCurrentIssueStates } = require("../src/run-resolver");
-const { capacitySnapshot } = require("../src/scheduler");
+const { capacitySnapshot, runLifecycleBackfill } = require("../src/scheduler");
 
 function parseLeadingJson(stdout) {
   return JSON.parse(stdout.split("\n\nIssue #", 1)[0]);
@@ -808,6 +809,56 @@ test("execution admission rejects settled and superseded explicit-run evidence",
     executeReworkRun(fixture.config, { repoPath: fixture.repoPath, sourceRunId: fixture.sourceRunId, issueIds: ["9"] }),
     /Cannot rework superseded or settled implementation evidence.*#9 is current/
   );
+});
+
+test("manual rework cannot reserve or launch after discovery evidence is settled or superseded", async (t) => {
+  for (const transition of ["discard", "supersede"]) {
+    await t.test(transition, async (t) => {
+      const fixture = await autoFixture(t);
+      const [source] = await resolveIssueReworkSources(fixture.repoPath, ["7"]);
+      let workerStarts = 0;
+
+      const outcomes = await runLifecycleBackfill(fixture.config, {
+        repoPath: fixture.repoPath,
+        authorizedIssueIds: [],
+        initialTasks: [source],
+        reserveInitial: async (task) => {
+          if (transition === "discard") {
+            const state = await loadRunState(fixture.repoPath, fixture.sourceRunId);
+            state.reviews["7"] = { disposition: "discard" };
+            await saveRunState(fixture.repoPath, fixture.sourceRunId, state);
+          } else {
+            await saveRunState(fixture.repoPath, "20260910020202-bbbbbb", {
+              runId: "20260910020202-bbbbbb",
+              parentRunId: fixture.sourceRunId,
+              mode: "rework",
+              status: "awaiting-review",
+              plan: { selected: [{ id: "7" }] },
+              workers: [{ issue: "7", exitCode: 0 }],
+              validations: [{ issue: "7", verdict: "approve" }],
+              reviews: {}
+            });
+          }
+          return reserveManualRework(fixture.config, {
+            repoPath: fixture.repoPath,
+            source: task,
+            runId: `20260910030303-${transition === "discard" ? "dddddd" : "eeeeee"}`,
+            planOptions: { issueIds: [] }
+          });
+        },
+        executeInitial: async () => {
+          workerStarts += 1;
+          return "unexpected-worker";
+        },
+        executeReserved: async () => "unexpected-backfill"
+      });
+
+      assert.deepEqual(outcomes, []);
+      assert.equal(workerStarts, 0);
+      const states = await loadPersistedRunStates(fixture.repoPath);
+      assert.equal(states.some((state) => state.runId.startsWith("20260910030303-")), false);
+    });
+  }
 });
 
 test("automatic rework corrects and revalidates until approval while persisting trigger lineage", async (t) => {
