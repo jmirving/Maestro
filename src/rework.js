@@ -9,7 +9,7 @@ const { validateWorker } = require("./validator");
 const { runChecked } = require("./process");
 const { newRunId } = require("./controller");
 const { resolveCurrentIssueStates, runDescendsFrom } = require("./run-resolver");
-const { isRecoverableValidatorRework } = require("./run-lifecycle");
+const { isRecoverableValidatorRework, isSafelyResumableReworkSetup } = require("./run-lifecycle");
 const { reserveExplicitWork } = require("./scheduler");
 const { commitLifecycleTransition } = require("./lifecycle-coordination");
 const { selectReady } = require("./planner");
@@ -107,7 +107,10 @@ async function resolveIssueReworkSources(repoPath, issueIds) {
       conflict?.interruptedStage === "rework-refresh" &&
       !["completed", "resolved", "manually-resolved"].includes(conflict.operationState);
   };
-  const refused = resolved.filter((entry) => !isRecoverableValidatorRework(entry.evidence) && !resumable(entry));
+  const resumableSetup = (entry) => isSafelyResumableReworkSetup(entry.state, entry.evidence);
+  const refused = resolved.filter((entry) => (
+    !isRecoverableValidatorRework(entry.evidence) && !resumable(entry) && !resumableSetup(entry)
+  ));
   if (refused.length) {
     const details = refused
       .map((entry) => `#${entry.issue} (${entry.evidence.state || "unknown"} in run ${entry.runId})`)
@@ -118,11 +121,16 @@ async function resolveIssueReworkSources(repoPath, issueIds) {
   const grouped = new Map();
   for (const entry of resolved) {
     const correction = entry.evidence?.correction;
-    const sourceRunId = resumable(entry) ? String(correction.sourceRunId) : entry.runId;
-    const key = resumable(entry) ? `resume:${entry.runId}` : `source:${sourceRunId}`;
+    const resumesChild = resumable(entry) || resumableSetup(entry);
+    const sourceRunId = resumesChild ? String(correction.sourceRunId) : entry.runId;
+    const key = resumesChild ? `resume:${entry.runId}` : `source:${sourceRunId}`;
     if (!grouped.has(key)) grouped.set(key, {
       sourceRunId,
-      ...(resumable(entry) ? { parentRunId: entry.state.parentRunId, resumeRunId: entry.runId } : {}),
+      ...(resumesChild ? {
+        parentRunId: entry.state.parentRunId,
+        resumeRunId: entry.runId,
+        ...(resumableSetup(entry) ? { resumeSetupFailure: true } : {})
+      } : {}),
       issueIds: []
     });
     grouped.get(key).issueIds.push(entry.issue);
@@ -470,7 +478,8 @@ async function executeReworkRun(config, {
   reserveCapacity = false,
   capacityReserver = reserveExplicitWork,
   reservedState = null,
-  concurrency = null
+  concurrency = null,
+  resumeSetupFailure = false
 } = {}) {
   const resumedState = reservedState?.runId === runId && reservedState?.correction?.attempts
     ? reservedState
@@ -561,6 +570,13 @@ async function executeReworkRun(config, {
   for (const worker of candidates) {
     const issue = String(worker.issue);
     if (attempts[issue]) {
+      if (resumeSetupFailure || isSafelyResumableReworkSetup(resumedState, {
+        correction: attempts[issue],
+        worker: (resumedState.workers || []).find((entry) => String(entry.issue) === issue) || null,
+        validation: (resumedState.validations || []).find((entry) => String(entry.issue) === issue) || null
+      })) {
+        attempts[issue].workerExecution = { status: "not-started" };
+      }
       attempts[issue].phase = "preparing-resume";
       delete attempts[issue].finalVerdict;
       continue;
@@ -588,7 +604,8 @@ async function executeReworkRun(config, {
         worktreePath: worker.worktreePath || null,
         baseSha: worker.baseSha || null,
         targetBranch: config.defaultBranch || "main"
-      }
+      },
+      workerExecution: { status: "not-started" }
     };
   }
 
@@ -640,7 +657,19 @@ async function executeReworkRun(config, {
     ? Object.assign(reservedState, { parentRunId, correction: { attempts } })
     : initialState;
   result.status = "running";
+  if (result.failure || result.failureStage || result.failureCode) {
+    result.failures = result.failures || [];
+    result.failures.push({
+      message: result.failure || null,
+      stage: result.failureStage || null,
+      code: result.failureCode || null,
+      baseline: result.baseline || null,
+      preflights: result.preflights || []
+    });
+  }
   delete result.failure;
+  delete result.failureStage;
+  delete result.failureCode;
   if (resumedState) {
     result.workers = [];
     result.validations = [];
@@ -747,6 +776,10 @@ async function executeReworkRun(config, {
     }
 
     currentStage = "worker";
+    for (const worker of refreshed) {
+      result.correction.attempts[String(worker.issue)].workerExecution = { status: "started" };
+    }
+    await stateSaver(repoPath, runId, result);
     result.workers = await Promise.all(refreshed.map((worker) => {
       const issue = String(worker.issue);
       const item = items.find((entry) => String(entry.id) === issue);
@@ -774,7 +807,9 @@ async function executeReworkRun(config, {
     }));
 
     for (const worker of result.workers) {
-      result.correction.attempts[String(worker.issue)].phase = worker.exitCode === 0 ? "validation-pending" : "stopped";
+      const attempt = result.correction.attempts[String(worker.issue)];
+      attempt.workerExecution = { status: "completed" };
+      attempt.phase = worker.exitCode === 0 ? "validation-pending" : "stopped";
     }
     await stateSaver(repoPath, runId, result);
 
@@ -815,6 +850,10 @@ async function executeReworkRun(config, {
     }
     result.status = "failed";
     result.failure = error.message;
+    result.failureStage = currentStage;
+    result.failureCode = error.code || (currentStage === "preflight" ? "PREFLIGHT_FAILED" : "REWORK_EXECUTION_FAILED");
+    if (currentStage === "preflight" && error.results) result.preflights = error.results;
+    if (currentStage === "baseline" && error.baseline) result.baseline = error.baseline;
     for (const [issue, attempt] of Object.entries(result.correction.attempts)) {
       if (attempt.phase !== "completed") {
         attempt.phase = "stopped";
@@ -827,6 +866,8 @@ async function executeReworkRun(config, {
         } else {
           attempt.outcome = "infrastructure-failure";
         }
+        attempt.failureStage = currentStage;
+        attempt.failureCode = result.failureCode;
       }
     }
     await persistTerminalState();

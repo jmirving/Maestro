@@ -7,6 +7,7 @@ const { capacitySnapshot } = require("./scheduler");
 const { formatConcurrency } = require("./concurrency");
 const { loadAuthorization, assessCurrentScope, assessDelegatedAuthorization } = require("./authorization");
 const { retryableValidationFailure } = require("./validator");
+const { isSafelyResumableReworkSetup } = require("./run-lifecycle");
 
 function numericSort(left, right) {
   return String(left).localeCompare(String(right), undefined, { numeric: true });
@@ -51,6 +52,7 @@ function describeIssue(config, issue, evidence, plan, effective = null, delegate
   const review = evidence?.review || null;
   const integration = evidence?.integration || null;
   const conflict = evidence?.conflict || evidence?.correction?.conflict || null;
+  const resumableReworkSetup = isSafelyResumableReworkSetup(evidence?.runState, evidence);
   let state;
   let group;
   let integrationState = "not eligible";
@@ -125,6 +127,12 @@ const external = effective?.completion?.source === "external";
     state = "validator requested a human decision, awaiting human disposition";
     group = "attention";
     integrationState = "not eligible until human disposition";
+  } else if (resumableReworkSetup) {
+    const stage = evidence.correction?.failureStage || evidence.runState?.failureStage || "setup";
+    state = `correction attempt ${evidence.correction.number} stopped during ${stage} before its worker started; safe to resume`;
+    group = "attention";
+    integrationState = "not eligible; resume the existing correction attempt after setup recovers";
+    action = `maestro rework ${issue}`;
   } else if (["worker-failure", "validator-failure", "infrastructure-failure", "technical-conflict", "human-required", "timeout", "no-progress"].includes(evidence?.autoRework?.status || evidence?.correction?.outcome)) {
     const outcome = evidence.autoRework?.status || evidence.correction.outcome;
     const attempt = evidence.autoRework?.attemptsUsed ?? evidence.correction?.number ?? 0;
@@ -190,6 +198,7 @@ const external = effective?.completion?.source === "external";
     validator: validation?.verdict || null,
     humanReview: review?.disposition || null,
     autoReworkStatus: evidence?.autoRework?.status || null,
+    resumableReworkSetup,
     technicalConflict: !effective?.terminal && !effective?.consistencyConflict && conflict && !["completed", "resolved", "manually-resolved"].includes(conflict.operationState) ? conflict : null,
     correctionAttempt: evidence?.correction?.number || null,
     integrationState,
@@ -273,7 +282,7 @@ async function statusSnapshot(config, repoPath, requestedIssues = [], {
 
   const items = issueIds.map((issue) => {
     const resolved = currentByIssue.get(issue);
-    const evidence = resolved ? { ...resolved.evidence, runId: resolved.runId } : null;
+    const evidence = resolved ? { ...resolved.evidence, runId: resolved.runId, runState: resolved.state } : null;
     const delegated = resolved ? delegatedByRun.get(String(resolved.runId))?.get(issue) : null;
     return describeIssue(config, issue, evidence, plan, effectiveByIssue.get(issue), delegated);
   });

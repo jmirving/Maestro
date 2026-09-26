@@ -53,6 +53,40 @@ test("mixed status separates validator results from missing human dispositions",
   assert.doesNotMatch(text, /Issue #2 .*— approved$/m);
 });
 
+test("status recommends issue-oriented rework for a safely resumable setup failure", async () => {
+  const failed = {
+    runId: "20260926101010-aaaaaa",
+    parentRunId: "20260926100000-bbbbbb",
+    mode: "rework",
+    status: "failed",
+    failure: "Target repository baseline is failing.",
+    failureStage: "baseline",
+    failureCode: "BASELINE_FAILED",
+    plan: { selected: [{ id: "7", title: "Needs correction", mode: "rework" }] },
+    baseline: { passing: false },
+    preflights: [],
+    workers: [],
+    validations: [],
+    reviews: {},
+    correction: { attempts: { "7": {
+      number: 2,
+      sourceRunId: "20260926100000-bbbbbb",
+      phase: "stopped",
+      outcome: "infrastructure-failure",
+      failureStage: "baseline",
+      failureCode: "BASELINE_FAILED",
+      workerExecution: { status: "not-started" }
+    } } }
+  };
+
+  const snapshot = await statusSnapshot(config, "/unused", ["7"], { stateLoader: async () => [failed] });
+  const text = formatStatus(snapshot);
+  assert.match(text, /stopped during baseline before its worker started; safe to resume/);
+  assert.equal(snapshot.items[0].action, "maestro rework 7");
+  assert.equal(snapshot.recommendations.recommended, "maestro rework 7");
+  assert.match(text, /Recommended: `maestro rework 7`/);
+});
+
 test("reviewed mixed status shows exactly what commit integrates and skips", async () => {
   const snapshot = await statusSnapshot(config, "/unused", [], { stateLoader: async () => [mixedRun({ reviewed: true })] });
   const text = formatStatus(snapshot);

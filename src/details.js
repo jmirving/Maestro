@@ -83,6 +83,12 @@ function appendEvidence(lines, state, evidence, { heading = null } = {}) {
   lines.push(`Mode: ${valueOrNone(state.mode)}`);
   lines.push(`Run status: ${valueOrNone(state.status)}`);
   if (state.failure) lines.push(`Run failure: ${state.failure}`);
+  if (state.failures?.length) {
+    lines.push("Prior run failures:");
+    for (const failure of state.failures) {
+      lines.push(`  ${valueOrNone(failure.stage)} (${valueOrNone(failure.code)}): ${valueOrNone(failure.message)}`);
+    }
+  }
   if (state.validationRetry) {
     lines.push("Validator retry provenance:");
     lines.push(`  Source run: ${valueOrNone(state.validationRetry.sourceRunId)}`);
@@ -131,6 +137,9 @@ function appendEvidence(lines, state, evidence, { heading = null } = {}) {
     lines.push(`  Source run: ${valueOrNone(evidence.correction.sourceRunId)}`);
     lines.push(`  Phase: ${valueOrNone(evidence.correction.phase)}`);
     lines.push(`  Outcome: ${valueOrNone(evidence.correction.outcome)}`);
+    if (evidence.correction.failureStage) lines.push(`  Failure stage: ${evidence.correction.failureStage}`);
+    if (evidence.correction.failureCode) lines.push(`  Failure code: ${evidence.correction.failureCode}`);
+    if (evidence.correction.workerExecution) lines.push(`  Worker execution: ${valueOrNone(evidence.correction.workerExecution.status)}`);
     if (evidence.correction.timeoutStage) lines.push(`  Timeout stage: ${evidence.correction.timeoutStage}`);
     if (evidence.correction.implementation) {
       lines.push(`  Implementation branch: ${valueOrNone(evidence.correction.implementation.branch)}`);

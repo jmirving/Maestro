@@ -11,6 +11,43 @@ function isRecoverableValidatorRework(evidence) {
     (humanRequestedRework || validatorRequestedRework || resolvedHumanGate);
 }
 
+const RESUMABLE_REWORK_SETUP_STAGES = new Set(["preflight", "baseline"]);
+
+function isSafelyResumableReworkSetup(state, evidence) {
+  const correction = evidence?.correction;
+  if (
+    state?.mode !== "rework" ||
+    state?.status !== "failed" ||
+    !correction?.sourceRunId ||
+    !Number.isInteger(correction?.number) || correction.number < 1 ||
+    !["infrastructure-failure", "timeout"].includes(correction?.outcome) ||
+    correction?.phase !== "stopped" ||
+    evidence?.worker ||
+    evidence?.validation
+  ) return false;
+
+  const failureStage = correction.failureStage || state.failureStage || null;
+  if (failureStage) {
+    return RESUMABLE_REWORK_SETUP_STAGES.has(failureStage) &&
+      correction.workerExecution?.status === "not-started";
+  }
+
+  if (RESUMABLE_REWORK_SETUP_STAGES.has(correction.timeoutStage)) {
+    return correction.workerExecution === undefined &&
+      Array.isArray(state.workers) && state.workers.length === 0 &&
+      Array.isArray(state.validations) && state.validations.length === 0;
+  }
+
+  // Runs persisted before failureStage/workerExecution were introduced can
+  // still prove a pre-worker failure: executeReworkRun only populates baseline
+  // after setup completes, and only invokes a correction worker afterwards.
+  return correction.workerExecution === undefined &&
+    state.baseline === null &&
+    Array.isArray(state.preflights) &&
+    Array.isArray(state.workers) && state.workers.length === 0 &&
+    Array.isArray(state.validations) && state.validations.length === 0;
+}
+
 function classifyRunIssue(state, worker) {
   const issue = String(worker.issue);
   const validation = (state.validations || []).find((entry) => String(entry.issue) === issue);
@@ -71,4 +108,8 @@ function classifyRunIssue(state, worker) {
   return { state: "awaiting-validation-or-review", action: "maestro status" };
 }
 
-module.exports = { classifyRunIssue, isRecoverableValidatorRework };
+module.exports = {
+  classifyRunIssue,
+  isRecoverableValidatorRework,
+  isSafelyResumableReworkSetup
+};

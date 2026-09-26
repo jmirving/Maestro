@@ -1,6 +1,10 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { classifyRunIssue, isRecoverableValidatorRework } = require("../src/run-lifecycle");
+const {
+  classifyRunIssue,
+  isRecoverableValidatorRework,
+  isSafelyResumableReworkSetup
+} = require("../src/run-lifecycle");
 
 test("validator rework remains recoverable after rework-original human disposition", () => {
   const evidence = {
@@ -86,4 +90,67 @@ test("resolver ambiguity is a failed correction awaiting explicit human action",
     state: "failed-awaiting-retry",
     action: "maestro details 35"
   });
+});
+
+test("setup resume requires explicit pre-worker evidence and fails closed once worker execution is ambiguous", () => {
+  const state = {
+    mode: "rework",
+    status: "failed",
+    failureStage: "baseline",
+    baseline: null,
+    preflights: [],
+    workers: [],
+    validations: []
+  };
+  const correction = {
+    number: 1,
+    sourceRunId: "20260926100000-bbbbbb",
+    phase: "stopped",
+    outcome: "infrastructure-failure",
+    failureStage: "baseline",
+    workerExecution: { status: "not-started" }
+  };
+
+  assert.equal(isSafelyResumableReworkSetup(state, { correction }), true);
+  assert.equal(isSafelyResumableReworkSetup(state, {
+    correction: { ...correction, workerExecution: undefined }
+  }), false);
+  assert.equal(isSafelyResumableReworkSetup(state, {
+    correction: { ...correction, workerExecution: { status: "started" } }
+  }), false);
+  assert.equal(isSafelyResumableReworkSetup(state, {
+    correction,
+    worker: { issue: "7", exitCode: 1 }
+  }), false);
+  assert.equal(isSafelyResumableReworkSetup({ ...state, failureStage: undefined }, {
+    correction: {
+      number: 1,
+      sourceRunId: "20260926100000-bbbbbb",
+      phase: "stopped",
+      outcome: "timeout",
+      timeoutStage: "baseline"
+    }
+  }), true);
+});
+
+test("legacy failed rework remains resumable only when persisted ordering proves baseline never completed", () => {
+  const state = {
+    mode: "rework",
+    status: "failed",
+    baseline: null,
+    preflights: [{ capability: "db", status: "passed" }],
+    workers: [],
+    validations: []
+  };
+  const evidence = {
+    correction: {
+      number: 1,
+      sourceRunId: "20260926100000-bbbbbb",
+      phase: "stopped",
+      outcome: "infrastructure-failure"
+    }
+  };
+
+  assert.equal(isSafelyResumableReworkSetup(state, evidence), true);
+  assert.equal(isSafelyResumableReworkSetup({ ...state, baseline: { passing: true } }, evidence), false);
 });

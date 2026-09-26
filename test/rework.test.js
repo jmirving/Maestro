@@ -354,6 +354,274 @@ test("explicit run issue selection rejects missing, ambiguous, and non-rework ev
   );
 });
 
+test("preflight failure resumes the same rework child and charged attempt through worker and validator", async (t) => {
+  const fixture = await autoFixture(t);
+  fixture.config.work["7"].requires = ["database"];
+  fixture.config.capabilities = { database: { required: true, preflight: "check-db" } };
+  const childRunId = "20260910101010-a1e111";
+  let preflights = 0;
+  let workers = 0;
+  let validators = 0;
+
+  await assert.rejects(executeReworkRun(fixture.config, {
+    repoPath: fixture.repoPath,
+    sourceRunId: fixture.sourceRunId,
+    runId: childRunId,
+    automatic: true,
+    retryLimit: 3,
+    runner: fixture.runner,
+    preflightRunner: async () => {
+      preflights += 1;
+      const error = new Error("database temporarily unavailable");
+      error.result = { stderr: "connection refused" };
+      throw error;
+    },
+    workerExecutor: async () => { workers += 1; }
+  }), /failed preflight/);
+
+  const failed = await loadRunState(fixture.repoPath, childRunId);
+  assert.equal(failed.failureStage, "preflight");
+  assert.equal(failed.failureCode, "PREFLIGHT_FAILED");
+  assert.equal(failed.correction.attempts["7"].number, 1);
+  assert.equal(failed.correction.attempts["7"].retryLimit, 3);
+  assert.deepEqual(failed.correction.attempts["7"].workerExecution, { status: "not-started" });
+  assert.equal(workers, 0);
+  assert.deepEqual(await resolveIssueReworkSources(fixture.repoPath, ["7"]), [{
+    sourceRunId: fixture.sourceRunId,
+    parentRunId: fixture.sourceRunId,
+    resumeRunId: childRunId,
+    resumeSetupFailure: true,
+    issueIds: ["7"]
+  }]);
+
+  const resumed = await executeReworkRun(fixture.config, {
+    repoPath: fixture.repoPath,
+    sourceRunId: fixture.sourceRunId,
+    parentRunId: fixture.sourceRunId,
+    runId: childRunId,
+    reservedState: failed,
+    runner: fixture.runner,
+    preflightRunner: async () => {
+      preflights += 1;
+      return { stdout: "available" };
+    },
+    workerExecutor: async ({ worktree }) => {
+      workers += 1;
+      return { issue: "7", exitCode: 0, ...worktree, headSha: "corrected", report: "fixed" };
+    },
+    validatorExecutor: async ({ worker }) => {
+      validators += 1;
+      return { issue: worker.issue, exitCode: 0, verdict: "approve", report: "approved" };
+    }
+  });
+
+  assert.equal(resumed.runId, childRunId);
+  assert.equal(resumed.parentRunId, fixture.sourceRunId);
+  assert.equal(resumed.correction.attempts["7"].number, 1);
+  assert.equal(resumed.correction.attempts["7"].retryLimit, 3);
+  assert.equal(resumed.correction.attempts["7"].automatic, true);
+  assert.equal(resumed.correction.attempts["7"].outcome, "approved");
+  assert.deepEqual(resumed.correction.attempts["7"].workerExecution, { status: "completed" });
+  assert.deepEqual(resumed.failures, [{
+    message: "Required capability 'database' failed preflight.",
+    stage: "preflight",
+    code: "PREFLIGHT_FAILED",
+    baseline: null,
+    preflights: [{ capability: "database", status: "failed", stderr: "connection refused" }]
+  }]);
+  assert.equal(preflights, 2);
+  assert.equal(workers, 1);
+  assert.equal(validators, 1);
+  await assert.rejects(resolveIssueReworkSources(fixture.repoPath, ["7"]), /Cannot rework/);
+  assert.equal(workers, 1);
+});
+
+test("baseline failure is rerun while preserving the child and correction attempt", async (t) => {
+  const fixture = await autoFixture(t);
+  fixture.config.baseline = { commands: ["npm test"] };
+  const childRunId = "20260910101010-ba5e11";
+  let baselines = 0;
+  let workers = 0;
+
+  await assert.rejects(executeReworkRun(fixture.config, {
+    repoPath: fixture.repoPath,
+    sourceRunId: fixture.sourceRunId,
+    runId: childRunId,
+    automatic: true,
+    retryLimit: 2,
+    runner: fixture.runner,
+    baselineRunner: async () => {
+      baselines += 1;
+      return { code: 1, stdout: "", stderr: "flaky failure" };
+    },
+    workerExecutor: async () => { workers += 1; }
+  }), /baseline is failing/);
+
+  const failed = await loadRunState(fixture.repoPath, childRunId);
+  assert.equal(failed.failureStage, "baseline");
+  assert.equal(failed.failureCode, "BASELINE_FAILED");
+  assert.equal(failed.baseline.passing, false);
+  const [source] = await resolveIssueReworkSources(fixture.repoPath, ["7"]);
+  assert.equal(source.resumeRunId, childRunId);
+
+  const resumed = await executeReworkRun(fixture.config, {
+    repoPath: fixture.repoPath,
+    ...source,
+    runId: source.resumeRunId,
+    reservedState: failed,
+    runner: fixture.runner,
+    baselineRunner: async () => {
+      baselines += 1;
+      return { code: 0, stdout: "pass", stderr: "" };
+    },
+    workerExecutor: async ({ worktree }) => {
+      workers += 1;
+      return { issue: "7", exitCode: 0, ...worktree, headSha: "corrected" };
+    },
+    validatorExecutor: async ({ worker }) => ({ issue: worker.issue, exitCode: 0, verdict: "approve" })
+  });
+
+  assert.equal(baselines, 2);
+  assert.equal(workers, 1);
+  assert.equal(resumed.baseline.passing, true);
+  assert.equal(resumed.correction.attempts["7"].number, 1);
+  assert.equal(resumed.correction.attempts["7"].retryLimit, 2);
+  assert.equal((await loadCorrectionLineage(fixture.repoPath, childRunId, "7")).attempts.length, 1);
+});
+
+test("maestro rework resumes a fail-once baseline child exactly once", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-rework-resume-cli-"));
+  const repoPath = path.join(root, "target");
+  const binPath = path.join(root, "bin");
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  const baselineCount = path.join(root, "baseline-count");
+  const workerCount = path.join(root, "worker-count");
+  const sourceRunId = "20260910010101-aaaaaa";
+  await fs.mkdir(repoPath);
+  await fs.mkdir(binPath);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(manifestPath, `${JSON.stringify({
+    repository: "example/repo",
+    baseline: { commands: ["baseline-check"] },
+    work: { "7": { status: "ready" } }
+  })}\n`);
+  await saveRunState(repoPath, sourceRunId, {
+    runId: sourceRunId,
+    mode: "execute",
+    status: "awaiting-review",
+    plan: { selected: [{ id: "7" }] },
+    workers: [{
+      issue: "7",
+      exitCode: 0,
+      baseSha: "base",
+      headSha: "head-old",
+      branch: "maestro/7",
+      worktreePath: repoPath,
+      report: "original"
+    }],
+    validations: [{ issue: "7", exitCode: 0, verdict: "rework", report: "fix it" }],
+    reviews: {}
+  });
+  await fs.writeFile(path.join(binPath, "baseline-check"), `#!/usr/bin/env node
+const fs = require("node:fs");
+const file = ${JSON.stringify(baselineCount)};
+const count = fs.existsSync(file) ? Number(fs.readFileSync(file, "utf8")) : 0;
+fs.writeFileSync(file, String(count + 1));
+process.exit(count === 0 ? 1 : 0);
+`);
+  await fs.writeFile(path.join(binPath, "git"), `#!/usr/bin/env node
+if (process.argv[2] === "rev-parse") process.stdout.write(process.argv[3] === "HEAD" ? "head-new\\n" : "base-new\\n");
+`);
+  await fs.writeFile(path.join(binPath, "codex"), `#!/usr/bin/env node
+const fs = require("node:fs");
+const index = process.argv.indexOf("--output-last-message");
+const validator = process.argv.includes("read-only");
+if (!validator) {
+  const file = ${JSON.stringify(workerCount)};
+  const count = fs.existsSync(file) ? Number(fs.readFileSync(file, "utf8")) : 0;
+  fs.writeFileSync(file, String(count + 1));
+}
+if (index >= 0) fs.writeFileSync(process.argv[index + 1], validator ? "VERDICT: APPROVE\\n" : "Result: complete\\n");
+`);
+  for (const executable of ["baseline-check", "git", "codex"]) {
+    await fs.chmod(path.join(binPath, executable), 0o755);
+  }
+
+  const cli = path.resolve(__dirname, "../bin/maestro.js");
+  const args = [cli, "rework", manifestPath, "7", "--repo-path", repoPath];
+  const env = { ...process.env, PATH: `${binPath}${path.delimiter}${process.env.PATH}` };
+  const first = spawnSync(process.execPath, args, { encoding: "utf8", env });
+  assert.equal(first.status, 1);
+  assert.match(first.stderr, /baseline is failing/);
+
+  const second = spawnSync(process.execPath, args, { encoding: "utf8", env });
+  assert.equal(second.status, 0, second.stderr);
+  const resumed = parseLeadingJson(second.stdout);
+  assert.equal(resumed.correction.attempts["7"].number, 1);
+  assert.equal(resumed.validations[0].verdict, "approve");
+
+  const repeated = spawnSync(process.execPath, args, { encoding: "utf8", env });
+  assert.equal(repeated.status, 1);
+  assert.match(repeated.stderr, /Cannot rework/);
+  assert.equal(await fs.readFile(baselineCount, "utf8"), "2");
+  assert.equal(await fs.readFile(workerCount, "utf8"), "1");
+  const children = (await loadPersistedRunStates(repoPath)).filter((state) => state.mode === "rework");
+  assert.equal(children.length, 1);
+  assert.equal(children[0].correction.attempts["7"].number, 1);
+});
+
+test("failure after correction worker invocation is never treated as resumable setup", async (t) => {
+  const fixture = await autoFixture(t);
+  const childRunId = "20260910101010-a0e1ed";
+
+  await assert.rejects(executeReworkRun(fixture.config, {
+    repoPath: fixture.repoPath,
+    sourceRunId: fixture.sourceRunId,
+    runId: childRunId,
+    runner: fixture.runner,
+    workerExecutor: async () => { throw new Error("worker transport failed"); }
+  }), /worker transport failed/);
+
+  const failed = await loadRunState(fixture.repoPath, childRunId);
+  assert.equal(failed.failureStage, "worker");
+  assert.deepEqual(failed.correction.attempts["7"].workerExecution, { status: "started" });
+  await assert.rejects(resolveIssueReworkSources(fixture.repoPath, ["7"]), /Cannot rework/);
+});
+
+test("historical setup failure with sufficient provenance resolves to its existing child", async (t) => {
+  const fixture = await autoFixture(t);
+  const childRunId = "20260910101010-a15701";
+  await saveRunState(fixture.repoPath, childRunId, {
+    runId: childRunId,
+    parentRunId: fixture.sourceRunId,
+    mode: "rework",
+    status: "failed",
+    plan: { selected: [{ id: "7", mode: "rework" }] },
+    baseline: null,
+    preflights: [{ capability: "node", status: "passed" }],
+    workers: [],
+    validations: [],
+    reviews: {},
+    correction: { attempts: { "7": {
+      number: 1,
+      automatic: true,
+      sourceRunId: fixture.sourceRunId,
+      rootRunId: fixture.sourceRunId,
+      retryLimit: 3,
+      phase: "stopped",
+      outcome: "infrastructure-failure"
+    } } }
+  });
+
+  assert.deepEqual(await resolveIssueReworkSources(fixture.repoPath, ["7"]), [{
+    sourceRunId: fixture.sourceRunId,
+    parentRunId: fixture.sourceRunId,
+    resumeRunId: childRunId,
+    resumeSetupFailure: true,
+    issueIds: ["7"]
+  }]);
+});
+
 test("maestro rework executes the latest actionable set without a run ID", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-rework-cli-"));
   const repoPath = path.join(root, "target");

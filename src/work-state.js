@@ -3,7 +3,7 @@ const path = require("node:path");
 const { computePlan, selectReady } = require("./planner");
 const { loadPersistedRunStates } = require("./run-store");
 const { reportRootForRepo } = require("./reporter");
-const { classifyRunIssue } = require("./run-lifecycle");
+const { classifyRunIssue, isSafelyResumableReworkSetup } = require("./run-lifecycle");
 const { effectiveIssueStates } = require("./run-resolver");
 
 async function loadExecutionStates(repoPath) {
@@ -87,6 +87,7 @@ function unresolvedWork(states, config = null) {
 
     const hasActiveReservation = !capacityIssues || capacityIssues.includes(issue);
     if (evidence.selected && ((state.status === "running" && hasActiveReservation) || state.status === "failed")) {
+      const safelyResumableSetup = isSafelyResumableReworkSetup(state, evidence);
       byIssue.set(issue, {
         issue,
         runId,
@@ -94,7 +95,9 @@ function unresolvedWork(states, config = null) {
         state: state.status === "failed"
           ? "failed-awaiting-retry"
           : state.mode === "rework" ? "rework-running" : "running",
-        action: state.status === "failed" ? "maestro start --rerun" : "maestro status"
+        action: state.status === "failed"
+          ? safelyResumableSetup ? `maestro rework ${issue}` : "maestro start --rerun"
+          : "maestro status"
       });
     }
   }
