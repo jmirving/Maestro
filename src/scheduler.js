@@ -205,8 +205,9 @@ async function reserveExplicitWork(config, {
     }
     const plan = { ...capacity.plan, selected: requested };
     const reserved = reservedRunState({ repoPath, runId, mode, plan, capacity, extraState });
+    const previousState = existingState ? structuredClone(existingState) : null;
     const state = existingState ? Object.assign(existingState, reserved) : reserved;
-    await beforePersist({ state, states, current });
+    await beforePersist({ state, previousState, states, current });
     await stateSaver(repoPath, runId, state);
     return {
       reserved: true,

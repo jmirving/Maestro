@@ -8,6 +8,7 @@ const { buildReconcilePrompt, resolveReconcileSource, executeReconcileRun } = re
 const { saveRunState, loadRunState, loadPersistedRunStates } = require("../src/run-store");
 const { createDelegatedAuthorization, saveAuthorization } = require("../src/authorization");
 const { integrateExistingRun } = require("../src/existing-run");
+const { runChecked } = require("../src/process");
 
 const RECOVERY_TIMEOUT_TEST_MS = 2_000;
 
@@ -103,6 +104,139 @@ test("issue-oriented reconciliation resolves current evidence while --run remain
     sourceRunId: "historical-run",
     issueIds: ["19"]
   });
+});
+
+test("issue-oriented reconcile resumes the authoritative child after a baseline-only setup failure", async (t) => {
+  const { repoPath, workerPath, sourceRunId, originalHead } = await conflictFixture(t, {
+    sourceConflict: false,
+    cleanRefresh: true
+  });
+  const runId = "20260924040213-0202c4";
+  const config = {
+    repository: "example/repo",
+    defaultBranch: "main",
+    baseline: { commands: ["flaky baseline"] },
+    work: { "19": { status: "ready" } }
+  };
+  let baselineCalls = 0;
+  let validatorCalls = 0;
+
+  await assert.rejects(executeReconcileRun(config, {
+    repoPath, sourceRunId, issueIds: ["19"], runId,
+    baselineRunner: async () => {
+      baselineCalls += 1;
+      return { code: 1, stdout: "", stderr: "intermittent" };
+    },
+    validatorExecutor: async () => { validatorCalls += 1; }
+  }), /baseline is failing/);
+
+  const failed = await loadRunState(repoPath, runId);
+  assert.equal(failed.failureStage, "baseline");
+  assert.equal(failed.failureCode, "BASELINE_FAILED");
+  assert.equal(failed.setup.expected["19"].implementationSha, originalHead);
+  assert.deepEqual(failed.setup.execution, {
+    workerStarted: false,
+    resolverStarted: false,
+    validatorStarted: false
+  });
+  assert.equal(failed.recovery.attempts.length, 0);
+  const originalDeadline = failed.recovery.deadlineAt;
+  assert.deepEqual(await resolveReconcileSource(repoPath, "19"), {
+    sourceRunId,
+    issueIds: ["19"],
+    resumeRunId: runId,
+    resumeSetupFailure: true
+  });
+
+  const resumed = await executeReconcileRun(config, {
+    repoPath, sourceRunId, issueIds: ["19"], runId,
+    baselineRunner: async () => {
+      baselineCalls += 1;
+      return { code: 0, stdout: "pass", stderr: "" };
+    },
+    validatorExecutor: async ({ worker }) => {
+      validatorCalls += 1;
+      return { issue: worker.issue, verdict: "approve", exitCode: 0, report: "fresh" };
+    }
+  });
+
+  assert.equal(resumed.runId, runId);
+  assert.equal(resumed.status, "awaiting-review");
+  assert.equal(resumed.recovery.deadlineAt, originalDeadline);
+  assert.equal(resumed.recovery.attempts.length, 0);
+  assert.equal(resumed.workers[0].headSha, git(workerPath, "rev-parse", "HEAD"));
+  assert.equal(resumed.validations[0].verdict, "approve");
+  assert.equal(resumed.setup.history.length, 1);
+  assert.equal(baselineCalls, 2);
+  assert.equal(validatorCalls, 1);
+  assert.equal((await loadPersistedRunStates(repoPath)).filter((state) => state.mode === "reconcile").length, 1);
+});
+
+test("reconcile setup resume verifies the exact implementation and refuses post-failure side effects", async (t) => {
+  const { repoPath, workerPath, sourceRunId } = await conflictFixture(t, {
+    sourceConflict: false,
+    cleanRefresh: true
+  });
+  const runId = "20260924040213-0202c5";
+  const config = {
+    repository: "example/repo",
+    defaultBranch: "main",
+    baseline: { commands: ["flaky baseline"] },
+    work: { "19": { status: "ready" } }
+  };
+  await assert.rejects(executeReconcileRun(config, {
+    repoPath, sourceRunId, issueIds: ["19"], runId,
+    baselineRunner: async () => ({ code: 1, stdout: "", stderr: "intermittent" })
+  }), /baseline is failing/);
+
+  await fs.writeFile(path.join(workerPath, "unexpected.txt"), "drift\n");
+  await assert.rejects(executeReconcileRun(config, {
+    repoPath, sourceRunId, issueIds: ["19"], runId,
+    baselineRunner: async () => ({ code: 0, stdout: "", stderr: "" })
+  }), /dirty worktree/);
+  const stillFailed = await loadRunState(repoPath, runId);
+  assert.equal(stillFailed.status, "failed");
+  assert.equal(stillFailed.setup.execution.validatorStarted, false);
+});
+
+test("setup retry reuses an already-verified rebased HEAD without replaying refresh", async (t) => {
+  const { repoPath, workerPath, sourceRunId, targetSha } = await conflictFixture(t, {
+    sourceConflict: false,
+    cleanRefresh: true
+  });
+  git(workerPath, "rebase", "origin/main");
+  const rebasedHead = git(workerPath, "rev-parse", "HEAD");
+  const source = await loadRunState(repoPath, sourceRunId);
+  Object.assign(source.workers[0], { baseSha: targetSha, headSha: rebasedHead });
+  await saveRunState(repoPath, sourceRunId, source);
+  const runId = "20260924040213-0202c6";
+  const config = {
+    repository: "example/repo", defaultBranch: "main",
+    baseline: { commands: ["flaky baseline"] },
+    work: { "19": { status: "ready" } }
+  };
+  let rebaseCalls = 0;
+  const runner = async (command, args, options) => {
+    if (command === "git" && args[0] === "rebase") rebaseCalls += 1;
+    return runChecked(command, args, options);
+  };
+  await assert.rejects(executeReconcileRun(config, {
+    repoPath, sourceRunId, issueIds: ["19"], runId, runner,
+    baselineRunner: async () => ({ code: 1, stdout: "", stderr: "flaky" })
+  }), /baseline is failing/);
+  const failed = await loadRunState(repoPath, runId);
+  assert.equal(failed.setup.completed.refresh, true);
+  assert.equal(failed.setup.refresh["19"].headSha, rebasedHead);
+
+  const resumed = await executeReconcileRun(config, {
+    repoPath, sourceRunId, issueIds: ["19"], runId, runner,
+    baselineRunner: async () => ({ code: 0, stdout: "", stderr: "" }),
+    validatorExecutor: async ({ worker }) => ({ issue: worker.issue, verdict: "approve", exitCode: 0 })
+  });
+  assert.equal(rebaseCalls, 0);
+  assert.equal(resumed.workers[0].reusedRefreshCheckpoint, true);
+  assert.equal(resumed.workers[0].headSha, rebasedHead);
+  assert.equal(resumed.validations[0].verdict, "approve");
 });
 
 test("reconcile verifies a manually completed operation and creates fresh review evidence", async (t) => {

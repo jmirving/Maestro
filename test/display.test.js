@@ -76,7 +76,20 @@ test("status recommends issue-oriented rework for a safely resumable setup failu
       failureStage: "baseline",
       failureCode: "BASELINE_FAILED",
       workerExecution: { status: "not-started" }
-    } } }
+    } } },
+    setup: {
+      contractVersion: 1,
+      mode: "rework",
+      sourceRunId: "20260926100000-bbbbbb",
+      attemptIdentity: "rework:20260926101010-aaaaaa",
+      acceptanceDigest: "digest",
+      stage: "baseline",
+      completed: { preflight: true, baseline: false, refresh: false },
+      execution: { workerStarted: false, resolverStarted: false, validatorStarted: false },
+      expected: { "7": { issue: "7", worktreePath: "/tmp/7", branch: "maestro/7", implementationSha: "abc" } },
+      failure: { stage: "baseline", code: "BASELINE_FAILED", message: "flaky" },
+      history: []
+    }
   };
 
   const snapshot = await statusSnapshot(config, "/unused", ["7"], { stateLoader: async () => [failed] });
@@ -85,6 +98,33 @@ test("status recommends issue-oriented rework for a safely resumable setup failu
   assert.equal(snapshot.items[0].action, "maestro rework 7");
   assert.equal(snapshot.recommendations.recommended, "maestro rework 7");
   assert.match(text, /Recommended: `maestro rework 7`/);
+});
+
+test("status recommends issue-oriented reconcile for a safely resumable reconciliation setup failure", async () => {
+  const failed = {
+    runId: "20260924040213-0202c4",
+    parentRunId: "20260924025258-68ead1",
+    mode: "reconcile",
+    status: "failed",
+    failure: "Target repository baseline is failing.",
+    failureStage: "baseline",
+    failureCode: "BASELINE_FAILED",
+    plan: { selected: [{ id: "7", title: "Rebased implementation", mode: "reconcile" }] },
+    workers: [], validations: [], reviews: {},
+    recovery: { sessionId: "reconcile:20260924040213-0202c4", attempts: [], deadlineAt: Date.now() + 10000 },
+    setup: {
+      contractVersion: 1, mode: "reconcile", sourceRunId: "20260924025258-68ead1",
+      attemptIdentity: "reconcile:20260924040213-0202c4", acceptanceDigest: "digest", stage: "baseline",
+      completed: { preflight: true, baseline: false, refresh: false },
+      execution: { workerStarted: false, resolverStarted: false, validatorStarted: false },
+      expected: { "7": { issue: "7", worktreePath: "/tmp/7", branch: "maestro/7", implementationSha: "abc" } },
+      failure: { stage: "baseline", code: "BASELINE_FAILED", message: "flaky" }, history: []
+    }
+  };
+  const snapshot = await statusSnapshot(config, "/unused", ["7"], { stateLoader: async () => [failed] });
+  assert.equal(snapshot.items[0].action, "maestro reconcile 7");
+  assert.equal(snapshot.recommendations.recommended, "maestro reconcile 7");
+  assert.match(formatStatus(snapshot), /reconciliation stopped during baseline.*safe to resume/);
 });
 
 test("reviewed mixed status shows exactly what commit integrates and skips", async () => {

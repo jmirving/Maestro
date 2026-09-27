@@ -7,7 +7,7 @@ const { capacitySnapshot } = require("./scheduler");
 const { formatConcurrency } = require("./concurrency");
 const { loadAuthorization, assessCurrentScope, assessDelegatedAuthorization } = require("./authorization");
 const { retryableValidationFailure } = require("./validator");
-const { isSafelyResumableReworkSetup } = require("./run-lifecycle");
+const { isSafelyResumableReworkSetup, isSafelyResumableSetupFailure } = require("./run-lifecycle");
 
 function numericSort(left, right) {
   return String(left).localeCompare(String(right), undefined, { numeric: true });
@@ -53,6 +53,8 @@ function describeIssue(config, issue, evidence, plan, effective = null, delegate
   const integration = evidence?.integration || null;
   const conflict = evidence?.conflict || evidence?.correction?.conflict || null;
   const resumableReworkSetup = isSafelyResumableReworkSetup(evidence?.runState, evidence);
+  const resumableReconcileSetup = evidence?.runState?.mode === "reconcile" &&
+    isSafelyResumableSetupFailure(evidence.runState, { issueIds: [issue] });
   let state;
   let group;
   let integrationState = "not eligible";
@@ -141,6 +143,12 @@ const external = effective?.completion?.source === "external";
     group = "attention";
     integrationState = "not eligible; resume the existing correction attempt after setup recovers";
     action = `maestro rework ${issue}`;
+  } else if (resumableReconcileSetup) {
+    const stage = evidence.runState.failureStage;
+    state = `reconciliation stopped during ${stage} before resolver or validator execution; safe to resume`;
+    group = "attention";
+    integrationState = "not eligible; resume the existing reconciliation session after setup recovers";
+    action = `maestro reconcile ${issue}`;
   } else if (["worker-failure", "validator-failure", "infrastructure-failure", "technical-conflict", "human-required", "timeout", "no-progress"].includes(evidence?.autoRework?.status || evidence?.correction?.outcome)) {
     const outcome = evidence.autoRework?.status || evidence.correction.outcome;
     const attempt = evidence.autoRework?.attemptsUsed ?? evidence.correction?.number ?? 0;
@@ -207,6 +215,7 @@ const external = effective?.completion?.source === "external";
     humanReview: review?.disposition || null,
     autoReworkStatus: evidence?.autoRework?.status || null,
     resumableReworkSetup,
+    resumableReconcileSetup,
     technicalConflict: !effective?.terminal && !effective?.consistencyConflict && conflict && !["completed", "resolved", "manually-resolved"].includes(conflict.operationState) ? conflict : null,
     correctionAttempt: evidence?.correction?.number || null,
     integrationState,

@@ -83,6 +83,25 @@ function appendEvidence(lines, state, evidence, { heading = null } = {}) {
   lines.push(`Mode: ${valueOrNone(state.mode)}`);
   lines.push(`Run status: ${valueOrNone(state.status)}`);
   if (state.failure) lines.push(`Run failure: ${state.failure}`);
+  if (state.failureStage) lines.push(`Failure stage: ${state.failureStage}`);
+  if (state.failureCode) lines.push(`Failure code: ${state.failureCode}`);
+  if (state.setup) {
+    lines.push("Safe setup-resume evidence:");
+    lines.push(`  Contract version: ${valueOrNone(state.setup.contractVersion)}`);
+    lines.push(`  Stage: ${valueOrNone(state.setup.stage)}`);
+    lines.push(`  Attempt/session: ${valueOrNone(state.setup.attemptIdentity)}`);
+    lines.push(`  Worker started: ${state.setup.execution?.workerStarted === true ? "yes" : "no"}`);
+    lines.push(`  Resolver started: ${state.setup.execution?.resolverStarted === true ? "yes" : "no"}`);
+    lines.push(`  Validator started: ${state.setup.execution?.validatorStarted === true ? "yes" : "no"}`);
+    lines.push(`  Existing attempt remains charged: ${state.mode === "rework" ? "yes" : "not applicable (recovery session preserved)"}`);
+    const continuation = state.mode === "rework"
+      ? `maestro rework ${evidence?.issue}`
+      : state.mode === "reconcile" ? `maestro reconcile ${evidence?.issue}` : null;
+    if (continuation) lines.push(`  Continuation command: ${continuation}`);
+    for (const expected of Object.values(state.setup.expected || {})) {
+      lines.push(`  Expected implementation #${expected.issue}: ${valueOrNone(expected.branch)}@${valueOrNone(expected.implementationSha)} (${valueOrNone(expected.worktreePath)})`);
+    }
+  }
   if (state.failures?.length) {
     lines.push("Prior run failures:");
     for (const failure of state.failures) {

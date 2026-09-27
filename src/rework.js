@@ -16,6 +16,13 @@ const { selectReady } = require("./planner");
 const { loadExecutionStates, unresolvedWork } = require("./work-state");
 const { boundedText, executeConflictResolver } = require("./conflict-resolver");
 const { bindValidation } = require("./authorization");
+const {
+  createSetupCheckpoint,
+  captureExpectedSetupState,
+  recordSetupFailure,
+  archiveSetupFailure,
+  verifySetupResume
+} = require("./setup-resume");
 
 const DEFAULT_AUTO_REWORK_LIMIT = 3;
 const DEFAULT_AUTO_REWORK_TIMEOUT_MS = 30 * 60 * 1000;
@@ -189,6 +196,9 @@ async function reserveManualRework(config, {
       ? null
       : (current) => isRecoverableValidatorRework(current.evidence),
     existingState: resumeState,
+    beforePersist: source.resumeSetupFailure
+      ? ({ previousState }) => verifySetupResume(config, previousState)
+      : undefined,
     extraState: resumeState
       ? { ...resumeState, status: "running" }
       : {
@@ -523,6 +533,7 @@ async function executeReworkRun(config, {
   const resumedState = reservedState?.runId === runId && reservedState?.correction?.attempts
     ? reservedState
     : null;
+  const hadSetupCheckpoint = Boolean(resumedState?.setup);
   const source = await loadRunState(repoPath, sourceRunId);
   const workersByIssue = new Map();
   for (const worker of source.workers || []) {
@@ -556,6 +567,12 @@ async function executeReworkRun(config, {
     return (!requested || requested.has(issue)) && isRecoverableValidatorRework(evidenceForIssue(source, issue));
   });
   if (!eligibleCandidates.length) throw new Error(`Run ${sourceRunId} has no selected REWORK issues.`);
+  if (resumedState?.status === "failed" && isSafelyResumableReworkSetup(resumedState, {
+    issue: String(eligibleCandidates[0].issue),
+    correction: resumedState.correction?.attempts?.[String(eligibleCandidates[0].issue)]
+  })) {
+    await verifySetupResume(config, resumedState, { runner });
+  }
   const currentIssues = await currentStateResolver(repoPath, eligibleCandidates.map((worker) => String(worker.issue)));
   const stale = currentIssues.filter((current) => {
     if (String(current.runId) === String(sourceRunId) && isRecoverableValidatorRework(current.evidence)) return false;
@@ -633,6 +650,7 @@ async function executeReworkRun(config, {
       sourceRunId,
       rootRunId: lineage.rootRunId,
       retryLimit,
+      deadlineAt,
       chargedAt: "child-run-created-before-preflight",
       phase: "preparing",
       outcome: null,
@@ -653,6 +671,10 @@ async function executeReworkRun(config, {
       workerExecution: { status: "not-started" }
     };
   }
+  const persistedDeadlines = Object.values(attempts)
+    .map((attempt) => attempt.deadlineAt)
+    .filter((value) => Number.isFinite(value));
+  const effectiveDeadlineAt = deadlineAt || (persistedDeadlines.length ? Math.min(...persistedDeadlines) : null);
 
   const initialState = {
     runId,
@@ -674,6 +696,14 @@ async function executeReworkRun(config, {
     validations: [],
     reviews: {},
     correction: { attempts },
+    setup: createSetupCheckpoint({
+      mode: "rework",
+      config,
+      items,
+      workers: candidates,
+      sourceRunId,
+      attemptIdentity: `rework:${runId}`
+    }),
     ...(source.authorization?.allowedActions?.correct === true ? { authorization: source.authorization } : {})
   };
   if (reserveCapacity && !reservedState) {
@@ -701,6 +731,7 @@ async function executeReworkRun(config, {
   const result = reservedState
     ? Object.assign(reservedState, { parentRunId, correction: { attempts } })
     : initialState;
+  if (!result.setup) result.setup = initialState.setup;
   result.status = "running";
   if (result.failure || result.failureStage || result.failureCode) {
     result.failures = result.failures || [];
@@ -715,6 +746,7 @@ async function executeReworkRun(config, {
   delete result.failure;
   delete result.failureStage;
   delete result.failureCode;
+  archiveSetupFailure(result);
   if (resumedState) {
     result.workers = [];
     result.validations = [];
@@ -744,13 +776,21 @@ async function executeReworkRun(config, {
     if (result.capacity?.issues) result.capacity.issues = [];
   }
 
-  let currentStage = "preflight";
+  let currentStage = hadSetupCheckpoint ? "preflight" : "checkpoint";
   try {
+    if (!hadSetupCheckpoint) await captureExpectedSetupState(result.setup, { runner });
+    currentStage = "preflight";
     console.error(`[Maestro] rework ${runId} from ${sourceRunId}: capability preflight`);
-    result.preflights = await runPreflights(config, items, { cwd: repoPath, runner: preflightRunner, timeoutMs: remainingTime(deadlineAt) });
+    result.setup.stage = "preflight";
+    await stateSaver(repoPath, runId, result);
+    result.preflights = await runPreflights(config, items, { cwd: repoPath, runner: preflightRunner, timeoutMs: remainingTime(effectiveDeadlineAt) });
+    result.setup.completed.preflight = true;
     currentStage = "baseline";
     console.error(`[Maestro] rework ${runId}: baseline validation`);
-    result.baseline = await captureBaseline(config, { cwd: repoPath, runner: baselineRunner, timeoutMs: remainingTime(deadlineAt) });
+    result.setup.stage = "baseline";
+    await stateSaver(repoPath, runId, result);
+    result.baseline = await captureBaseline(config, { cwd: repoPath, runner: baselineRunner, timeoutMs: remainingTime(effectiveDeadlineAt) });
+    result.setup.completed.baseline = true;
 
     const refreshed = [];
     for (const worker of candidates) {
@@ -769,7 +809,7 @@ async function executeReworkRun(config, {
         console.error(`[Maestro] rework #${worker.issue}: verifying completed manual conflict recovery`);
         let verification;
         try {
-          verification = await verifyResolvedRebase(worker, persistedConflict, { runner, deadlineAt });
+          verification = await verifyResolvedRebase(worker, persistedConflict, { runner, deadlineAt: effectiveDeadlineAt });
         } catch (verificationError) {
           persistedConflict.resolutionState = "awaiting-manual-completion";
           persistedConflict.manualVerificationFailure = verificationError.message;
@@ -809,18 +849,21 @@ async function executeReworkRun(config, {
         runner,
         conflictResolver,
         onConflictEvidence: async (conflict) => {
+          result.setup.execution.resolverStarted = true;
           const attempt = result.correction.attempts[issue];
           attempt.phase = conflict.resolution?.status === "pending" ? "resolving-refresh-conflict" : "refresh";
           attempt.conflict = conflict;
           await stateSaver(repoPath, runId, result);
         },
-        deadlineAt
+        deadlineAt: effectiveDeadlineAt
       }));
       result.correction.attempts[issue].phase = "worker-pending";
       await stateSaver(repoPath, runId, result);
     }
 
     currentStage = "worker";
+    result.setup.stage = "worker";
+    result.setup.execution.workerStarted = true;
     for (const worker of refreshed) {
       result.correction.attempts[String(worker.issue)].workerExecution = { status: "started" };
     }
@@ -847,7 +890,7 @@ async function executeReworkRun(config, {
             ? source.reviews[issue].notes
             : null
         },
-        timeoutMs: remainingTime(deadlineAt)
+        timeoutMs: remainingTime(effectiveDeadlineAt)
       });
     }));
 
@@ -859,6 +902,9 @@ async function executeReworkRun(config, {
     await stateSaver(repoPath, runId, result);
 
     currentStage = "validator";
+    result.setup.stage = "validator";
+    result.setup.execution.validatorStarted = true;
+    await stateSaver(repoPath, runId, result);
     result.validations = await Promise.all(result.workers
       .filter((worker) => worker.exitCode === 0 && worker.headSha !== worker.baseSha)
       .map(async (worker) => bindValidation(config, worker, await validatorExecutor({
@@ -866,7 +912,7 @@ async function executeReworkRun(config, {
         worker,
         baseline: result.baseline,
         runId,
-        timeoutMs: remainingTime(deadlineAt)
+        timeoutMs: remainingTime(effectiveDeadlineAt)
       }), { scopeRevision: result.authorization?.scope?.revision })));
 
     const outcomes = candidates.map((worker) => ({
@@ -897,6 +943,7 @@ async function executeReworkRun(config, {
     result.failure = error.message;
     result.failureStage = currentStage;
     result.failureCode = error.code || (currentStage === "preflight" ? "PREFLIGHT_FAILED" : "REWORK_EXECUTION_FAILED");
+    recordSetupFailure(result, { message: error.message, code: result.failureCode }, currentStage);
     if (currentStage === "preflight" && error.results) result.preflights = error.results;
     if (currentStage === "baseline" && error.baseline) result.baseline = error.baseline;
     for (const [issue, attempt] of Object.entries(result.correction.attempts)) {

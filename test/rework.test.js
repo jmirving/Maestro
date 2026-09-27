@@ -53,7 +53,11 @@ async function autoFixture(t, issues = ["7"]) {
     repoPath,
     sourceRunId,
     config: { repository: "example/repo", defaultConcurrency: 2, work: Object.fromEntries(issues.map((issue) => [issue, { status: "ready" }])) },
-    runner: async (_command, args) => ({ stdout: args[0] === "rev-parse" ? "base-new\n" : "" })
+    runner: async (_command, args) => ({
+      stdout: args[0] === "rev-parse"
+        ? (args[1] === "HEAD" ? "head-current\n" : "base-new\n")
+        : args[0] === "branch" ? "maestro/test\n" : ""
+    })
   };
 }
 
@@ -361,6 +365,7 @@ test("preflight failure resumes the same rework child and charged attempt throug
   fixture.config.work["7"].requires = ["database"];
   fixture.config.capabilities = { database: { required: true, preflight: "check-db" } };
   const childRunId = "20260910101010-a1e111";
+  const deadlineAt = Date.now() + 60_000;
   let preflights = 0;
   let workers = 0;
   let validators = 0;
@@ -371,6 +376,7 @@ test("preflight failure resumes the same rework child and charged attempt throug
     runId: childRunId,
     automatic: true,
     retryLimit: 3,
+    deadlineAt,
     runner: fixture.runner,
     preflightRunner: async () => {
       preflights += 1;
@@ -386,6 +392,7 @@ test("preflight failure resumes the same rework child and charged attempt throug
   assert.equal(failed.failureCode, "PREFLIGHT_FAILED");
   assert.equal(failed.correction.attempts["7"].number, 1);
   assert.equal(failed.correction.attempts["7"].retryLimit, 3);
+  assert.equal(failed.correction.attempts["7"].deadlineAt, deadlineAt);
   assert.deepEqual(failed.correction.attempts["7"].workerExecution, { status: "not-started" });
   assert.equal(workers, 0);
   assert.deepEqual(await resolveIssueReworkSources(fixture.repoPath, ["7"]), [{
@@ -407,8 +414,9 @@ test("preflight failure resumes the same rework child and charged attempt throug
       preflights += 1;
       return { stdout: "available" };
     },
-    workerExecutor: async ({ worktree }) => {
+    workerExecutor: async ({ worktree, timeoutMs }) => {
       workers += 1;
+      assert.ok(timeoutMs > 0 && timeoutMs <= 60_000);
       return { issue: "7", exitCode: 0, ...worktree, headSha: "corrected", report: "fixed" };
     },
     validatorExecutor: async ({ worker }) => {
@@ -421,6 +429,7 @@ test("preflight failure resumes the same rework child and charged attempt throug
   assert.equal(resumed.parentRunId, fixture.sourceRunId);
   assert.equal(resumed.correction.attempts["7"].number, 1);
   assert.equal(resumed.correction.attempts["7"].retryLimit, 3);
+  assert.equal(resumed.correction.attempts["7"].deadlineAt, deadlineAt);
   assert.equal(resumed.correction.attempts["7"].automatic, true);
   assert.equal(resumed.correction.attempts["7"].outcome, "approved");
   assert.deepEqual(resumed.correction.attempts["7"].workerExecution, { status: "completed" });
@@ -533,6 +542,7 @@ process.exit(count === 0 ? 1 : 0);
 `);
   await fs.writeFile(path.join(binPath, "git"), `#!/usr/bin/env node
 if (process.argv[2] === "rev-parse") process.stdout.write(process.argv[3] === "HEAD" ? "head-new\\n" : "base-new\\n");
+if (process.argv[2] === "branch") process.stdout.write("maestro/7\\n");
 `);
   await fs.writeFile(path.join(binPath, "codex"), `#!/usr/bin/env node
 const fs = require("node:fs");
@@ -590,7 +600,7 @@ test("failure after correction worker invocation is never treated as resumable s
   await assert.rejects(resolveIssueReworkSources(fixture.repoPath, ["7"]), /Cannot rework/);
 });
 
-test("historical setup failure with sufficient provenance resolves to its existing child", async (t) => {
+test("historical setup failure without the explicit checkpoint contract fails closed", async (t) => {
   const fixture = await autoFixture(t);
   const childRunId = "20260910101010-a15701";
   await saveRunState(fixture.repoPath, childRunId, {
@@ -615,13 +625,7 @@ test("historical setup failure with sufficient provenance resolves to its existi
     } } }
   });
 
-  assert.deepEqual(await resolveIssueReworkSources(fixture.repoPath, ["7"]), [{
-    sourceRunId: fixture.sourceRunId,
-    parentRunId: fixture.sourceRunId,
-    resumeRunId: childRunId,
-    resumeSetupFailure: true,
-    issueIds: ["7"]
-  }]);
+  await assert.rejects(resolveIssueReworkSources(fixture.repoPath, ["7"]), /Cannot rework/);
 });
 
 test("maestro rework executes the latest actionable set without a run ID", async (t) => {

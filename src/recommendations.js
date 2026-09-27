@@ -35,6 +35,7 @@ function buildRecommendations(items, readiness, selected, {
   const exhaustedRework = limitIssues(available.filter((item) => item.autoReworkStatus === "retry-exhausted" && !item.humanReview));
   const humanRequiredConflicts = limitIssues(available.filter((item) => item.autoReworkStatus === "human-required"));
   const resumableReworkSetup = limitIssues(available.filter((item) => item.resumableReworkSetup));
+  const resumableReconcileSetup = limitIssues(available.filter((item) => item.resumableReconcileSetup));
   const currentRework = limitIssues(available.filter((item) => item.lifecycleState === "awaiting-rework" && !item.humanReview));
   const reviewedRework = limitIssues(available.filter((item) => item.lifecycleState === "awaiting-rework" && item.humanReview));
   const approvals = limitIssues(available.filter((item) => item.validator === "approve" && !item.humanReview));
@@ -44,6 +45,11 @@ function buildRecommendations(items, readiness, selected, {
   if (resumableReworkSetup.length) {
     primary.push({ command: `maestro rework ${resumableReworkSetup.map((item) => item.issue).join(" ")}` });
     alternatives.push({ command: `maestro details ${resumableReworkSetup.map((item) => item.issue).join(" ")}` });
+  }
+
+  for (const item of resumableReconcileSetup) {
+    primary.push({ command: `maestro reconcile ${item.issue}` });
+    alternatives.push({ command: `maestro details ${item.issue}` });
   }
 
   if (currentRework.length) {

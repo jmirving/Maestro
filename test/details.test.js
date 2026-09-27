@@ -110,6 +110,48 @@ test("details shows external completion even when no Maestro run exists", async 
   assert.match(text, /Maestro execution history: none/);
 });
 
+test("details shows explicit setup failure evidence and issue-oriented continuation", async (t) => {
+  const { repoPath } = await fixture(t);
+  const runId = "20260924040213-0202c4";
+  const state = {
+    runId,
+    parentRunId: "20260924025258-68ead1",
+    mode: "reconcile",
+    status: "failed",
+    failure: "Target repository baseline is failing.",
+    failureStage: "baseline",
+    failureCode: "BASELINE_FAILED",
+    plan: { selected: [{ id: "34" }] },
+    workers: [], validations: [], reviews: {},
+    setup: {
+      contractVersion: 1,
+      stage: "baseline",
+      attemptIdentity: `reconcile:${runId}`,
+      execution: { workerStarted: false, resolverStarted: false, validatorStarted: false },
+      expected: { "34": {
+        issue: "34",
+        branch: "maestro/34",
+        implementationSha: "0d3f3cb92cf03c2b026dcaa1ccea923ebd659c8e",
+        worktreePath: "/tmp/34"
+      } }
+    }
+  };
+  await saveRunState(repoPath, state.parentRunId, {
+    runId: state.parentRunId,
+    status: "awaiting-review",
+    plan: { selected: [{ id: "34" }] },
+    workers: [], validations: [], reviews: {}
+  });
+  await saveRunState(repoPath, runId, state);
+  const text = formatDetails(await loadIssueDetails(repoPath, ["34"]));
+  assert.match(text, /Failure stage: baseline/);
+  assert.match(text, /Worker started: no/);
+  assert.match(text, /Resolver started: no/);
+  assert.match(text, /Validator started: no/);
+  assert.match(text, /Continuation command: maestro reconcile 34/);
+  assert.match(text, /0d3f3cb92cf03c2b026dcaa1ccea923ebd659c8e/);
+});
+
 test("rework details relate the correction to source worker and validator evidence", async (t) => {
   const { repoPath } = await fixture(t);
   const source = persistedRun("20260910010101-aaaaaa", "7", {

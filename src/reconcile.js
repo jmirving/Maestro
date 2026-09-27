@@ -19,6 +19,14 @@ const {
   assertRecoveryAvailable,
   runWithinRecoveryDeadline
 } = require("./recovery-attempts");
+const {
+  createSetupCheckpoint,
+  captureExpectedSetupState,
+  recordSetupFailure,
+  archiveSetupFailure,
+  isSafelyResumableSetupFailure,
+  verifySetupResume
+} = require("./setup-resume");
 
 const DEFAULT_RECONCILE_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -41,6 +49,15 @@ async function resolveReconcileSource(repoPath, issue, explicitRunId = null) {
   if (!issue) throw new Error("Issue-oriented reconciliation requires an issue number unless --run selects historical evidence.");
   const [current] = await resolveCurrentIssueStates(repoPath, [String(issue)]);
   const conflict = current.evidence?.conflict;
+  if (current.state?.mode === "reconcile" &&
+      isSafelyResumableSetupFailure(current.state, { issueIds: [String(issue)] })) {
+    return {
+      sourceRunId: String(current.state.setup.sourceRunId),
+      issueIds: [String(issue)],
+      resumeRunId: current.runId,
+      resumeSetupFailure: true
+    };
+  }
   if (current.evidence?.state !== "technical-conflict" ||
       !["integration-refresh", "reconciliation-refresh"].includes(conflict?.interruptedStage)) {
     throw new Error(`Issue #${issue} has no current integration conflict to reconcile.`);
@@ -55,6 +72,30 @@ async function resolveReconcileSource(repoPath, issue, explicitRunId = null) {
 async function ensureCleanWorktree(worker, runner = runChecked) {
   const status = (await runner("git", ["status", "--porcelain"], { cwd: worker.worktreePath })).stdout.trim();
   if (status) throw new Error(`Reconcile branch for issue #${worker.issue} is not clean before rebase:\n${status}`);
+}
+
+async function captureAlreadyRefreshed(config, result, candidates, runner) {
+  const targetRef = `origin/${config.defaultBranch || "main"}`;
+  result.setup.refresh ||= {};
+  for (const worker of candidates) {
+    const issue = String(worker.issue);
+    try {
+      const targetSha = (await runner("git", ["rev-parse", targetRef], { cwd: worker.worktreePath })).stdout.trim();
+      const expected = result.setup.expected[issue];
+      if (worker.baseSha !== targetSha || expected.implementationSha !== worker.headSha ||
+          !(await isAncestor(targetSha, worker.headSha, { cwd: worker.worktreePath, runner }))) continue;
+      result.setup.refresh[issue] = {
+        verified: true,
+        targetRef,
+        baseSha: targetSha,
+        headSha: worker.headSha,
+        branch: worker.branch,
+        verifiedAt: new Date().toISOString(),
+        provenance: "already-rebased-source"
+      };
+    } catch {}
+  }
+  result.setup.completed.refresh = candidates.every((worker) => result.setup.refresh[String(worker.issue)]?.verified === true);
 }
 
 async function rebaseInProgress(worktreePath, runner = runProcess) {
@@ -113,7 +154,11 @@ async function executeReconcileRun(config, {
       String(conflict?.sourceRunId) === String(sourceRunId) &&
       !["completed", "resolved", "manually-resolved"].includes(conflict?.operationState) &&
       await runDescendsFrom(repoPath, entry.state, sourceRunId);
-    if (!matchingConflictDescendant) superseded.push(entry);
+    const matchingSetupDescendant = String(entry.runId) === String(runId) &&
+      entry.state?.mode === "reconcile" &&
+      String(entry.state?.setup?.sourceRunId) === String(sourceRunId) &&
+      isSafelyResumableSetupFailure(entry.state, { issueIds: [String(entry.issue)] });
+    if (!matchingConflictDescendant && !matchingSetupDescendant) superseded.push(entry);
   }
   if (superseded.length) {
     throw new Error(
@@ -126,9 +171,13 @@ async function executeReconcileRun(config, {
   const resumeState = runId && String(runId) !== String(sourceRunId)
     ? await loadRunState(repoPath, runId).catch((error) => /No Maestro run/.test(error.message) ? null : Promise.reject(error))
     : null;
-  const resuming = resumeState?.mode === "reconcile" && Object.values(resumeState.conflicts || {})
+  const resumingConflict = resumeState?.mode === "reconcile" && Object.values(resumeState.conflicts || {})
     .some((conflict) => !["completed", "resolved", "manually-resolved"].includes(conflict.operationState));
-  if (resuming) {
+  const resumingSetup = resumeState?.mode === "reconcile" &&
+    isSafelyResumableSetupFailure(resumeState, { issueIds: candidates.map((worker) => String(worker.issue)) });
+  const resuming = resumingConflict || resumingSetup;
+  if (resumingSetup && !reserveCapacity) await verifySetupResume(config, resumeState, { runner });
+  if (resumingConflict) {
     let interrupted = false;
     for (const conflict of Object.values(resumeState.conflicts || {})) {
       if (!conflict.recovery) continue;
@@ -153,6 +202,10 @@ async function executeReconcileRun(config, {
       runId,
       mode: "reconcile",
       items,
+      expectedCurrent: candidates.map((worker) => ({ issue: String(worker.issue), runId: resuming ? runId : sourceRunId })),
+      beforePersist: resumingSetup
+        ? ({ previousState }) => verifySetupResume(config, previousState, { runner })
+        : undefined,
       existingState: resumeState,
       extraState: resuming
         ? { ...resumeState, status: "running" }
@@ -182,22 +235,84 @@ async function executeReconcileRun(config, {
     reviews: reservation?.state?.reviews || resumeState?.reviews || {},
     conflicts: resumeState?.conflicts || {}
   });
+  result.recovery = ensureRecoveryContract(result.recovery, {
+    kind: "managed-reconciliation",
+    issue: null,
+    timeoutMs: config.resolution?.timeoutMs || DEFAULT_RECONCILE_TIMEOUT_MS,
+    sourceRunId,
+    sessionId: `reconcile:${runId}`
+  });
+  let createdSetupCheckpoint = false;
+  if (!result.setup) {
+    result.setup = createSetupCheckpoint({
+      mode: "reconcile",
+      config,
+      items,
+      workers: candidates,
+      sourceRunId,
+      attemptIdentity: result.recovery.sessionId
+    });
+    createdSetupCheckpoint = true;
+  }
   if (resuming) {
     result.workers = [];
     result.validations = [];
     delete result.failure;
+    delete result.failureStage;
+    delete result.failureCode;
+    archiveSetupFailure(result);
   }
   if (!reservation) await stateSaver(repoPath, runId, result);
+  let currentStage = createdSetupCheckpoint ? "checkpoint" : "preflight";
   try {
-  console.error(`[Maestro] reconcile ${runId} from ${sourceRunId}: capability preflight`);
-  result.preflights = await runPreflights(config, items, { cwd: repoPath, runner: preflightRunner });
-  console.error(`[Maestro] reconcile ${runId}: baseline validation`);
-  result.baseline = await captureBaseline(config, { cwd: repoPath, runner: baselineRunner });
-  await stateSaver(repoPath, runId, result);
-  const defaultBranch = config.defaultBranch || "main";
+    if (createdSetupCheckpoint) {
+      await captureExpectedSetupState(result.setup, { runner });
+      await captureAlreadyRefreshed(config, result, candidates, runner);
+    }
+    currentStage = "preflight";
+    console.error(`[Maestro] reconcile ${runId} from ${sourceRunId}: capability preflight`);
+    result.setup.stage = "preflight";
+    await stateSaver(repoPath, runId, result);
+    result.preflights = await runPreflights(config, items, { cwd: repoPath, runner: preflightRunner });
+    result.setup.completed.preflight = true;
+    currentStage = "baseline";
+    console.error(`[Maestro] reconcile ${runId}: baseline validation`);
+    result.setup.stage = "baseline";
+    await stateSaver(repoPath, runId, result);
+    result.baseline = await captureBaseline(config, { cwd: repoPath, runner: baselineRunner });
+    result.setup.completed.baseline = true;
+    await stateSaver(repoPath, runId, result);
+    const defaultBranch = config.defaultBranch || "main";
 
   for (const original of candidates) {
+    currentStage = "refresh";
+    result.setup.stage = "refresh";
     const issue = String(original.issue);
+    const refreshCheckpoint = result.setup.refresh?.[issue];
+    if (refreshCheckpoint?.verified) {
+      await runner("git", ["fetch", "origin", defaultBranch], { cwd: original.worktreePath });
+      const currentTarget = (await runner("git", ["rev-parse", `origin/${defaultBranch}`], { cwd: original.worktreePath })).stdout.trim();
+      const currentImplementation = await currentHead(original.worktreePath, runner);
+      if (currentTarget === refreshCheckpoint.baseSha &&
+          currentImplementation === refreshCheckpoint.headSha &&
+          await isAncestor(currentTarget, currentImplementation, { cwd: original.worktreePath, runner })) {
+        result.workers.push({
+          ...original,
+          mode: "reconcile",
+          status: "worker-finished",
+          exitCode: 0,
+          baseSha: currentTarget,
+          headSha: currentImplementation,
+          reconciledFromRunId: sourceRunId,
+          hadRebaseConflict: false,
+          reusedRefreshCheckpoint: true
+        });
+        await stateSaver(repoPath, runId, result);
+        continue;
+      }
+      delete result.setup.refresh[issue];
+      result.setup.completed.refresh = false;
+    }
     const before = await inspectGitOperation(original.worktreePath, { runner });
     const persistedConflict = resuming
       ? result.conflicts?.[issue]
@@ -288,6 +403,7 @@ async function executeReconcileRun(config, {
         throw contentConflictError(conflict);
       }
       const attempt = nextRecoveryAttempt(conflict.recovery, { phase: "resolver", status: "running" });
+      result.setup.execution.resolverStarted = true;
       conflict.resolution = attempt;
       result.status = "running";
       await stateSaver(repoPath, runId, result);
@@ -379,6 +495,22 @@ async function executeReconcileRun(config, {
       reconciledFromRunId: sourceRunId,
       hadRebaseConflict: conflicted
     });
+    result.setup.completed.refresh = true;
+    result.setup.expected[issue] = {
+      ...result.setup.expected[issue],
+      implementationSha: headSha,
+      baseSha
+    };
+    result.setup.refresh ||= {};
+    result.setup.refresh[issue] = {
+      verified: true,
+      targetRef: `origin/${defaultBranch}`,
+      baseSha,
+      headSha,
+      branch: original.branch || null,
+      verifiedAt: new Date().toISOString(),
+      provenance: "reconciliation-refresh"
+    };
     await stateSaver(repoPath, runId, result);
   }
 
@@ -391,6 +523,10 @@ async function executeReconcileRun(config, {
   });
   await stateSaver(repoPath, runId, result);
   for (const worker of result.workers.filter((entry) => entry.exitCode === 0 && entry.headSha !== entry.baseSha)) {
+    currentStage = "validator";
+    result.setup.stage = "validator";
+    result.setup.execution.validatorStarted = true;
+    await stateSaver(repoPath, runId, result);
     const conflict = result.conflicts?.[String(worker.issue)];
     if (conflict) {
       conflict.recovery = ensureRecoveryContract(conflict.recovery, {
@@ -464,6 +600,11 @@ async function executeReconcileRun(config, {
   } catch (error) {
     if (result.status !== "technical-conflict") result.status = "failed";
     result.failure = result.failure || error.message;
+    result.failureStage = result.failureStage || currentStage;
+    result.failureCode = result.failureCode || error.code || (currentStage === "preflight" ? "PREFLIGHT_FAILED" : "RECONCILE_EXECUTION_FAILED");
+    if (currentStage === "preflight" && error.results) result.preflights = error.results;
+    if (currentStage === "baseline" && error.baseline) result.baseline = error.baseline;
+    recordSetupFailure(result, { message: result.failure, code: result.failureCode }, currentStage);
     if (result.capacity?.issues) result.capacity.issues = [];
     if (reservation?.state) {
       if (stateSaver === saveRunState) {
