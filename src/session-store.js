@@ -3,6 +3,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { coordinatedRepoPath, reportRootForRepo } = require("./reporter");
 const { withRepositoryCoordination } = require("./repository-coordination");
+const { budgetExhausted, relaunchSessionAction } = require("./session-policy");
 
 const SESSION_VERSION = 1;
 const SESSION_ID = /^session-[A-Za-z0-9._-]+$/;
@@ -96,18 +97,50 @@ async function saveSession(repoPath, session, { create = false } = {}) {
   });
 }
 
-function ownerAlive(owner, kill = process.kill) {
-  if (!owner?.pid || !Number.isInteger(owner.pid)) return false;
-  try { kill(owner.pid, 0); return true; } catch (error) {
-    return error.code !== "ESRCH" ? true : false;
+async function processStartTime(pid, { readFile = fs.readFile, platform = process.platform } = {}) {
+  if (platform !== "linux") {
+    const error = new Error(`Reliable Maestro process identity is not implemented for ${platform}.`);
+    error.code = "SESSION_OWNER_IDENTITY_UNAVAILABLE";
+    throw error;
+  }
+  try {
+    const [stat, bootId] = await Promise.all([
+      readFile(`/proc/${pid}/stat`, "utf8"),
+      readFile("/proc/sys/kernel/random/boot_id", "utf8")
+    ]);
+    // The command name is parenthesized and may contain spaces or parentheses.
+    // Fields after its final ')' begin at proc(5)'s field 3; starttime is field 22.
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+    if (!fields[19] || !/^\d+$/.test(fields[19])) throw new Error("missing process start time");
+    return `${bootId.trim()}:${fields[19]}`;
+  } catch (error) {
+    if (error.code === "ENOENT" || error.code === "ESRCH") return null;
+    if (error.code === "SESSION_OWNER_IDENTITY_UNAVAILABLE") throw error;
+    const unavailable = new Error(`Cannot read reliable identity for process ${pid}: ${error.message}`);
+    unavailable.code = "SESSION_OWNER_IDENTITY_UNAVAILABLE";
+    throw unavailable;
   }
 }
 
-async function claimSession(repoPath, sessionId, { pid = process.pid, now = new Date(), kill = process.kill } = {}) {
+async function ownerAlive(owner, { kill = process.kill, identity = processStartTime } = {}) {
+  if (!owner?.pid || !Number.isInteger(owner.pid) || !owner.processStartTime) return false;
+  try { kill(owner.pid, 0); } catch (error) {
+    if (error.code === "ESRCH") return false;
+  }
+  const currentStartTime = await identity(owner.pid);
+  return currentStartTime != null && String(currentStartTime) === String(owner.processStartTime);
+}
+
+async function claimSession(repoPath, sessionId, {
+  pid = process.pid,
+  now = new Date(),
+  kill = process.kill,
+  processIdentity = processStartTime
+} = {}) {
   return withRepositoryCoordination(repoPath, async () => {
     const session = await loadSession(repoPath, sessionId);
     if (["complete", "stopped"].includes(session.status)) throw new Error(`Maestro session ${session.id} is ${session.status} and cannot be resumed.`);
-    if (session.owner && ownerAlive(session.owner, kill)) {
+    if (session.owner && await ownerAlive(session.owner, { kill, identity: processIdentity })) {
       const error = new Error(`Maestro session ${session.id} is owned by live process ${session.owner.pid}.`);
       error.code = "SESSION_OWNED";
       throw error;
@@ -115,8 +148,14 @@ async function claimSession(repoPath, sessionId, { pid = process.pid, now = new 
     if (session.owner) {
       session.ownershipHistory = [...(session.ownershipHistory || []), { ...session.owner, releasedAt: now.toISOString(), reason: "orphaned" }];
     }
+    const claimedProcessStartTime = await processIdentity(pid);
+    if (claimedProcessStartTime == null) {
+      const error = new Error(`Cannot claim Maestro session ${session.id}: process ${pid} has no reliable identity.`);
+      error.code = "SESSION_OWNER_IDENTITY_UNAVAILABLE";
+      throw error;
+    }
     const token = crypto.randomBytes(16).toString("hex");
-    session.owner = { pid, token, claimedAt: now.toISOString() };
+    session.owner = { pid, processStartTime: String(claimedProcessStartTime), token, claimedAt: now.toISOString() };
     session.status = "running";
     session.updatedAt = now.toISOString();
     // saveSession would take the same repository lock. This write remains CAS
@@ -157,9 +196,7 @@ async function releaseSession(repoPath, sessionId, token, { status, stopReason =
     session.terminal.nextAction = ["paused", "quiescent"].includes(status)
       ? `maestro resume --session ${session.id}`
       : status === "stopped"
-        ? session.scope.type === "workset" && session.scope.workset
-          ? `maestro start --workset ${session.scope.workset} --delegate --continuous`
-          : `maestro start ${session.scope.issueIds.join(" ")} --delegate --continuous`
+        ? relaunchSessionAction(session, { renew: budgetExhausted(session) })
         : status === "complete"
           ? "maestro status --completed"
           : session.terminal.nextAction || "maestro status";
@@ -221,5 +258,6 @@ module.exports = {
   updateOwnedSession,
   releaseSession,
   requestSessionControl,
-  ownerAlive
+  ownerAlive,
+  processStartTime
 };

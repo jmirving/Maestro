@@ -13,6 +13,7 @@ const {
   requestSessionState
 } = require("../src/autonomous-controller");
 const { loadSession, saveSession, claimSession, releaseSession } = require("../src/session-store");
+const { summarizeSession } = require("../src/session-view");
 const { autoRework } = require("../src/rework");
 const { integrateExistingRun } = require("../src/existing-run");
 const { loadRunState, saveRunState, loadPersistedRunStates } = require("../src/run-store");
@@ -105,17 +106,88 @@ test("quiescence reports unresolved work and never claims completion", async (t)
   assert.equal(result.terminal.unresolved[0].nextAction, "maestro details 2");
 });
 
-test("live ownership excludes a competing controller and orphaned ownership is reclaimed", async (t) => {
+test("ownership verifies process start time so a reused PID is reclaimed", async (t) => {
   const { repoPath, session } = await fixture(t);
-  const first = await claimSession(repoPath, session.id, { pid: 123, kill: () => {} });
-  await assert.rejects(claimSession(repoPath, session.id, { pid: 456, kill: () => {} }), /owned by live process 123/);
-  await releaseSession(repoPath, session.id, first.token, { status: "paused", stopReason: "test" });
+  const identities = new Map([[123, "start-a"], [456, "start-c"]]);
+  const processIdentity = async (pid) => identities.get(pid) || null;
+  await claimSession(repoPath, session.id, { pid: 123, kill: () => {}, processIdentity });
+  await assert.rejects(
+    claimSession(repoPath, session.id, { pid: 456, kill: () => {}, processIdentity }),
+    /owned by live process 123/
+  );
 
-  const second = await claimSession(repoPath, session.id, { pid: 789, kill: () => { const error = new Error("gone"); error.code = "ESRCH"; throw error; } });
-  assert.equal(second.session.owner.pid, 789);
-  assert.ok(second.session.ownershipHistory.some((entry) => entry.pid === 123));
+  identities.set(123, "start-b");
+  const second = await claimSession(repoPath, session.id, { pid: 456, kill: () => {}, processIdentity });
+  assert.equal(second.session.owner.pid, 456);
+  assert.equal(second.session.owner.processStartTime, "start-c");
+  assert.ok(second.session.ownershipHistory.some((entry) => (
+    entry.pid === 123 && entry.processStartTime === "start-a" && entry.reason === "orphaned"
+  )));
   await releaseSession(repoPath, session.id, second.token, { status: "paused", stopReason: "test" });
 });
+
+test("ownership reclaims a stale PID while preserving its identity history", async (t) => {
+  const { repoPath, session } = await fixture(t);
+  const processIdentity = async (pid) => ({ 123: "start-a", 456: "start-b" })[pid] || null;
+  await claimSession(repoPath, session.id, { pid: 123, kill: () => {}, processIdentity });
+
+  const reclaimed = await claimSession(repoPath, session.id, {
+    pid: 456,
+    kill: (pid) => {
+      if (pid === 123) {
+        const error = new Error("gone");
+        error.code = "ESRCH";
+        throw error;
+      }
+    },
+    processIdentity
+  });
+
+  assert.equal(reclaimed.session.owner.pid, 456);
+  assert.ok(reclaimed.session.ownershipHistory.some((entry) => (
+    entry.pid === 123 && entry.processStartTime === "start-a" && entry.reason === "orphaned"
+  )));
+  await releaseSession(repoPath, session.id, reclaimed.token, { status: "paused", stopReason: "test" });
+});
+
+for (const budget of ["max-cycles", "max-runtime", "no-progress-limit"]) {
+  test(`resume cannot execute again after the persisted ${budget} budget is exhausted`, async (t) => {
+    const context = await fixture(t, ["1"]);
+    const session = await loadSession(context.repoPath, context.session.id);
+    const currentTime = new Date("2026-09-27T12:00:00.000Z");
+    if (budget === "max-cycles") session.cycles = session.settings.limits.maxCycles;
+    if (budget === "max-runtime") {
+      session.startedAt = new Date(currentTime.getTime() - session.settings.limits.maxRuntimeMs).toISOString();
+    }
+    if (budget === "no-progress-limit") {
+      session.progress.noProgressCycles = session.settings.limits.maxNoProgressCycles;
+    }
+    session.status = "quiescent";
+    session.stopReason = budget;
+    await saveSession(context.repoPath, session);
+
+    let observations = 0;
+    let advances = 0;
+    const result = await driveSession({
+      ...context,
+      session: await loadSession(context.repoPath, session.id),
+      now: () => currentTime,
+      observe: async () => { observations += 1; return { readyIssueIds: ["1"] }; },
+      advance: async () => { advances += 1; return { progressed: true }; }
+    });
+
+    assert.equal(observations, 0);
+    assert.equal(advances, 0);
+    assert.equal(result.status, "stopped");
+    assert.equal(result.stopReason, budget);
+    assert.equal(
+      result.terminal.nextAction,
+      `maestro start 1 --delegate --continuous --renew ${context.authorization.id}`
+    );
+    assert.equal(summarizeSession(result).nextAction, result.terminal.nextAction);
+    await assert.rejects(claimSession(context.repoPath, session.id), /is stopped and cannot be resumed/);
+  });
+}
 
 test("resume is scope-oriented, ambiguity is explicit, and policy drift fails closed", async (t) => {
   const context = await fixture(t);
@@ -545,6 +617,7 @@ test("manifest publication retains ownership, rejects concurrent resume, and pub
 
       const owned = await loadSession(context.repoPath, context.session.id);
       assert.equal(owned.owner.pid, process.pid, "bookkeeping must retain the controller lease");
+      assert.match(owned.owner.processStartTime, /^[^:]+:\d+$/, "ownership must persist boot and process-start identity");
       await assert.rejects(
         claimSession(context.repoPath, context.session.id, { pid: process.pid + 1000 }),
         (error) => error.code === "SESSION_OWNED"

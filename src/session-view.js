@@ -1,16 +1,14 @@
 const { listSessions } = require("./session-store");
+const { budgetExhausted, relaunchSessionAction } = require("./session-policy");
 
 function relaunchAction(session) {
-  if (session.scope.type === "workset" && session.scope.workset) {
-    return `maestro start --workset ${session.scope.workset} --delegate --continuous`;
-  }
-  return `maestro start ${session.scope.issueIds.join(" ")} --delegate --continuous`;
+  return relaunchSessionAction(session, { renew: budgetExhausted(session) });
 }
 
 function sessionNextAction(session) {
   if (session.owner) return "maestro status --watch";
   if (["created", "paused", "quiescent"].includes(session.status)) return `maestro resume --session ${session.id}`;
-  if (session.status === "stopped") return relaunchAction(session);
+  if (session.status === "stopped") return session.terminal?.nextAction || relaunchAction(session);
   if (session.status === "complete") return "maestro status --completed";
   return session.terminal?.nextAction || `maestro resume --session ${session.id}`;
 }

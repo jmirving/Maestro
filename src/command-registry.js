@@ -113,7 +113,7 @@ const COMMANDS = [
     options: { "--repo-path": COMMON_REPO_OPTION, "--workset": { value: "<name>", description: "Select the active session for this named workset." }, "--session": { value: "<session-id>", description: "Select an exact session for exceptional or ambiguous recovery." } },
     prerequisites: "A persisted non-terminal session whose repository, manifest, scope revision, authorization, and protected policy still match.",
     effects: "Reclaims orphaned ownership, reconciles persisted evidence, and continues only pending authorized lifecycle and bookkeeping work.",
-    cautions: "Resume never resets attempt/runtime budgets or revives stale authorization. A quiescent stop is not verified epic acceptance.",
+    cautions: "Resume never resets attempt/runtime/no-progress budgets or revives stale authorization. Budget exhaustion terminally stops that session; status shows the explicit renewed-start command. A quiescent stop is not verified epic acceptance.",
     next: ["maestro status", "maestro details <issue>"],
     examples: [["resume", "57"], ["resume", "--workset", "release"]],
     positionalKind: "manifest-issues",

@@ -120,6 +120,13 @@ function requestedControl(session) {
   };
 }
 
+function exhaustedBudgetReason(session, startedAt, currentTime) {
+  if ((session.cycles || 0) >= session.settings.limits.maxCycles) return "max-cycles";
+  if (currentTime.getTime() - startedAt >= session.settings.limits.maxRuntimeMs) return "max-runtime";
+  if ((session.progress?.noProgressCycles || 0) >= session.settings.limits.maxNoProgressCycles) return "no-progress-limit";
+  return null;
+}
+
 async function driveSession({
   config,
   repoPath,
@@ -180,13 +187,8 @@ async function driveSession({
 
   try {
     while (true) {
-      const elapsed = now().getTime() - started;
-      if ((session.cycles || 0) >= session.settings.limits.maxCycles) {
-        return finish({ status: "quiescent", stopReason: "max-cycles" });
-      }
-      if (elapsed >= session.settings.limits.maxRuntimeMs) {
-        return finish({ status: "quiescent", stopReason: "max-runtime" });
-      }
+      const admissionStop = exhaustedBudgetReason(session, started, now());
+      if (admissionStop) return finish({ status: "stopped", stopReason: admissionStop });
 
       session = await updateOwnedSession(repoPath, session.id, token, (state) => {
         state.phase = "reconcile";
@@ -215,6 +217,8 @@ async function driveSession({
           stopReason: observation.stopReason || (session.terminal.unresolved.length ? "unresolved-work" : "no-ready-work")
         });
       }
+      const advanceStop = exhaustedBudgetReason(session, started, now());
+      if (advanceStop) return finish({ status: "stopped", stopReason: advanceStop });
 
       session = await updateOwnedSession(repoPath, session.id, token, (state) => {
         state.phase = "advance";
@@ -249,10 +253,9 @@ async function driveSession({
         }, now()));
         return state;
       });
+      const outcomeStop = exhaustedBudgetReason(session, started, now());
+      if (outcomeStop) return finish({ status: "stopped", stopReason: outcomeStop });
       if (outcome.stopReason) return finish({ status: "quiescent", stopReason: outcome.stopReason });
-      if (session.progress.noProgressCycles >= session.settings.limits.maxNoProgressCycles) {
-        return finish({ status: "quiescent", stopReason: "no-progress-limit" });
-      }
     }
   } catch (error) {
     await updateOwnedSession(repoPath, session.id, token, (state) => {
