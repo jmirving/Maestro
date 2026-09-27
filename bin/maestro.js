@@ -730,7 +730,9 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
           });
           return state;
         });
-        if (parentClosurePending) {
+        // Publication may make previously pending members acceptable. Re-evaluate
+        // before closure, then persist one final verification after closure.
+        {
           const current = await currentContext("parent closure acceptance");
           const states = await services.loadExecutionStates(repoPath);
           const acceptance = await services.evaluateCompletion({
@@ -761,22 +763,51 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
             });
             return state;
           });
-          if (acceptance.acceptanceReady !== true || acceptance.parentClosurePending !== true) {
-            return currentSession;
+          if (acceptance.acceptanceReady === true && acceptance.parentClosurePending === true) {
+            const closureCurrent = await currentContext("parent closure");
+            const closure = await services.reconcileParentClosure({
+              config: closureCurrent.config,
+              repoPath,
+              session: currentSession,
+              scopeAssessment: closureCurrent.scopeAssessment,
+              authorization
+            });
+            currentSession = await update((state) => {
+              state.parentClosure = closure;
+              state.checkpoints.push({ kind: "parent-closure-confirmed", at: new Date().toISOString(), issue: closure.issue });
+              return state;
+            });
+            const verifiedCurrent = await currentContext("post-closure acceptance");
+            const verifiedStates = await services.loadExecutionStates(repoPath);
+            const verifiedAcceptance = await services.evaluateCompletion({
+              config: verifiedCurrent.config,
+              repoPath,
+              session: currentSession,
+              states: verifiedStates,
+              scopeAssessment: verifiedCurrent.scopeAssessment
+            });
+            currentSession = await update((state) => {
+              state.acceptance = verifiedAcceptance;
+              state.terminal = {
+                ...state.terminal,
+                verifiedComplete: verifiedAcceptance.verifiedComplete === true,
+                outcome: verifiedAcceptance.outcome,
+                authorizedSnapshotSatisfied: verifiedAcceptance.authorizedSnapshotSatisfied === true,
+                liveScopeComplete: verifiedAcceptance.liveScopeComplete === true,
+                targetSha: verifiedAcceptance.targetSha || null,
+                scopeRevision: verifiedAcceptance.scopeRevision || null,
+                unresolved: verifiedAcceptance.unresolved || [],
+                nextAction: verifiedAcceptance.nextAction || `maestro resume --session ${state.id}`
+              };
+              state.checkpoints.push({
+                kind: "post-closure-acceptance",
+                at: new Date().toISOString(),
+                outcome: verifiedAcceptance.outcome,
+                targetSha: verifiedAcceptance.targetSha || null
+              });
+              return state;
+            });
           }
-          const closureCurrent = await currentContext("parent closure");
-          const closure = await services.reconcileParentClosure({
-            config: closureCurrent.config,
-            repoPath,
-            session: currentSession,
-            scopeAssessment: closureCurrent.scopeAssessment,
-            authorization
-          });
-          currentSession = await update((state) => {
-            state.parentClosure = closure;
-            state.checkpoints.push({ kind: "parent-closure-confirmed", at: new Date().toISOString(), issue: closure.issue });
-            return state;
-          });
         }
         return update((state) => {
           state.phase = "bookkeeping-complete";

@@ -1,9 +1,9 @@
 const { digest } = require("./authorization");
 const { effectiveIssueStates } = require("./run-resolver");
 const { runChecked } = require("./process");
-const { runObservationalIntegrationCommand } = require("./integrator");
+const { runObservationalIntegrationCommand, remoteBranchSha } = require("./integrator");
 
-const COMPLETION_EVIDENCE_VERSION = 1;
+const COMPLETION_EVIDENCE_VERSION = 2;
 
 function worksetContract(config, scope) {
   if (scope?.type !== "workset") {
@@ -117,6 +117,16 @@ async function targetHead(repoPath, targetBranch, runner = runChecked) {
   return (await runner("git", ["rev-parse", "HEAD"], { cwd: repoPath })).stdout.trim();
 }
 
+async function authoritativeTarget(repoPath, targetBranch, runner = runChecked) {
+  const localSha = await targetHead(repoPath, targetBranch, runner);
+  const remoteSha = await remoteBranchSha(repoPath, "origin", targetBranch, runner);
+  if (!remoteSha) throw new Error(`Completion checks require authoritative origin/${targetBranch} to exist.`);
+  if (localSha !== remoteSha) {
+    throw new Error(`Completion checks require local ${targetBranch} (${localSha}) to match authoritative origin/${targetBranch} (${remoteSha}).`);
+  }
+  return remoteSha;
+}
+
 function stateBelongsToSession(state, session) {
   const lineage = new Set((session?.lineage?.runIds || []).map(String));
   return Boolean(
@@ -138,10 +148,37 @@ function baselineForChecks(states, commands, session) {
     .find((baseline) => commands.every((command) => baseline?.results?.some((entry) => entry.command === command))) || null;
 }
 
+function commandPolicy(entry) {
+  return typeof entry === "string"
+    ? { command: entry, required: true }
+    : { command: entry.command, required: entry.required !== false };
+}
+
+function skippedCheckEvidence(result = {}) {
+  if (Array.isArray(result.skippedChecks) && result.skippedChecks.length) {
+    return { source: "runner", count: result.skippedChecks.length, checks: result.skippedChecks };
+  }
+  if (Number(result.skippedCount) > 0) {
+    return { source: "runner", count: Number(result.skippedCount) };
+  }
+  if (result.skipped === true || (result.skipped && typeof result.skipped === "object")) {
+    return { source: "runner", count: Number(result.skipped?.count || 1), details: result.skipped };
+  }
+  const output = `${result.stdout || ""}\n${result.stderr || ""}`;
+  const tapSkips = output.match(/^\s*ok\s+\d+\b.*#\s*SKIP\b.*$/gim) || [];
+  const emptyTapSkip = output.match(/^\s*1\.\.0\s+#\s*SKIP\b.*$/gim) || [];
+  const nodeSummary = [...output.matchAll(/^#\s*skipped\s+(\d+)\s*$/gim)]
+    .reduce((count, match) => count + Number(match[1]), 0);
+  const count = Math.max(tapSkips.length + emptyTapSkip.length, nodeSummary);
+  return count ? { source: "command-output", count } : null;
+}
+
 async function executeChecks({ repoPath, targetBranch, targetSha, commands, states, session, runner = runChecked, shellRunner }) {
   const checks = [];
-  const baseline = baselineForChecks(states, commands, session);
-  for (const command of commands) {
+  const policies = commands.map(commandPolicy);
+  const baseline = baselineForChecks(states, policies.map((entry) => entry.command), session);
+  for (const policy of policies) {
+    const { command, required } = policy;
     try {
       const result = await runObservationalIntegrationCommand(command, {
         cwd: repoPath,
@@ -150,9 +187,12 @@ async function executeChecks({ repoPath, targetBranch, targetSha, commands, stat
         runner,
         ...(shellRunner ? { shellRunner } : {})
       });
+      const skipped = skippedCheckEvidence(result);
       checks.push({
         command,
-        status: result.acceptedBaselineFailure ? "accepted-baseline-failure" : "passed",
+        required,
+        status: skipped ? "skipped" : result.acceptedBaselineFailure ? "accepted-baseline-failure" : "passed",
+        ...(skipped ? { skipped } : {}),
         code: result.code,
         stdout: result.stdout || "",
         stderr: result.stderr || ""
@@ -160,6 +200,7 @@ async function executeChecks({ repoPath, targetBranch, targetSha, commands, stat
     } catch (error) {
       checks.push({
         command,
+        required,
         status: "failed",
         code: error.result?.code ?? null,
         error: error.message,
@@ -169,7 +210,12 @@ async function executeChecks({ repoPath, targetBranch, targetSha, commands, stat
       break;
     }
   }
-  const afterSha = await targetHead(repoPath, targetBranch, runner);
+  let afterSha;
+  try {
+    afterSha = await authoritativeTarget(repoPath, targetBranch, runner);
+  } catch (error) {
+    return { checks, targetMoved: true, afterSha: null, error };
+  }
   if (afterSha !== targetSha) {
     return { checks, targetMoved: true, afterSha };
   }
@@ -187,14 +233,22 @@ async function reconcileParentClosure({ config, repoPath, session, scopeAssessme
     error.code = "PARENT_CLOSURE_SCOPE_STALE";
     throw error;
   }
-  if (acceptance?.acceptanceReady !== true || acceptance.authorizedSnapshotSatisfied !== true ||
+  if (acceptance?.version !== COMPLETION_EVIDENCE_VERSION || acceptance.acceptanceReady !== true || acceptance.authorizedSnapshotSatisfied !== true ||
       acceptance.liveScopeComplete !== true || acceptance.scopeRevision !== session.scope.revision ||
       acceptance.contractDigest !== contractDigest || !acceptance.targetSha) {
     const error = new Error("Parent epic closure requires current verified acceptance evidence after bookkeeping.");
     error.code = "PARENT_CLOSURE_ACCEPTANCE_STALE";
     throw error;
   }
-  const currentSha = await targetHead(repoPath, config.defaultBranch || "main", runner);
+  let currentSha;
+  try {
+    currentSha = await authoritativeTarget(repoPath, config.defaultBranch || "main", runner);
+  } catch (cause) {
+    const error = new Error(`Parent epic closure target is no longer the accepted authoritative remote target: ${cause.message}`);
+    error.code = "PARENT_CLOSURE_TARGET_MOVED";
+    error.cause = cause;
+    throw error;
+  }
   if (currentSha !== acceptance.targetSha) {
     const error = new Error(`Parent epic closure target moved after acceptance (${acceptance.targetSha} -> ${currentSha}); acceptance must be rerun.`);
     error.code = "PARENT_CLOSURE_TARGET_MOVED";
@@ -283,7 +337,7 @@ async function evaluateCompletion({
 
   let targetSha;
   try {
-    targetSha = await targetHead(repoPath, targetBranch, runner);
+    targetSha = await authoritativeTarget(repoPath, targetBranch, runner);
   } catch (error) {
     return {
       version: COMPLETION_EVIDENCE_VERSION,
@@ -350,7 +404,7 @@ async function evaluateCompletion({
     };
   }
 
-  if (priorEvidence?.verifiedComplete === true && priorEvidence.scopeRevision === session.scope.revision &&
+  if (priorEvidence?.version === COMPLETION_EVIDENCE_VERSION && priorEvidence.verifiedComplete === true && priorEvidence.scopeRevision === session.scope.revision &&
       priorEvidence.targetSha === targetSha && priorEvidence.contractDigest === contractDigest) {
     return { ...priorEvidence, reused: true };
   }
@@ -371,17 +425,20 @@ async function evaluateCompletion({
       outcome: "scope-changed",
       verifiedComplete: false,
       checks: checked.checks,
-      unresolved: [{ issue: contract.parentIssue || "scope", category: "target-moved", reason: `target moved during acceptance evaluation (${targetSha} -> ${checked.afterSha})`, nextAction: `maestro resume --session ${session.id}` }]
+      unresolved: [{ issue: contract.parentIssue || "scope", category: "target-moved", reason: checked.error?.message || `target moved during acceptance evaluation (${targetSha} -> ${checked.afterSha})`, nextAction: `maestro resume --session ${session.id}` }]
     };
   }
-  const failed = checked.checks.find((check) => check.status === "failed");
+  const failed = checked.checks.find((check) => check.status === "failed" || (check.status === "skipped" && check.required));
   if (failed) {
+    const reason = failed.status === "skipped"
+      ? `${failed.command}: mandatory aggregate check skipped ${failed.skipped?.count || 1} check(s)`
+      : `${failed.command}: ${failed.error}`;
     return {
       ...base,
       outcome: "failed-validation",
       verifiedComplete: false,
       checks: checked.checks,
-      unresolved: [{ issue: contract.parentIssue || "scope", category: "aggregate-check", reason: `${failed.command}: ${failed.error}`, nextAction: "maestro details " + (contract.parentIssue || session.scope.issueIds[0]) }]
+      unresolved: [{ issue: contract.parentIssue || "scope", category: "aggregate-check", reason, nextAction: "maestro details " + (contract.parentIssue || session.scope.issueIds[0]) }]
     };
   }
   if (contract.closeParent && session.parentClosure?.state !== "confirmed") {
@@ -411,6 +468,8 @@ module.exports = {
   worksetContract,
   classifyMembers,
   externalVerification,
+  authoritativeTarget,
+  skippedCheckEvidence,
   executeChecks,
   reconcileParentClosure,
   evaluateCompletion

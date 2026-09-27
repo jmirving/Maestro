@@ -23,6 +23,7 @@ function integratedIssues(states) {
 test("temporary-repository autonomous completion milestone survives waves, correction, interruption, reconciliation, and closure", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-completion-milestone-"));
   const repoPath = path.join(root, "target");
+  const originPath = path.join(root, "origin.git");
   const manifestPath = path.join(repoPath, ".maestro.json");
   await fs.mkdir(repoPath);
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -59,6 +60,8 @@ test("temporary-repository autonomous completion milestone survives waves, corre
   await fs.writeFile(path.join(repoPath, "README.md"), "milestone fixture\n");
   git(repoPath, "add", ".maestro.json", "README.md");
   git(repoPath, "commit", "-qm", "fixture baseline");
+  git(root, "clone", "-q", "--bare", repoPath, originPath);
+  git(repoPath, "remote", "add", "origin", originPath);
 
   const scope = { type: "workset", workset: "epic", issueIds: ["1", "2", "3"], revision: "epic-scope-v1" };
   const authorization = createDelegatedAuthorization({
@@ -107,6 +110,7 @@ test("temporary-repository autonomous completion milestone survives waves, corre
       .then(() => {
         git(repoPath, "add", `wave-${issue}.txt`);
         git(repoPath, "commit", "-qm", `integrate issue ${issue}`);
+        git(repoPath, "push", "-q", "origin", "main");
         state.integration = [{ issue, integratedSha: git(repoPath, "rev-parse", "HEAD") }];
         state.status = "integrated";
         return state.integration;
@@ -202,6 +206,7 @@ test("temporary-repository autonomous completion milestone survives waves, corre
       await fs.writeFile(manifestPath, `${JSON.stringify(current, null, 2)}\n`);
       git(repoPath, "add", ".maestro.json");
       git(repoPath, "commit", "-qm", "publish completion bookkeeping");
+      git(repoPath, "push", "-q", "origin", "main");
       manifestCommitCount += 1;
       return { changed: issueIds, committed: true };
     },
@@ -236,15 +241,13 @@ test("temporary-repository autonomous completion milestone survives waves, corre
   assert.equal(interrupted.stopReason, "MILESTONE_INTERRUPTION");
   assert.equal(stateFor("integration-correction-3").integrationCorrection.attempts.length, 1);
 
-  let currentSession = interrupted;
-  for (let attempt = 0; attempt < 4 && currentSession.status !== "complete"; attempt += 1) {
-    currentSession = await driveAutonomous({
-      config: JSON.parse(await fs.readFile(manifestPath, "utf8")),
-      repoPath, manifestPath, session: currentSession
-    }, services);
-    currentSession = await loadSession(repoPath, session.id);
-  }
+  const resumedResult = await driveAutonomous({
+    config: JSON.parse(await fs.readFile(manifestPath, "utf8")),
+    repoPath, manifestPath, session: interrupted
+  }, services);
+  const currentSession = await loadSession(repoPath, session.id);
 
+  assert.equal(resumedResult.status, "complete", "one resumed controller invocation must return verified completion");
   assert.equal(currentSession.status, "complete");
   assert.equal(currentSession.terminal.verifiedComplete, true);
   assert.equal(currentSession.acceptance.outcome, "verified-complete");

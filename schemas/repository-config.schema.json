@@ -303,7 +303,24 @@
           "properties": {
             "version": { "type": "string", "minLength": 1 },
             "requirements": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "uniqueItems": true },
-            "commands": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+            "commands": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  { "type": "string", "minLength": 1 },
+                  {
+                    "type": "object",
+                    "required": ["command"],
+                    "properties": {
+                      "command": { "type": "string", "minLength": 1 },
+                      "required": { "type": "boolean", "default": true }
+                    },
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "uniqueItems": true
+            },
             "closeParent": { "type": "boolean", "default": false }
           },
           "additionalProperties": false

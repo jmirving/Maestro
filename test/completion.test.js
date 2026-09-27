@@ -28,6 +28,7 @@ function gitRunner(head = "target") {
     if (args[0] === "branch") return { code: 0, stdout: "main\n", stderr: "" };
     if (args[0] === "rev-parse") return { code: 0, stdout: `${head}\n`, stderr: "" };
     if (args[0] === "status") return { code: 0, stdout: "", stderr: "" };
+    if (args[0] === "ls-remote") return { code: 0, stdout: `${head}\trefs/heads/main\n`, stderr: "" };
     if (args[0] === "merge-base") return { code: 0, stdout: "", stderr: "" };
     throw new Error(`unexpected git ${args.join(" ")}`);
   };
@@ -158,22 +159,56 @@ test("failed aggregate workflow checks keep an otherwise integrated epic incompl
   assert.equal(result.checks[0].status, "failed");
 });
 
+test("zero-exit aggregate suites with skipped mandatory checks fail closed and retain skip evidence", async () => {
+  const value = config({ worksets: { epic: {
+    source: { type: "epic", issue: { repository: "example/repo", number: "10" } }, refresh: { mode: "explicit" },
+    completionPolicy: "The workflow works.", acceptance: { version: "v1", commands: ["npm test"] }
+  } } });
+  const session = { id: "session-test", scope: { type: "workset", workset: "epic", issueIds: ["1", "2"], revision: "scope-1" }, progress: { bookkeepingPendingIssueIds: [] } };
+  const result = await evaluateCompletion({
+    config: value, repoPath: "/repo", session, states: [integrated("1"), integrated("2")], scopeAssessment: { current: true }, runner: gitRunner(),
+    shellRunner: async () => ({ code: 0, stdout: "ok 1 - required persistence # SKIP database unavailable\n1..1", stderr: "" })
+  });
+  assert.equal(result.outcome, "failed-validation");
+  assert.equal(result.verifiedComplete, false);
+  assert.equal(result.checks[0].status, "skipped");
+  assert.equal(result.checks[0].required, true);
+  assert.deepEqual(result.checks[0].skipped, { source: "command-output", count: 1 });
+  assert.match(result.unresolved[0].reason, /mandatory aggregate check skipped/);
+});
+
+test("explicitly optional aggregate checks retain skipped evidence without impersonating a pass", async () => {
+  const value = config({ worksets: { epic: {
+    source: { type: "epic", issue: { repository: "example/repo", number: "10" } }, refresh: { mode: "explicit" },
+    completionPolicy: "The workflow works.", acceptance: { version: "v1", commands: [{ command: "npm run optional", required: false }] }
+  } } });
+  const session = { id: "session-test", scope: { type: "workset", workset: "epic", issueIds: ["1", "2"], revision: "scope-1" }, progress: { bookkeepingPendingIssueIds: [] } };
+  const result = await evaluateCompletion({
+    config: value, repoPath: "/repo", session, states: [integrated("1"), integrated("2")], scopeAssessment: { current: true }, runner: gitRunner(),
+    shellRunner: async () => ({ code: 0, stdout: "", stderr: "", skipped: { count: 1, reason: "optional service unavailable" } })
+  });
+  assert.equal(result.outcome, "verified-complete");
+  assert.equal(result.checks[0].status, "skipped");
+  assert.equal(result.checks[0].required, false);
+});
+
 test("target movement during aggregate checks invalidates otherwise passing evidence", async () => {
   const value = config({ worksets: { epic: {
     source: { type: "epic", issue: { repository: "example/repo", number: "10" } }, refresh: { mode: "explicit" },
     completionPolicy: "Workflow", acceptance: { version: "v1", commands: ["npm test"] }
   } } });
   const session = { id: "session-test", scope: { type: "workset", workset: "epic", issueIds: ["1", "2"], revision: "scope-1" }, progress: { bookkeepingPendingIssueIds: [] } };
-  let heads = 0;
+  let remoteReads = 0;
   const runner = async (_command, args) => {
     if (args[0] === "branch") return { code: 0, stdout: "main\n", stderr: "" };
-    if (args[0] === "rev-parse") return { code: 0, stdout: `${heads++ ? "moved" : "target"}\n`, stderr: "" };
+    if (args[0] === "rev-parse") return { code: 0, stdout: "target\n", stderr: "" };
+    if (args[0] === "ls-remote") return { code: 0, stdout: `${remoteReads++ ? "moved" : "target"}\trefs/heads/main\n`, stderr: "" };
     if (["status", "merge-base"].includes(args[0])) return { code: 0, stdout: "", stderr: "" };
     throw new Error(`unexpected git ${args.join(" ")}`);
   };
   const result = await evaluateCompletion({ config: value, repoPath: "/repo", session, states: [integrated("1"), integrated("2")], scopeAssessment: { current: true }, runner, shellRunner: async () => ({ code: 0, stdout: "ok", stderr: "" }) });
   assert.equal(result.outcome, "scope-changed");
-  assert.match(result.unresolved[0].reason, /target moved/);
+  assert.match(result.unresolved[0].reason, /authoritative origin\/main \(moved\)/);
 });
 
 test("completion evidence is reused idempotently only for the same target, scope, and contract", async () => {
@@ -233,6 +268,7 @@ test("authorized parent closure observes before mutation and is idempotent", asy
   const session = {
     scope: { type: "workset", workset: "epic", issueIds: ["1"], revision: "scope-1" },
     acceptance: {
+      version: 2,
       targetSha: "target",
       scopeRevision: "scope-1",
       contractDigest: digest({ contract: worksetContract(value, { type: "workset", workset: "epic", issueIds: ["1"], revision: "scope-1" }), scopeRevision: "scope-1" }),
@@ -251,6 +287,7 @@ test("authorized parent closure observes before mutation and is idempotent", asy
       if (args[0] === "branch") return { code: 0, stdout: "main\n", stderr: "" };
       if (args[0] === "status") return { code: 0, stdout: "", stderr: "" };
       if (args[0] === "rev-parse") return { code: 0, stdout: "target\n", stderr: "" };
+      if (args[0] === "ls-remote") return { code: 0, stdout: "target\trefs/heads/main\n", stderr: "" };
       return { code: 0, stdout: args[1] === "view" ? "OPEN\n" : "", stderr: "" };
     },
     now: new Date("2026-09-27T12:00:00.000Z")
@@ -275,6 +312,7 @@ test("parent closure refuses target movement after acceptance without touching G
   const scope = { type: "workset", workset: "epic", issueIds: ["1"], revision: "scope-1" };
   const contract = worksetContract(value, scope);
   const session = { scope, acceptance: {
+    version: 2,
     targetSha: "accepted-target", scopeRevision: scope.revision,
     contractDigest: digest({ contract, scopeRevision: scope.revision }),
     acceptanceReady: true, authorizedSnapshotSatisfied: true, liveScopeComplete: true
@@ -288,7 +326,8 @@ test("parent closure refuses target movement after acceptance without touching G
       if (command === "gh") githubCalls += 1;
       if (args[0] === "branch") return { code: 0, stdout: "main\n", stderr: "" };
       if (args[0] === "status") return { code: 0, stdout: "", stderr: "" };
-      if (args[0] === "rev-parse") return { code: 0, stdout: "moved-target\n", stderr: "" };
+      if (args[0] === "rev-parse") return { code: 0, stdout: "accepted-target\n", stderr: "" };
+      if (args[0] === "ls-remote") return { code: 0, stdout: "moved-target\trefs/heads/main\n", stderr: "" };
       throw new Error(`unexpected ${command} ${args.join(" ")}`);
     }
   }), (error) => error.code === "PARENT_CLOSURE_TARGET_MOVED");

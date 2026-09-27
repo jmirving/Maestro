@@ -886,21 +886,21 @@ test("parent closure reruns acceptance after manifest publication moves the targ
   let published = false;
   const evaluatedTargets = [];
   let closureCalls = 0;
-  const acceptance = (targetSha) => ({
-    outcome: "bookkeeping-pending", verifiedComplete: false, acceptanceReady: true,
+  const acceptance = (targetSha, closed = false) => ({
+    outcome: closed ? "verified-complete" : "bookkeeping-pending", verifiedComplete: closed, acceptanceReady: true,
     authorizedSnapshotSatisfied: true, liveScopeComplete: true, parentClosurePending: true,
     targetSha, scopeRevision: scope.revision, contractDigest: `contract-${targetSha}`,
-    checks: [{ command: "npm test", status: "passed" }], unresolved: []
+    checks: [{ command: "npm test", status: "passed" }], unresolved: closed ? [] : [{ issue: "10", category: "bookkeeping-pending", reason: "closure pending" }]
   });
   const result = await driveAutonomous({ config, repoPath, manifestPath, session }, {
     assessCurrentScope: async () => ({ current: true, revision: scope.revision }),
     computeEffectivePlan: async () => ({ selected: [], humanGates: [], blocked: [], deferred: [] }),
     verifyExecutionSelection: async () => {},
     loadExecutionStates: async () => [],
-    evaluateCompletion: async () => {
+    evaluateCompletion: async ({ session: evaluatedSession }) => {
       const target = published ? "after-publication" : "before-publication";
       evaluatedTargets.push(target);
-      return acceptance(target);
+      return acceptance(target, evaluatedSession.parentClosure?.state === "confirmed");
     },
     persistManifestCompletionDurably: async () => {
       published = true;
@@ -915,8 +915,10 @@ test("parent closure reruns acceptance after manifest publication moves the targ
     }
   });
 
-  assert.deepEqual(evaluatedTargets, ["before-publication", "after-publication"]);
+  assert.deepEqual(evaluatedTargets, ["before-publication", "after-publication", "after-publication"]);
   assert.equal(closureCalls, 1);
+  assert.equal(result.status, "complete");
+  assert.equal(result.acceptance.outcome, "verified-complete");
   assert.equal(result.parentClosure.targetSha, "after-publication");
   assert.ok(result.checkpoints.some((entry) => entry.kind === "post-bookkeeping-acceptance"));
 });

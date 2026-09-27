@@ -190,7 +190,10 @@ async function driveSession({
     // was publishing bookkeeping is honored before ownership is released.
     session = await updateOwnedSession(repoPath, session.id, token, (state) => state);
     const control = requestedControl(session);
-    return releaseSession(repoPath, session.id, token, control || terminal);
+    const verified = session.acceptance?.verifiedComplete === true
+      ? { status: "complete", stopReason: "verified-complete" }
+      : terminal;
+    return releaseSession(repoPath, session.id, token, control || verified);
   }
 
   try {

@@ -36,7 +36,16 @@ test("workset schema preserves legacy manifests and validates canonical reposito
       selected: issueWorkset("owner/repo", ["7"])
     }
   };
+  manifest.worksets.release.completionPolicy = "The assembled workflow passes.";
+  manifest.worksets.release.acceptance = {
+    version: "v1",
+    commands: ["npm test", { command: "npm run optional-check", required: false }]
+  };
   assert.equal(validateRepositoryConfig(manifest), manifest);
+  assert.throws(() => validateRepositoryConfig({
+    ...manifest,
+    worksets: { ...manifest.worksets, release: { ...manifest.worksets.release, acceptance: { version: "v1", commands: [{ command: "npm test", required: "sometimes" }] } } }
+  }), /must be boolean/);
   assert.throws(() => validateRepositoryConfig({ ...manifest, worksets: { Bad: manifest.worksets.release } }), /property name must be valid/);
 });
 
