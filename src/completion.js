@@ -3,7 +3,7 @@ const { effectiveIssueStates } = require("./run-resolver");
 const { runChecked } = require("./process");
 const { runObservationalIntegrationCommand, remoteBranchSha } = require("./integrator");
 
-const COMPLETION_EVIDENCE_VERSION = 2;
+const COMPLETION_EVIDENCE_VERSION = 3;
 
 function worksetContract(config, scope) {
   if (scope?.type !== "workset") {
@@ -19,7 +19,8 @@ function worksetContract(config, scope) {
   const definition = config.worksets?.[scope.workset];
   if (!definition) return null;
   const acceptance = definition.acceptance || {};
-  const requirements = [definition.completionPolicy, ...(acceptance.requirements || [])].filter(Boolean);
+  const requirements = [definition.completionPolicy, ...(acceptance.requirements || [])]
+    .filter((requirement) => typeof requirement === "string" && requirement.trim().length > 0);
   return {
     source: `worksets.${scope.workset}`,
     version: acceptance.version || scope.revision,
@@ -154,6 +155,60 @@ function commandPolicy(entry) {
     : { command: entry.command, required: entry.required !== false };
 }
 
+function requiredAcceptanceCommands(contract) {
+  return (contract?.commands || []).map(commandPolicy).filter((entry) => entry.required);
+}
+
+function requirementEvidence(contract, checks = [], memberAccountingVerified = true) {
+  if (!contract) return [];
+  if (contract.source === "authorized-issue-scope") {
+    return contract.requirements.map((requirement) => ({
+      requirement,
+      status: memberAccountingVerified ? "verified" : "unverified",
+      source: "member-accounting"
+    }));
+  }
+  const commands = requiredAcceptanceCommands(contract);
+  return contract.requirements.map((requirement) => {
+    const evidence = commands.map(({ command }) => {
+      const check = checks.find((entry) => entry.command === command);
+      return check ? { command, status: check.status } : { command, status: "missing" };
+    });
+    return {
+      requirement,
+      status: evidence.length > 0 && evidence.every((entry) => ["passed", "accepted-baseline-failure"].includes(entry.status))
+        ? "verified"
+        : "unverified",
+      source: "aggregate-commands",
+      evidence
+    };
+  });
+}
+
+function requirementsVerified(contract, evidence) {
+  if (!Array.isArray(evidence) || evidence.length !== contract.requirements.length) return false;
+  if (contract.source === "authorized-issue-scope") {
+    return evidence.every((entry, index) =>
+      entry.requirement === contract.requirements[index] &&
+      entry.status === "verified" &&
+      entry.source === "member-accounting"
+    );
+  }
+  const commands = requiredAcceptanceCommands(contract).map((entry) => entry.command);
+  if (!commands.length) return false;
+  return evidence.every((entry, index) =>
+    entry.requirement === contract.requirements[index] &&
+    entry.status === "verified" &&
+    entry.source === "aggregate-commands" &&
+    Array.isArray(entry.evidence) &&
+    entry.evidence.length === commands.length &&
+    entry.evidence.every((check, checkIndex) =>
+      check.command === commands[checkIndex] &&
+      ["passed", "accepted-baseline-failure"].includes(check.status)
+    )
+  );
+}
+
 function skippedCheckEvidence(result = {}) {
   if (Array.isArray(result.skippedChecks) && result.skippedChecks.length) {
     return { source: "runner", count: result.skippedChecks.length, checks: result.skippedChecks };
@@ -235,7 +290,8 @@ async function reconcileParentClosure({ config, repoPath, session, scopeAssessme
   }
   if (acceptance?.version !== COMPLETION_EVIDENCE_VERSION || acceptance.acceptanceReady !== true || acceptance.authorizedSnapshotSatisfied !== true ||
       acceptance.liveScopeComplete !== true || acceptance.scopeRevision !== session.scope.revision ||
-      acceptance.contractDigest !== contractDigest || !acceptance.targetSha) {
+      acceptance.contractDigest !== contractDigest || !acceptance.targetSha ||
+      !requirementsVerified(contract, acceptance.requirementEvidence)) {
     const error = new Error("Parent epic closure requires current verified acceptance evidence after bookkeeping.");
     error.code = "PARENT_CLOSURE_ACCEPTANCE_STALE";
     throw error;
@@ -322,6 +378,26 @@ async function evaluateCompletion({
       unresolved: [{ issue: contract?.parentIssue || session.scope.workset || "scope", category: "missing-acceptance", reason: "workset acceptance requirements are missing or materially ambiguous", nextAction: `define worksets.${session.scope.workset}.completionPolicy or acceptance.requirements and explicitly renew the scope` }]
     };
   }
+  if (contract.source !== "authorized-issue-scope" && requiredAcceptanceCommands(contract).length === 0) {
+    return {
+      version: COMPLETION_EVIDENCE_VERSION,
+      outcome: "human-action-required",
+      verifiedComplete: false,
+      acceptanceReady: false,
+      authorizedSnapshotSatisfied: false,
+      liveScopeComplete: true,
+      scopeRevision: session.scope.revision,
+      contract,
+      checks: [],
+      requirementEvidence: requirementEvidence(contract),
+      unresolved: contract.requirements.map((requirement) => ({
+        issue: contract.parentIssue || session.scope.workset || "scope",
+        category: "non-executable-acceptance",
+        reason: `acceptance requirement has no mandatory executable check and no explicit auditable aggregate disposition is present: ${requirement}`,
+        nextAction: `define mandatory worksets.${session.scope.workset}.acceptance.commands evidence and explicitly renew the scope`
+      }))
+    };
+  }
   if (contract.closeParent && config.integration?.closeIssues !== true) {
     return {
       version: COMPLETION_EVIDENCE_VERSION,
@@ -390,7 +466,10 @@ async function evaluateCompletion({
     members: classified.members,
     authorizedSnapshotSatisfied: nonBookkeeping.length === 0,
     liveScopeComplete: true,
-    bookkeepingPendingIssueIds: classified.bookkeepingIssueIds
+    bookkeepingPendingIssueIds: classified.bookkeepingIssueIds,
+    requirementEvidence: contract.source === "authorized-issue-scope"
+      ? requirementEvidence(contract, [], classified.unresolved.length === 0)
+      : []
   };
   if (classified.unresolved.length) {
     const onlyBookkeeping = nonBookkeeping.length === 0;
@@ -405,7 +484,8 @@ async function evaluateCompletion({
   }
 
   if (priorEvidence?.version === COMPLETION_EVIDENCE_VERSION && priorEvidence.verifiedComplete === true && priorEvidence.scopeRevision === session.scope.revision &&
-      priorEvidence.targetSha === targetSha && priorEvidence.contractDigest === contractDigest) {
+      priorEvidence.targetSha === targetSha && priorEvidence.contractDigest === contractDigest &&
+      requirementsVerified(contract, priorEvidence.requirementEvidence)) {
     return { ...priorEvidence, reused: true };
   }
 
@@ -419,12 +499,14 @@ async function evaluateCompletion({
     runner,
     shellRunner
   });
+  const aggregateRequirementEvidence = requirementEvidence(contract, checked.checks);
   if (checked.targetMoved) {
     return {
       ...base,
       outcome: "scope-changed",
       verifiedComplete: false,
       checks: checked.checks,
+      requirementEvidence: aggregateRequirementEvidence,
       unresolved: [{ issue: contract.parentIssue || "scope", category: "target-moved", reason: checked.error?.message || `target moved during acceptance evaluation (${targetSha} -> ${checked.afterSha})`, nextAction: `maestro resume --session ${session.id}` }]
     };
   }
@@ -438,6 +520,7 @@ async function evaluateCompletion({
       outcome: "failed-validation",
       verifiedComplete: false,
       checks: checked.checks,
+      requirementEvidence: aggregateRequirementEvidence,
       unresolved: [{ issue: contract.parentIssue || "scope", category: "aggregate-check", reason, nextAction: "maestro details " + (contract.parentIssue || session.scope.issueIds[0]) }]
     };
   }
@@ -449,6 +532,7 @@ async function evaluateCompletion({
       acceptanceReady: true,
       authorizedSnapshotSatisfied: true,
       checks: checked.checks,
+      requirementEvidence: aggregateRequirementEvidence,
       parentClosurePending: true,
       unresolved: [{ issue: contract.parentIssue, category: "bookkeeping-pending", reason: "authorized parent epic closure is pending", nextAction: `maestro resume --session ${session.id}` }]
     };
@@ -458,6 +542,7 @@ async function evaluateCompletion({
     outcome: "verified-complete",
     verifiedComplete: true,
     checks: checked.checks,
+    requirementEvidence: aggregateRequirementEvidence,
     unresolved: [],
     nextAction: contract.closeParent ? "close authorized parent epic" : "maestro status --completed"
   };
@@ -470,6 +555,7 @@ module.exports = {
   externalVerification,
   authoritativeTarget,
   skippedCheckEvidence,
+  requirementEvidence,
   executeChecks,
   reconcileParentClosure,
   evaluateCompletion

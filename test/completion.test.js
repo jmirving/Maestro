@@ -79,6 +79,30 @@ test("workset completion requires explicit repository-owned acceptance requireme
   assert.match(result.unresolved[0].reason, /acceptance requirements are missing/);
 });
 
+test("textual workset requirements without executable or disposition evidence require human action", async () => {
+  const value = config({ worksets: { epic: {
+    source: { type: "epic", issue: { repository: "example/repo", number: "10" } }, refresh: { mode: "explicit" },
+    completionPolicy: "The assembled parent workflow works end to end.",
+    acceptance: { version: "v1", commands: [] }
+  } } });
+  const session = { id: "session-test", scope: { type: "workset", workset: "epic", issueIds: ["1", "2"], revision: "scope-1" }, progress: { bookkeepingPendingIssueIds: [] } };
+  const result = await evaluateCompletion({
+    config: value, repoPath: "/repo", session, states: [integrated("1"), integrated("2")], scopeAssessment: { current: true }, runner: gitRunner()
+  });
+  assert.equal(result.outcome, "human-action-required");
+  assert.equal(result.verifiedComplete, false);
+  assert.equal(result.acceptanceReady, false);
+  assert.deepEqual(result.checks, []);
+  assert.deepEqual(result.requirementEvidence, [{
+    requirement: "The assembled parent workflow works end to end.",
+    status: "unverified",
+    source: "aggregate-commands",
+    evidence: []
+  }]);
+  assert.equal(result.unresolved[0].category, "non-executable-acceptance");
+  assert.match(result.unresolved[0].reason, /no mandatory executable check and no explicit auditable aggregate disposition/);
+});
+
 test("aggregate checks run on one target SHA and accepted baseline failures stay explicit", async () => {
   const value = config({
     worksets: {
@@ -180,16 +204,19 @@ test("zero-exit aggregate suites with skipped mandatory checks fail closed and r
 test("explicitly optional aggregate checks retain skipped evidence without impersonating a pass", async () => {
   const value = config({ worksets: { epic: {
     source: { type: "epic", issue: { repository: "example/repo", number: "10" } }, refresh: { mode: "explicit" },
-    completionPolicy: "The workflow works.", acceptance: { version: "v1", commands: [{ command: "npm run optional", required: false }] }
+    completionPolicy: "The workflow works.", acceptance: { version: "v1", commands: ["npm test", { command: "npm run optional", required: false }] }
   } } });
   const session = { id: "session-test", scope: { type: "workset", workset: "epic", issueIds: ["1", "2"], revision: "scope-1" }, progress: { bookkeepingPendingIssueIds: [] } };
   const result = await evaluateCompletion({
     config: value, repoPath: "/repo", session, states: [integrated("1"), integrated("2")], scopeAssessment: { current: true }, runner: gitRunner(),
-    shellRunner: async () => ({ code: 0, stdout: "", stderr: "", skipped: { count: 1, reason: "optional service unavailable" } })
+    shellRunner: async (command) => command === "npm test"
+      ? ({ code: 0, stdout: "ok 1 - workflow", stderr: "" })
+      : ({ code: 0, stdout: "", stderr: "", skipped: { count: 1, reason: "optional service unavailable" } })
   });
   assert.equal(result.outcome, "verified-complete");
-  assert.equal(result.checks[0].status, "skipped");
-  assert.equal(result.checks[0].required, false);
+  assert.equal(result.checks[1].status, "skipped");
+  assert.equal(result.checks[1].required, false);
+  assert.deepEqual(result.requirementEvidence[0].evidence, [{ command: "npm test", status: "passed" }]);
 });
 
 test("target movement during aggregate checks invalidates otherwise passing evidence", async () => {
@@ -245,6 +272,14 @@ test("empty and partially accounted scopes fail closed", async () => {
   const partial = classifyMembers(config(), [integrated("1")], ["1", "2"], { targetSha: "target" });
   assert.equal(partial.members[0].outcome, "verified");
   assert.equal(partial.members[1].outcome, "incomplete");
+
+  const incomplete = await evaluateCompletion({
+    config: config(), repoPath: "/repo",
+    session: { id: "partial", scope: { type: "issues", issueIds: ["1", "2"], revision: "partial" }, progress: { bookkeepingPendingIssueIds: [] } },
+    states: [integrated("1")], scopeAssessment: { current: true }, runner: gitRunner()
+  });
+  assert.equal(incomplete.outcome, "incomplete");
+  assert.equal(incomplete.requirementEvidence[0].status, "unverified");
 });
 
 test("contract retains parent acceptance context without making the epic a duplicate member", () => {
@@ -262,19 +297,20 @@ test("authorized parent closure observes before mutation and is idempotent", asy
     integration: { closeIssues: true },
     worksets: { epic: {
       source: { type: "epic", issue: { repository: "example/repo", number: "10" } }, refresh: { mode: "explicit" },
-      completionPolicy: "Parent workflow", acceptance: { version: "v1", closeParent: true }
+      completionPolicy: "Parent workflow", acceptance: { version: "v1", commands: ["npm test"], closeParent: true }
     } }
   });
   const session = {
     scope: { type: "workset", workset: "epic", issueIds: ["1"], revision: "scope-1" },
     acceptance: {
-      version: 2,
+      version: 3,
       targetSha: "target",
       scopeRevision: "scope-1",
       contractDigest: digest({ contract: worksetContract(value, { type: "workset", workset: "epic", issueIds: ["1"], revision: "scope-1" }), scopeRevision: "scope-1" }),
       acceptanceReady: true,
       authorizedSnapshotSatisfied: true,
-      liveScopeComplete: true
+      liveScopeComplete: true,
+      requirementEvidence: [{ requirement: "Parent workflow", status: "verified", source: "aggregate-commands", evidence: [{ command: "npm test", status: "passed" }] }]
     }
   };
   const calls = [];
@@ -306,16 +342,17 @@ test("parent closure refuses target movement after acceptance without touching G
     integration: { closeIssues: true },
     worksets: { epic: {
       source: { type: "epic", issue: { repository: "example/repo", number: "10" } }, refresh: { mode: "explicit" },
-      completionPolicy: "Parent workflow", acceptance: { version: "v1", closeParent: true }
+      completionPolicy: "Parent workflow", acceptance: { version: "v1", commands: ["npm test"], closeParent: true }
     } }
   });
   const scope = { type: "workset", workset: "epic", issueIds: ["1"], revision: "scope-1" };
   const contract = worksetContract(value, scope);
   const session = { scope, acceptance: {
-    version: 2,
+    version: 3,
     targetSha: "accepted-target", scopeRevision: scope.revision,
     contractDigest: digest({ contract, scopeRevision: scope.revision }),
-    acceptanceReady: true, authorizedSnapshotSatisfied: true, liveScopeComplete: true
+    acceptanceReady: true, authorizedSnapshotSatisfied: true, liveScopeComplete: true,
+    requirementEvidence: [{ requirement: "Parent workflow", status: "verified", source: "aggregate-commands", evidence: [{ command: "npm test", status: "passed" }] }]
   } };
   let githubCalls = 0;
   await assert.rejects(reconcileParentClosure({
@@ -332,4 +369,29 @@ test("parent closure refuses target movement after acceptance without touching G
     }
   }), (error) => error.code === "PARENT_CLOSURE_TARGET_MOVED");
   assert.equal(githubCalls, 0);
+});
+
+test("parent closure refuses acceptance evidence without verified requirement bindings", async () => {
+  const value = config({
+    integration: { closeIssues: true },
+    worksets: { epic: {
+      source: { type: "epic", issue: { repository: "example/repo", number: "10" } }, refresh: { mode: "explicit" },
+      completionPolicy: "Parent workflow", acceptance: { version: "v1", commands: ["npm test"], closeParent: true }
+    } }
+  });
+  const scope = { type: "workset", workset: "epic", issueIds: ["1"], revision: "scope-1" };
+  const contract = worksetContract(value, scope);
+  const session = { scope, acceptance: {
+    version: 3,
+    targetSha: "target", scopeRevision: scope.revision,
+    contractDigest: digest({ contract, scopeRevision: scope.revision }),
+    acceptanceReady: true, authorizedSnapshotSatisfied: true, liveScopeComplete: true,
+    checks: [{ command: "npm test", required: true, status: "passed" }]
+  } };
+  await assert.rejects(reconcileParentClosure({
+    config: value, repoPath: "/repo", session,
+    scopeAssessment: { current: true, revision: scope.revision },
+    authorization: { allowedActions: { closeIssue: true } },
+    runner: async () => { throw new Error("must reject before external access"); }
+  }), (error) => error.code === "PARENT_CLOSURE_ACCEPTANCE_STALE");
 });

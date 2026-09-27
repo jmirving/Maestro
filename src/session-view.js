@@ -48,7 +48,8 @@ function summarizeSession(session) {
       scopeRevision: session.acceptance.scopeRevision || null,
       authorizedSnapshotSatisfied: session.acceptance.authorizedSnapshotSatisfied === true,
       liveScopeComplete: session.acceptance.liveScopeComplete === true,
-      checks: session.acceptance.checks || []
+      checks: session.acceptance.checks || [],
+      requirementEvidence: session.acceptance.requirementEvidence || []
     } : null,
     gates: unresolved,
     lastError: session.lastError || null,
