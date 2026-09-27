@@ -197,6 +197,7 @@ async function integrateExistingRun(config, {
   shellRunner,
   configResolver = null,
   scopeAssessmentOptions = {},
+  integrationCorrectionOptions = {},
   integrationCorrectionExecutor = executeIntegrationCorrection
 }) {
   const state = await loadRunState(repoPath, runId);
@@ -290,7 +291,12 @@ async function integrateExistingRun(config, {
         targetSha: trigger.targetSha,
         sourceSha: trigger.sourceSha
       },
-      baseline: state.baseline || null
+      baseline: state.baseline || null,
+      preflights: state.preflights || [],
+      authorization: state.authorization || null,
+      autonomousSessionId: state.autonomousSessionId || null,
+      concurrency: state.plan?.concurrency || null,
+      ...integrationCorrectionOptions
     });
     return {
       runId,
@@ -469,7 +475,12 @@ async function integrateExistingRun(config, {
       originalWorker: entry.worker,
       originalValidation: entry.validation,
       failure: checkFailure,
-      baseline: state.baseline || null
+      baseline: state.baseline || null,
+      preflights: state.preflights || [],
+      authorization: state.authorization || null,
+      autonomousSessionId: state.autonomousSessionId || null,
+      concurrency: state.plan?.concurrency || null,
+      ...integrationCorrectionOptions
     });
     return {
       runId,

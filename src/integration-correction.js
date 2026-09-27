@@ -5,6 +5,7 @@ const { validateWorker } = require("./validator");
 const { reserveExplicitWork, withCapacityLock } = require("./scheduler");
 const { loadRunState, loadPersistedRunStates, saveRunState } = require("./run-store");
 const { isAncestor } = require("./git-conflict");
+const { bindValidation } = require("./authorization");
 const {
   DEFAULT_RECOVERY_ATTEMPT_LIMIT,
   DEFAULT_RECOVERY_TIMEOUT_MS,
@@ -77,7 +78,13 @@ async function executeIntegrationCorrection(config, {
   validatorExecutor = validateWorker,
   capacityReserver = reserveExplicitWork,
   stateSaver = saveRunState,
-  baseline = null
+  baseline = null,
+  preflights = [],
+  authorization = null,
+  autonomousSessionId = null,
+  recoveryDeadlineAt = null,
+  recoveryAttemptLimit = null,
+  concurrency = null
 } = {}) {
   const issue = String(originalWorker.issue);
   const item = { id: issue, ...(config.work?.[issue] || {}), mode: "integration-correction" };
@@ -85,7 +92,9 @@ async function executeIntegrationCorrection(config, {
   if (state && state.status !== "running") return state;
   const resuming = Boolean(state);
   runId = state?.runId || runId || correctionRunId();
-  const timeoutMs = config.resolution?.timeoutMs || DEFAULT_RECOVERY_TIMEOUT_MS;
+  const timeoutMs = recoveryDeadlineAt == null
+    ? config.resolution?.timeoutMs || DEFAULT_RECOVERY_TIMEOUT_MS
+    : Math.max(1, Number(recoveryDeadlineAt) - Date.now());
   const trigger = {
     command: failure.command,
     code: failure.result?.code ?? null,
@@ -100,6 +109,10 @@ async function executeIntegrationCorrection(config, {
     mode: "integration-correction",
     status: "running",
     repoPath,
+    ...(authorization ? { authorization } : {}),
+    ...(autonomousSessionId ? { autonomousSessionId } : {}),
+    baseline,
+    preflights,
     workers: [],
     validations: [],
     reviews: {},
@@ -111,6 +124,9 @@ async function executeIntegrationCorrection(config, {
       trigger
     })
   };
+  if (!resuming && recoveryDeadlineAt != null) {
+    state.integrationCorrection.deadlineAt = Number(recoveryDeadlineAt);
+  }
   state.integrationCorrection = ensureRecoveryContract(state.integrationCorrection, {
     kind: "integration-regression", issue, timeoutMs, sourceRunId, trigger
   });
@@ -135,7 +151,7 @@ async function executeIntegrationCorrection(config, {
     }
   }
 
-  const limit = config.resolution?.maxAttempts || DEFAULT_RECOVERY_ATTEMPT_LIMIT;
+  const limit = recoveryAttemptLimit || config.resolution?.maxAttempts || DEFAULT_RECOVERY_ATTEMPT_LIMIT;
   let remainingMs;
   try {
     remainingMs = assertRecoveryAvailable(state.integrationCorrection, {
@@ -159,7 +175,17 @@ async function executeIntegrationCorrection(config, {
     expectedCurrent: [{ issue, runId: resuming ? runId : sourceRunId }],
     currentEligibility: resuming ? (current) => String(current.runId) === String(runId) : null,
     existingState: state,
-    extraState: { parentRunId: sourceRunId },
+    planOptions: concurrency == null ? {} : {
+      issueIds: [issue],
+      concurrency: { value: Number(concurrency), source: "delegated authorization" }
+    },
+    extraState: {
+      parentRunId: sourceRunId,
+      ...(authorization ? { authorization } : {}),
+      ...(autonomousSessionId ? { autonomousSessionId } : {}),
+      baseline,
+      preflights
+    },
     beforePersist: ({ state: persisted }) => {
       pendingAttempt = nextRecoveryAttempt(persisted.integrationCorrection, { phase: "worker", status: "running" });
       persisted.status = "running";
@@ -216,13 +242,13 @@ async function executeIntegrationCorrection(config, {
       await verifyCorrection(worker, previousHead, failure.targetSha, runner);
       attempt.phase = "validation";
       await stateSaver(repoPath, runId, state);
-      const validation = await validatorExecutor({
+      const validation = bindValidation(config, worker, await validatorExecutor({
         repository: config.repository,
         worker,
         baseline,
         runId,
         timeoutMs: Math.max(1, state.integrationCorrection.deadlineAt - Date.now())
-      });
+      }), { scopeRevision: state.authorization?.scope?.revision });
       await verifyCorrection(worker, previousHead, failure.targetSha, runner);
       attempt.validation = validation;
       attempt.status = "completed";

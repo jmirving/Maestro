@@ -251,3 +251,95 @@ test("resumed validation REWORK enters bounded correction, approval, and integra
   assert.ok(correctionOptions.timeoutMs <= 45_000 && correctionOptions.timeoutMs > 30_000);
   assert.equal(correctionOptions.deadlineAt, Date.parse(session.startedAt) + context.authorization.limits.correction.deadlineMs);
 });
+
+test("integration-check correction survives interruption and only the approved session-owned child integrates", async (t) => {
+  const context = await fixture(t, ["1"]);
+  const session = await loadSession(context.repoPath, context.session.id);
+  session.startedAt = new Date(Date.now() - 10_000).toISOString();
+  session.lineage.runIds = [context.authorization.runId];
+  await saveSession(context.repoPath, session);
+
+  const deadlineAt = Date.parse(session.startedAt) + context.authorization.limits.correction.deadlineMs;
+  const source = {
+    runId: context.authorization.runId,
+    mode: "autonomous",
+    status: "integration-regression",
+    authorization: context.authorization,
+    autonomousSessionId: session.id,
+    plan: { concurrency: 2, selected: [{ id: "1", status: "ready" }] },
+    baseline: { enabled: true, passing: true, allowFailing: false, commands: [], results: [] },
+    preflights: [],
+    workers: [{ issue: "1", exitCode: 0, baseSha: "base", headSha: "original" }],
+    validations: [{ issue: "1", exitCode: 0, verdict: "approve" }],
+    reviews: {},
+    integration: []
+  };
+  const correctionRunId = "integration-correction-approved";
+  const states = [source];
+  const integrationCalls = [];
+  let child = null;
+
+  const services = {
+    assessCurrentScope: async () => ({ current: true, revision: context.scope.revision }),
+    computeEffectivePlan: async () => ({ selected: [], humanGates: [], blocked: [], deferred: [] }),
+    verifyExecutionSelection: async () => {},
+    loadExecutionStates: async () => states,
+    loadRunState: async (_repoPath, runId) => states.find((state) => state.runId === runId),
+    integrateExistingRun: async (_config, options) => {
+      integrationCalls.push(options.runId);
+      assert.equal(options.integrationCorrectionOptions.recoveryDeadlineAt, deadlineAt);
+      assert.equal(options.integrationCorrectionOptions.recoveryAttemptLimit, context.authorization.limits.correction.retryLimit);
+      if (options.runId === source.runId) {
+        child = {
+          runId: correctionRunId,
+          parentRunId: source.runId,
+          mode: "integration-correction",
+          status: "awaiting-review",
+          authorization: context.authorization,
+          autonomousSessionId: session.id,
+          plan: { concurrency: 2, selected: [{ id: "1", mode: "integration-correction" }] },
+          baseline: source.baseline,
+          preflights: source.preflights,
+          workers: [{ issue: "1", exitCode: 0, baseSha: "target", headSha: "corrected" }],
+          validations: [{ issue: "1", exitCode: 0, verdict: "approve" }],
+          reviews: {},
+          integration: [],
+          integrationCorrection: {
+            issue: "1",
+            deadlineAt,
+            attempts: [{ number: 1, status: "completed", outcome: "approve", chargedAt: "before-interruption" }]
+          }
+        };
+        states.push(child);
+        const error = new Error("fault after correction child was durably approved");
+        error.code = "FAULT_AFTER_CORRECTION";
+        throw error;
+      }
+      assert.equal(options.runId, correctionRunId, "resume must integrate the corrected child");
+      child.integration = [{ issue: "1", integratedSha: "integrated-corrected" }];
+      child.status = "integrated";
+      return { integration: child.integration, newlyIntegrated: child.integration };
+    },
+    persistManifestCompletionDurably: async () => ({ changed: ["1"], committed: true })
+  };
+
+  await assert.rejects(
+    driveAutonomous({ ...context, session }, services),
+    (error) => error.code === "FAULT_AFTER_CORRECTION"
+  );
+  const interruptedDeadline = child.integrationCorrection.deadlineAt;
+  const interruptedAttempts = structuredClone(child.integrationCorrection.attempts);
+
+  const resumedSession = await loadSession(context.repoPath, session.id);
+  const result = await driveAutonomous({ ...context, session: resumedSession }, services);
+
+  assert.deepEqual(integrationCalls, [source.runId, correctionRunId]);
+  assert.deepEqual(source.integration, [], "the original implementation must never be reintegrated");
+  assert.deepEqual(child.integration, [{ issue: "1", integratedSha: "integrated-corrected" }]);
+  assert.equal(child.integrationCorrection.deadlineAt, interruptedDeadline);
+  assert.deepEqual(child.integrationCorrection.attempts, interruptedAttempts);
+  assert.ok(result.lineage.runIds.includes(correctionRunId));
+  assert.ok(result.lineage.recoveryRunIds.includes(correctionRunId));
+  assert.equal(result.lineage.issueAttempts["1"], 1);
+  assert.deepEqual(result.progress.integratedIssueIds, ["1"]);
+});

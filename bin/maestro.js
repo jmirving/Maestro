@@ -398,12 +398,16 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
     return startedAt + liveAuthorization.limits.correction.deadlineMs;
   }
 
-  async function integrateCurrent(runId) {
+  async function integrateCurrent(runId, currentSession) {
     const current = await currentContext("integration");
     return services.integrateExistingRun(current.config, {
       repoPath,
       manifestPath,
       runId,
+      integrationCorrectionOptions: {
+        recoveryDeadlineAt: correctionDeadline(currentSession, current.authorization),
+        recoveryAttemptLimit: current.authorization.limits.correction.retryLimit
+      },
       configResolver: async () => (await currentContext("serialized integration")).config
     });
   }
@@ -428,7 +432,7 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
     const recoveryRunIds = [];
     const issueAttempts = {};
     const integratedIssueIds = [];
-    const initialIntegration = await integrateCurrent(sourceRunId);
+    const initialIntegration = await integrateCurrent(sourceRunId, currentSession);
     integratedIssueIds.push(...(initialIntegration.integration || []).map((entry) => String(entry.issue)));
     if (initialIntegration.integrationRecovery?.runId) recoveryRunIds.push(String(initialIntegration.integrationRecovery.runId));
 
@@ -443,7 +447,7 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
         recoveryRunIds.push(...correctionRuns);
         issueAttempts[item.issue] = Math.max(Number(item.attemptsUsed || 0), correctionRuns.length);
         if (item.outcome === "approved") {
-          const integrated = await integrateCurrent(item.finalRunId);
+          const integrated = await integrateCurrent(item.finalRunId, currentSession);
           integratedIssueIds.push(...(integrated.integration || []).map((entry) => String(entry.issue)));
           if (integrated.integrationRecovery?.runId) recoveryRunIds.push(String(integrated.integrationRecovery.runId));
         }
@@ -474,14 +478,20 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
         .map((state) => String(state.parentRunId)));
       const recoveryStates = states.filter((state) => {
         if (state.authorization?.id !== authorization.id) return false;
+        if (state.mode === "integration-correction" && state.autonomousSessionId !== session.id) return false;
+        if (state.autonomousSessionId && state.autonomousSessionId !== session.id) return false;
         if (state.status === "running" && ["autonomous", "execute", "rework"].includes(state.mode)) return true;
         const integrated = new Set((state.integration || []).map((entry) => String(entry.issue)));
         const uncheckpointedIntegration = [...integrated].some((issue) => !recordedBySession.has(issue));
         const pendingPublication = Object.values(state.publications || {}).some((entry) => entry.state !== "recorded");
         const validationByIssue = new Map((state.validations || []).map((entry) => [String(entry.issue), entry]));
-        const pendingApproved = (state.workers || []).some((worker) => validationByIssue.get(String(worker.issue))?.verdict === "approve" && !integrated.has(String(worker.issue)));
-        const pendingRework = !childRunIds.has(String(state.runId)) && (state.workers || []).some((worker) => validationByIssue.get(String(worker.issue))?.verdict === "rework" && !integrated.has(String(worker.issue)));
-        return uncheckpointedIntegration || pendingPublication || pendingApproved || pendingRework || state.mode === "integration-correction";
+        const hasCurrentChild = childRunIds.has(String(state.runId));
+        const pendingApproved = !hasCurrentChild && (state.workers || []).some((worker) => validationByIssue.get(String(worker.issue))?.verdict === "approve" && !integrated.has(String(worker.issue)));
+        const pendingRework = !hasCurrentChild && (state.workers || []).some((worker) => validationByIssue.get(String(worker.issue))?.verdict === "rework" && !integrated.has(String(worker.issue)));
+        const pendingIntegrationCorrection = state.mode === "integration-correction" && (
+          state.status === "running" || pendingApproved
+        );
+        return uncheckpointedIntegration || pendingPublication || pendingApproved || pendingRework || pendingIntegrationCorrection;
       });
       const recoveryRunIds = recoveryStates.map((state) => String(state.parentRunId || state.runId));
       return {
@@ -490,7 +500,15 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
         unresolved,
         nextAction: unresolved.find((entry) => entry.nextAction)?.nextAction || "maestro status",
         recoveryRunIds: [...new Set(recoveryRunIds)],
-        recoveryStates: recoveryStates.map((state) => ({ runId: String(state.runId), mode: state.mode, status: state.status, parentRunId: state.parentRunId ? String(state.parentRunId) : null })),
+        recoveryStates: recoveryStates.map((state) => ({
+          runId: String(state.runId),
+          mode: state.mode,
+          status: state.status,
+          parentRunId: state.parentRunId ? String(state.parentRunId) : null,
+          issue: state.integrationCorrection?.issue ? String(state.integrationCorrection.issue) : null,
+          attemptsUsed: state.integrationCorrection?.attempts?.length || 0,
+          deadlineAt: state.integrationCorrection?.deadlineAt || null
+        })),
         recoverable: recoveryRunIds.length > 0,
         stopReason: unresolved.length ? "unresolved-work" : "no-ready-work",
         // Issue #28 owns verified workset acceptance. Empty scheduler output is
@@ -506,6 +524,15 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
         const runIds = [];
         const issueAttempts = {};
         for (const recoveryState of observation.recoveryStates) {
+          if (recoveryState.mode === "integration-correction") {
+            recoveryRunIds.push(String(recoveryState.runId));
+            if (recoveryState.issue) {
+              issueAttempts[recoveryState.issue] = Math.max(
+                Number(issueAttempts[recoveryState.issue] || 0),
+                Number(recoveryState.attemptsUsed || 0)
+              );
+            }
+          }
           const sourceRunId = recoveryState.mode === "integration-correction" && recoveryState.parentRunId
             ? recoveryState.parentRunId
             : recoveryState.runId;
@@ -550,7 +577,10 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
             recoveryRunIds.push(...settled.recoveryRunIds, ...settled.runIds.filter((id) => id !== String(sourceRunId)));
             for (const [issue, count] of Object.entries(settled.issueAttempts)) issueAttempts[issue] = count;
           } else {
-            const recovered = await integrateCurrent(sourceRunId);
+            const integrationRunId = recoveryState.mode === "integration-correction" && recoveryState.status !== "running"
+              ? recoveryState.runId
+              : sourceRunId;
+            const recovered = await integrateCurrent(integrationRunId, currentSession);
             integratedIssueIds.push(...(recovered.integration || []).map((entry) => String(entry.issue)));
             if (recovered.integrationRecovery?.runId) recoveryRunIds.push(String(recovered.integrationRecovery.runId));
           }

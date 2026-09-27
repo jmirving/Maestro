@@ -26,6 +26,8 @@ test("integration regression correction is charged, committed, freshly validated
   const saved = [];
   let correctionContext;
   let validatorCalls = 0;
+  const authorization = { id: "delegation-1", scope: { revision: "scope-1" }, limits: { concurrency: 2 } };
+  const deadlineAt = Date.now() + 60_000;
   const result = await executeIntegrationCorrection({
     repository: "example/repo",
     resolution: { maxAttempts: 3 },
@@ -46,7 +48,10 @@ test("integration regression correction is charged, committed, freshly validated
     capacityReserver: async (_config, options) => ({
       reserved: true,
       state: {
-        runId: options.runId, mode: options.mode, status: "running", plan: { selected: options.items },
+        ...options.existingState,
+        ...options.extraState,
+        runId: options.runId, mode: options.mode, status: "running",
+        plan: { concurrency: options.planOptions.concurrency.value, selected: options.items },
         capacity: { issues: ["26"] }
       }
     }),
@@ -65,7 +70,14 @@ test("integration regression correction is charged, committed, freshly validated
       validatorCalls += 1;
       assert.notEqual(worker.headSha, targetSha);
       return { issue: "26", verdict: "approve", exitCode: 0, report: "VERDICT: APPROVE" };
-    }
+    },
+    baseline: { enabled: true, passing: true, commands: [], results: [] },
+    preflights: [{ capability: "node", status: "passed" }],
+    authorization,
+    autonomousSessionId: "session-1",
+    recoveryDeadlineAt: deadlineAt,
+    recoveryAttemptLimit: 2,
+    concurrency: 2
   });
 
   assert.equal(result.status, "awaiting-review");
@@ -77,6 +89,13 @@ test("integration regression correction is charged, committed, freshly validated
   assert.match(correctionContext.validatorReport, /Previous correction validation:\nprevious approval/);
   assert.deepEqual(result.reviews, {}, "stale approval must not be inherited");
   assert.deepEqual(result.capacity.issues, []);
+  assert.deepEqual(result.authorization, authorization);
+  assert.equal(result.autonomousSessionId, "session-1");
+  assert.equal(result.plan.concurrency, 2);
+  assert.equal(result.integrationCorrection.deadlineAt, deadlineAt);
+  assert.deepEqual(result.preflights, [{ capability: "node", status: "passed" }]);
+  assert.equal(result.validations[0].evidence.issueFactsRevision, "scope-1");
+  assert.equal(result.validations[0].evidence.implementationSha, result.workers[0].headSha);
   assert.equal(saved.some((state) => state.integrationCorrection.attempts[0]?.phase === "worker"), true);
 });
 
