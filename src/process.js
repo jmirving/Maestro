@@ -26,15 +26,6 @@ function runProcess(command, args = [], options = {}) {
     let timedOut = false;
     let outputLimitExceeded = false;
     let settled = false;
-    if (typeof options.onSpawn === "function") {
-      Promise.resolve().then(() => options.onSpawn(child.pid)).catch((error) => {
-        if (!settled) {
-          settled = true;
-          child.kill("SIGKILL");
-          reject(error);
-        }
-      });
-    }
     const maxOutputBytes = options.maxOutputBytes == null ? Number.POSITIVE_INFINITY : options.maxOutputBytes;
     const maxCaptureBytes = options.maxCaptureBytes == null ? Number.POSITIVE_INFINITY : options.maxCaptureBytes;
     const captureLimit = Math.min(maxOutputBytes, maxCaptureBytes);
@@ -42,6 +33,17 @@ function runProcess(command, args = [], options = {}) {
       timedOut = true;
       child.kill("SIGKILL");
     }, options.timeoutMs) : null;
+    const spawnCheckpoint = typeof options.onSpawn === "function"
+      ? Promise.resolve().then(() => options.onSpawn(child.pid))
+      : Promise.resolve();
+    spawnCheckpoint.catch((error) => {
+      if (!settled) {
+        settled = true;
+        if (timeout) clearTimeout(timeout);
+        child.kill("SIGKILL");
+        reject(error);
+      }
+    });
     function capture(target, chunk) {
       target.seenBytes += chunk.length;
       const remaining = Math.max(0, captureLimit - target.bytes);
@@ -72,8 +74,9 @@ function runProcess(command, args = [], options = {}) {
         reject(error);
       }
     });
-    child.on("close", (code) => {
+    child.on("close", async (code) => {
       if (timeout) clearTimeout(timeout);
+      try { await spawnCheckpoint; } catch { return; }
       if (!settled) {
         settled = true;
         const stdoutTruncated = stdoutCapture.truncated;

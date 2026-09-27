@@ -42,6 +42,20 @@ test("runProcess bounded capture is byte-correct at a multibyte UTF-8 boundary",
   assert.doesNotMatch(result.stdout, /\uFFFD/);
 });
 
+test("runProcess cannot report a fast child as successful before its spawn checkpoint settles", async () => {
+  let checkpointSettled = false;
+
+  await assert.rejects(runProcess(process.execPath, ["-e", "process.exit(0)"], {
+    onSpawn: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      checkpointSettled = true;
+      throw new Error("spawn checkpoint failed");
+    }
+  }), /spawn checkpoint failed/);
+
+  assert.equal(checkpointSettled, true);
+});
+
 test("worker and validator adapters pass the caller's remaining timeout to their processes", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-agent-timeout-"));
   const worktreePath = path.join(root, "worktree");

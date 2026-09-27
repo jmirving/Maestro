@@ -131,6 +131,13 @@ async function ownerAlive(owner, { kill = process.kill, identity = processStartT
   return currentStartTime != null && String(currentStartTime) === String(owner.processStartTime);
 }
 
+async function operationAlive(operation, options = {}) {
+  return ownerAlive({
+    pid: operation?.processId,
+    processStartTime: operation?.processStartTime
+  }, options);
+}
+
 async function claimSession(repoPath, sessionId, {
   pid = process.pid,
   now = new Date(),
@@ -259,5 +266,6 @@ module.exports = {
   releaseSession,
   requestSessionControl,
   ownerAlive,
+  operationAlive,
   processStartTime
 };

@@ -12,7 +12,7 @@ const {
   driveSession,
   requestSessionState
 } = require("../src/autonomous-controller");
-const { loadSession, saveSession, claimSession, releaseSession } = require("../src/session-store");
+const { loadSession, saveSession, claimSession, releaseSession, processStartTime } = require("../src/session-store");
 const { summarizeSession } = require("../src/session-view");
 const { autoRework } = require("../src/rework");
 const { integrateExistingRun } = require("../src/existing-run");
@@ -334,7 +334,7 @@ test("resumed validation REWORK enters bounded correction, approval, and integra
   assert.equal(correctionOptions.deadlineAt, Date.parse(session.startedAt) + context.authorization.limits.correction.deadlineMs);
 });
 
-test("resume verifies child process identity and reclaims a reused PID", async (t) => {
+test("production resume wiring blocks a matching live child", async (t) => {
   const context = await fixture(t, ["1"]);
   const session = await loadSession(context.repoPath, context.session.id);
   session.lineage.runIds = [context.authorization.runId];
@@ -347,14 +347,50 @@ test("resume verifies child process identity and reclaims a reused PID", async (
     authorization: context.authorization,
     autonomousSessionId: session.id,
     plan: { concurrency: 1, selected: [{ id: "1", status: "ready" }] },
-    operations: { "1": { stage: "worker", processId: 321, processStartTime: "boot-a:original" } },
+    operations: {
+      "1": {
+        stage: "worker",
+        processId: process.pid,
+        processStartTime: await processStartTime(process.pid)
+      }
+    },
+    workers: [], validations: [], reviews: {}, integration: []
+  };
+  let executionCalls = 0;
+
+  await assert.rejects(driveAutonomous({ ...context, session }, {
+    assessCurrentScope: async () => ({ current: true, revision: context.scope.revision }),
+    computeEffectivePlan: async () => ({ selected: [], humanGates: [], blocked: [], deferred: [] }),
+    verifyExecutionSelection: async () => {},
+    loadExecutionStates: async () => [source],
+    loadRunState: async () => source,
+    executeRun: async () => { executionCalls += 1; },
+    persistManifestCompletionDurably: async () => ({ changed: [], committed: false })
+  }), (error) => error.code === "SESSION_OPERATION_RUNNING" && error.message.includes(String(process.pid)));
+
+  assert.equal(executionCalls, 0, "a matching live child must never be duplicated");
+});
+
+test("production resume wiring verifies child identity and reclaims a reused PID", async (t) => {
+  const context = await fixture(t, ["1"]);
+  const session = await loadSession(context.repoPath, context.session.id);
+  session.lineage.runIds = [context.authorization.runId];
+  await saveSession(context.repoPath, session);
+
+  const source = {
+    runId: context.authorization.runId,
+    mode: "autonomous",
+    status: "running",
+    authorization: context.authorization,
+    autonomousSessionId: session.id,
+    plan: { concurrency: 1, selected: [{ id: "1", status: "ready" }] },
+    operations: { "1": { stage: "worker", processId: process.pid, processStartTime: "stale-boot:original" } },
     workers: [],
     validations: [],
     reviews: {},
     integration: []
   };
   let executionCalls = 0;
-  let identityChecks = 0;
 
   const result = await driveAutonomous({ ...context, session }, {
     assessCurrentScope: async () => ({ current: true, revision: context.scope.revision }),
@@ -362,12 +398,6 @@ test("resume verifies child process identity and reclaims a reused PID", async (
     verifyExecutionSelection: async () => {},
     loadExecutionStates: async () => source.integration.length ? [] : [source],
     loadRunState: async () => source,
-    processIsRunning: () => true,
-    processIdentityIsLive: async (operation) => {
-      identityChecks += 1;
-      assert.equal(operation.processStartTime, "boot-a:original");
-      return false;
-    },
     executeRun: async (_config, options) => {
       executionCalls += 1;
       assert.ok(options.reservedState.operations["1"].resumedAt);
@@ -384,7 +414,6 @@ test("resume verifies child process identity and reclaims a reused PID", async (
     persistManifestCompletionDurably: async () => ({ changed: ["1"], committed: true })
   });
 
-  assert.equal(identityChecks, 1);
   assert.equal(executionCalls, 1, "a reused PID must not be mistaken for the interrupted child");
   assert.deepEqual(result.progress.integratedIssueIds, ["1"]);
 });

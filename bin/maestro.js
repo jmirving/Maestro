@@ -41,7 +41,7 @@ const { resolveConcurrency } = require("../src/concurrency");
 const { runConfigCommand } = require("../src/config-command");
 const { createDelegatedAuthorization, saveAuthorization, loadAuthorization, revokeAuthorization, assessCurrentScope, issuePolicy, digest } = require("../src/authorization");
 const { createSession, resolveSession, verifySessionContext, driveSession, requestSessionState } = require("../src/autonomous-controller");
-const { loadSession, ownerAlive } = require("../src/session-store");
+const { loadSession, operationAlive } = require("../src/session-store");
 const { loadSessionSummaries, formatSessionSummaries } = require("../src/session-view");
 const { processIsRunning } = require("../src/recovery-attempts");
 const { validateRepositoryConfig } = require("../src/config-validator");
@@ -369,7 +369,7 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
     newRunId,
     persistManifestCompletionDurably,
     processIsRunning,
-    processIdentityIsLive: ownerAlive,
+    processIdentityIsLive: operationAlive,
     reserveReadyWork,
     verifyExecutionSelection,
     ...serviceOverrides
