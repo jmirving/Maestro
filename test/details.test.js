@@ -75,6 +75,53 @@ test("original issue details resolve the latest relevant run and render persiste
   assert.doesNotMatch(text, /# Issue #12/);
 });
 
+test("details includes the retained autonomous session for the requested issue", async (t) => {
+  const { repoPath } = await fixture(t);
+  const state = persistedRun("20260910010101-aaaaaa", "7");
+  await saveRunState(repoPath, state.runId, state);
+  const details = await loadIssueDetails(repoPath, ["7"], {
+    sessionLoader: async () => [{
+      id: "session-details", status: "paused", phase: "reconcile",
+      scope: { type: "issues", issueIds: ["7"], revision: "scope-7", workset: null },
+      authorizationId: "delegation-7",
+      settings: { concurrency: 1, correction: { retryLimit: 3, deadlineMs: 60000 }, limits: { maxCycles: 20, maxRuntimeMs: 3600000, maxNoProgressCycles: 2 } },
+      cycles: 2,
+      progress: { integratedIssueIds: [], bookkeepingPendingIssueIds: [], manifestPublicationState: null, noProgressCycles: 0, issueAttempts: { "7": 1 }, remainingIssueIds: ["7"] },
+      stopReason: "user-paused",
+      gates: [{ issue: "7", reason: "human gate", nextAction: "maestro details 7" }],
+      lastError: null,
+      nextAction: "maestro resume --session session-details"
+    }]
+  });
+  const text = formatDetails(details);
+  assert.match(text, /Autonomous session for #7/);
+  assert.match(text, /Session session-details: paused \(reconcile\)/);
+  assert.match(text, /#7: human gate; next: maestro details 7/);
+  assert.match(text, /Next: maestro resume --session session-details/);
+});
+
+test("details exposes a retained session before its first run exists", async (t) => {
+  const { repoPath } = await fixture(t);
+  const session = {
+    id: "session-before-run", status: "created", phase: "reconcile",
+    scope: { type: "issues", issueIds: ["7"], revision: "scope-7", workset: null },
+    authorizationId: "delegation-7",
+    settings: { concurrency: 1, correction: {}, limits: { maxCycles: 20, maxRuntimeMs: 3600000, maxNoProgressCycles: 2 } },
+    cycles: 0,
+    progress: { integratedIssueIds: [], bookkeepingPendingIssueIds: [], manifestPublicationState: null, noProgressCycles: 0, issueAttempts: {}, remainingIssueIds: ["7"] },
+    stopReason: null, gates: [], lastError: null,
+    nextAction: "maestro resume --session session-before-run"
+  };
+  const details = await loadIssueDetails(repoPath, ["7"], {
+    config: { work: { "7": { status: "ready" } } },
+    sessionLoader: async () => [session]
+  });
+  const text = formatDetails(details);
+  assert.match(text, /Maestro execution history: none/);
+  assert.match(text, /Session session-before-run: created \(reconcile\)/);
+  assert.match(text, /Next: maestro resume --session session-before-run/);
+});
+
 test("details shows external completion provenance alongside preserved historical evidence", async (t) => {
   const { repoPath } = await fixture(t);
   const historical = persistedRun("20260910010101-aaaaaa", "13", { verdict: "rework" });

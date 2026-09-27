@@ -154,11 +154,15 @@ async function releaseSession(repoPath, sessionId, token, { status, stopReason =
     session.status = status;
     if (stopReason) session.stopReason = stopReason;
     session.terminal ||= { verifiedComplete: false, unresolved: [] };
-    session.terminal.nextAction ||= status === "paused"
+    session.terminal.nextAction = ["paused", "quiescent"].includes(status)
       ? `maestro resume --session ${session.id}`
       : status === "stopped"
-        ? "maestro start <issue> --delegate --continuous"
-        : "maestro status";
+        ? session.scope.type === "workset" && session.scope.workset
+          ? `maestro start --workset ${session.scope.workset} --delegate --continuous`
+          : `maestro start ${session.scope.issueIds.join(" ")} --delegate --continuous`
+        : status === "complete"
+          ? "maestro status --completed"
+          : session.terminal.nextAction || "maestro status";
     return session;
   });
 }

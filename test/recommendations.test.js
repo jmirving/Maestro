@@ -6,6 +6,7 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { reportRootForRepo } = require("../src/reporter");
 const { saveRunState } = require("../src/run-store");
+const { newSession, saveSession } = require("../src/session-store");
 const {
   buildRecommendations,
   formatRecommendations,
@@ -142,6 +143,24 @@ test("maestro output prints and copies the identical artifact including its reco
     validations: [{ issue: "7", verdict: "approve" }],
     reviews: {}
   });
+  const session = newSession({
+    id: "session-output-visible",
+    repository: "example/repo",
+    repoPath,
+    manifestPath: path.join(repoPath, ".maestro.json"),
+    targetBranch: "main",
+    scope: { type: "issues", issueIds: ["7"], revision: "scope-7" },
+    authorization: { id: "delegation-7", policyVersion: 1, policyDigest: "policy" },
+    settings: {
+      concurrency: 1,
+      correction: { retryLimit: 3, deadlineMs: 60000 },
+      limits: { maxCycles: 20, maxRuntimeMs: 3600000, maxNoProgressCycles: 2 }
+    }
+  });
+  session.status = "paused";
+  session.stopReason = "user-paused";
+  session.terminal = { verifiedComplete: false, unresolved: [{ issue: "7", reason: "human gate", nextAction: "maestro details 7" }], remainingIssueIds: ["7"] };
+  await saveSession(repoPath, session, { create: true });
   const reportRoot = reportRootForRepo(repoPath);
   await fs.writeFile(path.join(reportRoot, `worker-7-${runId}.md`), "worker evidence\n");
   await fs.writeFile(path.join(reportRoot, `validator-7-${runId}.md`), "VERDICT: APPROVE\n");
@@ -163,6 +182,46 @@ test("maestro output prints and copies the identical artifact including its reco
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.ok(result.stdout.endsWith("Recommended: `maestro approve 7`\nAlso available: `maestro details 7`\n"));
+  assert.match(result.stdout, /Recommended: `maestro approve 7`/);
+  assert.match(result.stdout, /Session session-output-visible: paused \(reconcile\)/);
+  assert.match(result.stdout, /Scope: #7; revision scope-7/);
+  assert.match(result.stdout, /#7: human gate; next: maestro details 7/);
+  assert.match(result.stdout, /Next: maestro resume --session session-output-visible/);
+  assert.equal(await fs.readFile(clipboardPath, "utf8"), result.stdout);
+});
+
+test("maestro output exposes a retained autonomous session before any run report exists", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-session-output-"));
+  const repoPath = path.join(root, "target");
+  const binPath = path.join(root, "bin");
+  const clipboardPath = path.join(root, "clipboard.txt");
+  await fs.mkdir(repoPath);
+  await fs.mkdir(binPath);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  assert.equal(spawnSync("git", ["init", "-q"], { cwd: repoPath }).status, 0);
+  await fs.writeFile(path.join(repoPath, ".maestro.json"), `${JSON.stringify({ repository: "example/repo", work: { "7": { status: "ready" } } })}\n`);
+  const session = newSession({
+    id: "session-only-output", repository: "example/repo", repoPath,
+    manifestPath: path.join(repoPath, ".maestro.json"), targetBranch: "main",
+    scope: { type: "issues", issueIds: ["7"], revision: "scope-7" },
+    authorization: { id: "delegation-7", policyVersion: 1, policyDigest: "policy" },
+    settings: { concurrency: 1, correction: {}, limits: { maxCycles: 20, maxRuntimeMs: 3600000, maxNoProgressCycles: 2 } }
+  });
+  await saveSession(repoPath, session, { create: true });
+  const clipboard = path.join(binPath, "wl-copy");
+  await fs.writeFile(clipboard, `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(process.env.MAESTRO_TEST_CLIPBOARD, require("node:fs").readFileSync(0));\n`);
+  await fs.chmod(clipboard, 0o755);
+  const wslpath = path.join(binPath, "wslpath");
+  await fs.writeFile(wslpath, "#!/usr/bin/env node\nprocess.exitCode = 1;\n");
+  await fs.chmod(wslpath, 0o755);
+
+  const result = spawnSync(process.execPath, [path.resolve(__dirname, "../bin/maestro.js"), "output", "--repo-path", repoPath], {
+    encoding: "utf8",
+    env: { ...process.env, PATH: `${binPath}${path.delimiter}${process.env.PATH}`, MAESTRO_TEST_CLIPBOARD: clipboardPath }
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /# Maestro autonomous workflow/);
+  assert.match(result.stdout, /Session session-only-output: created \(reconcile\)/);
+  assert.match(result.stdout, /Next: maestro resume --session session-only-output/);
   assert.equal(await fs.readFile(clipboardPath, "utf8"), result.stdout);
 });

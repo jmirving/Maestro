@@ -343,3 +343,85 @@ test("integration-check correction survives interruption and only the approved s
   assert.equal(result.lineage.issueAttempts["1"], 1);
   assert.deepEqual(result.progress.integratedIssueIds, ["1"]);
 });
+
+test("manifest publication retains ownership, rejects concurrent resume, and publishes exactly once across pause and resume", async (t) => {
+  const context = await fixture(t, ["1"]);
+  const source = {
+    runId: context.authorization.runId,
+    mode: "autonomous",
+    status: "awaiting-review",
+    authorization: context.authorization,
+    autonomousSessionId: context.session.id,
+    plan: { concurrency: 2, selected: [{ id: "1", status: "ready" }] },
+    workers: [{ issue: "1", exitCode: 0, baseSha: "base", headSha: "implementation" }],
+    validations: [{ issue: "1", exitCode: 0, verdict: "approve" }],
+    reviews: {},
+    integration: []
+  };
+  let integrationCalls = 0;
+  let publicationCalls = 0;
+  let manifestPublications = 0;
+  let publicationCheckpoint = null;
+  const services = {
+    assessCurrentScope: async () => ({ current: true, revision: context.scope.revision }),
+    computeEffectivePlan: async () => ({ selected: [], humanGates: [], blocked: [], deferred: [] }),
+    verifyExecutionSelection: async () => {},
+    loadExecutionStates: async () => [source],
+    loadRunState: async () => source,
+    integrateExistingRun: async () => {
+      integrationCalls += 1;
+      source.integration = [{ issue: "1", integratedSha: "integrated" }];
+      source.status = "integrated";
+      return { integration: source.integration, newlyIntegrated: source.integration };
+    },
+    persistManifestCompletionDurably: async ({ checkpoint, onCheckpoint }) => {
+      publicationCalls += 1;
+      if (checkpoint?.state === "recorded") return { changed: [], committed: false, checkpoint, recovered: true };
+
+      const owned = await loadSession(context.repoPath, context.session.id);
+      assert.equal(owned.owner.pid, process.pid, "bookkeeping must retain the controller lease");
+      await assert.rejects(
+        claimSession(context.repoPath, context.session.id, { pid: process.pid + 1000 }),
+        (error) => error.code === "SESSION_OWNED"
+      );
+      publicationCheckpoint = { state: "intent", issueIds: ["1"] };
+      await onCheckpoint(publicationCheckpoint);
+      await requestSessionState(context.repoPath, owned, "pause");
+      manifestPublications += 1;
+      publicationCheckpoint = { state: "recorded", issueIds: ["1"], candidateSha: "manifest-sha" };
+      await onCheckpoint(publicationCheckpoint);
+      return { changed: ["1"], committed: true, checkpoint: publicationCheckpoint };
+    }
+  };
+
+  const paused = await driveAutonomous(context, services);
+  assert.equal(paused.status, "paused");
+  assert.equal(paused.owner, undefined);
+  assert.equal(paused.progress.manifestPublication.state, "recorded");
+  assert.deepEqual(paused.progress.bookkeepingPendingIssueIds, []);
+
+  const resumed = await driveAutonomous({ ...context, session: await loadSession(context.repoPath, context.session.id) }, services);
+  assert.equal(resumed.status, "quiescent");
+  assert.equal(integrationCalls, 1);
+  assert.equal(publicationCalls, 2, "resume re-enters the idempotent publication service");
+  assert.equal(manifestPublications, 1, "the manifest commit/push boundary executes exactly once");
+});
+
+test("bookkeeping failure is durably pending before ownership is released", async (t) => {
+  const context = await fixture(t, ["1"]);
+  const error = new Error("push outcome unknown");
+  error.code = "MANIFEST_PUBLICATION_UNCERTAIN";
+  await assert.rejects(driveSession({
+    ...context,
+    observe: async () => ({ readyIssueIds: [], unresolved: [], recoverable: false }),
+    advance: async () => { throw new Error("must not advance"); },
+    finalize: async () => { throw error; }
+  }), (caught) => caught === error);
+
+  const persisted = await loadSession(context.repoPath, context.session.id);
+  assert.equal(persisted.owner, undefined);
+  assert.equal(persisted.status, "quiescent");
+  assert.equal(persisted.phase, "bookkeeping-pending");
+  assert.equal(persisted.stopReason, "MANIFEST_PUBLICATION_UNCERTAIN");
+  assert.equal(persisted.terminal.nextAction, `maestro resume --session ${persisted.id}`);
+});

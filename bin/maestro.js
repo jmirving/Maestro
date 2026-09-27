@@ -41,7 +41,8 @@ const { resolveConcurrency } = require("../src/concurrency");
 const { runConfigCommand } = require("../src/config-command");
 const { createDelegatedAuthorization, saveAuthorization, loadAuthorization, revokeAuthorization, assessCurrentScope, issuePolicy, digest } = require("../src/authorization");
 const { createSession, resolveSession, verifySessionContext, driveSession, requestSessionState } = require("../src/autonomous-controller");
-const { loadSession, saveSession } = require("../src/session-store");
+const { loadSession } = require("../src/session-store");
+const { loadSessionSummaries, formatSessionSummaries } = require("../src/session-view");
 const { processIsRunning } = require("../src/recovery-attempts");
 const { validateRepositoryConfig } = require("../src/config-validator");
 const { validateDependencyGraph, validateAdvisoryReferences } = require("../src/planning-analysis");
@@ -246,14 +247,23 @@ async function workflowFooter(config, repoPath, { includeIssues = true, concurre
 }
 
 async function outputLatest(repoPath, { copy = true, print = true, config = null, recommendations = false } = {}) {
-  const bundle = await latestRunBundle(repoPath);
-  const text = recommendations
+  const sessions = await loadSessionSummaries(repoPath);
+  let bundle;
+  try {
+    bundle = await latestRunBundle(repoPath);
+  } catch (error) {
+    if (!sessions.length || !/No Maestro reports found/.test(error.message)) throw error;
+    bundle = { runId: null, reportRoot: null, state: null, text: "# Maestro autonomous workflow\n" };
+  }
+  let text = recommendations
     ? appendRecommendationFooter(bundle.text, await workflowFooter(config, repoPath))
     : bundle.text;
+  const sessionText = formatSessionSummaries(sessions);
+  if (sessionText) text = `${text.trimEnd()}\n\n${sessionText}`;
   if (print) process.stdout.write(text);
   if (copy) {
     const clipboard = copyToClipboard(text);
-    console.error(`Copied Maestro run ${bundle.runId} to clipboard using ${clipboard}.`);
+    console.error(`Copied Maestro ${bundle.runId ? `run ${bundle.runId}` : "session evidence"} to clipboard using ${clipboard}.`);
   }
   return { ...bundle, text };
 }
@@ -360,7 +370,6 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
     persistManifestCompletionDurably,
     processIsRunning,
     reserveReadyWork,
-    saveSession,
     verifyExecutionSelection,
     ...serviceOverrides
   };
@@ -461,7 +470,7 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
     };
   }
 
-  const result = await services.driveSession({
+  return services.driveSession({
     config,
     repoPath,
     manifestPath,
@@ -631,34 +640,56 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
         // continue independent authorized work before quiescing on the gate.
         progressed: true
       };
+    },
+    finalize: async ({ session: currentSession, update }) => {
+      if (!currentSession.progress.bookkeepingPendingIssueIds.length && !currentSession.progress.integratedIssueIds.length) {
+        return currentSession;
+      }
+      currentSession = await update((state) => {
+        state.phase = "bookkeeping";
+        state.checkpoints.push({
+          kind: "bookkeeping-intent",
+          at: new Date().toISOString(),
+          issueIds: state.progress.integratedIssueIds.map(String)
+        });
+        return state;
+      });
+      try {
+        const progress = await services.persistManifestCompletionDurably({
+          repoPath,
+          manifestPath,
+          issueIds: currentSession.progress.integratedIssueIds,
+          checkpoint: currentSession.progress.manifestPublication || null,
+          onCheckpoint: async (publication) => {
+            currentSession = await update((state) => {
+              state.progress.manifestPublication = publication;
+              state.checkpoints.push({
+                kind: "bookkeeping-checkpoint",
+                at: new Date().toISOString(),
+                state: publication.state,
+                candidateSha: publication.candidateSha || null
+              });
+              return state;
+            });
+          }
+        });
+        return update((state) => {
+          state.progress.bookkeepingPendingIssueIds = [];
+          state.phase = "bookkeeping-complete";
+          state.checkpoints.push({
+            kind: "bookkeeping-result",
+            at: new Date().toISOString(),
+            changedIssueIds: progress.changed,
+            committed: progress.committed
+          });
+          return state;
+        });
+      } catch (error) {
+        error.message = `Autonomous code integration is durable, but manifest bookkeeping remains pending: ${error.message}`;
+        throw error;
+      }
     }
   });
-
-  if (result.progress.bookkeepingPendingIssueIds.length || result.progress.integratedIssueIds.length) {
-    try {
-      let current = await services.loadSession(repoPath, result.id);
-      const progress = await services.persistManifestCompletionDurably({
-        repoPath,
-        manifestPath,
-        issueIds: result.progress.integratedIssueIds,
-        checkpoint: current.progress.manifestPublication || null,
-        onCheckpoint: async (checkpoint) => {
-          current.progress.manifestPublication = checkpoint;
-          current.checkpoints.push({ kind: "bookkeeping-checkpoint", at: new Date().toISOString(), state: checkpoint.state, candidateSha: checkpoint.candidateSha || null });
-          await services.saveSession(repoPath, current);
-          current = await services.loadSession(repoPath, result.id);
-        }
-      });
-      current.progress.bookkeepingPendingIssueIds = [];
-      current.checkpoints.push({ kind: "bookkeeping-result", at: new Date().toISOString(), changedIssueIds: progress.changed, committed: progress.committed });
-      await services.saveSession(repoPath, current);
-      return current;
-    } catch (error) {
-      error.message = `Autonomous code integration is durable, but manifest bookkeeping remains pending: ${error.message}`;
-      throw error;
-    }
-  }
-  return result;
 }
 
 async function main() {

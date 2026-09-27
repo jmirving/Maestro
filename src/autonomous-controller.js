@@ -128,6 +128,7 @@ async function driveSession({
   sessionId = null,
   observe,
   advance,
+  finalize = null,
   now = () => new Date()
 }) {
   if (typeof observe !== "function" || typeof advance !== "function") throw new Error("Autonomous controller requires observe and advance lifecycle services.");
@@ -141,14 +142,50 @@ async function driveSession({
     return state;
   });
 
+  async function finish(terminal) {
+    if (typeof finalize === "function") {
+      try {
+        session = await finalize({
+          session,
+          terminal,
+          update: async (mutate) => {
+            session = await updateOwnedSession(repoPath, session.id, token, mutate);
+            return session;
+          }
+        }) || session;
+      } catch (error) {
+        session = await updateOwnedSession(repoPath, session.id, token, (state) => {
+          state.phase = "bookkeeping-pending";
+          state.stopReason = error.code || "bookkeeping-failed";
+          state.lastError = { message: error.message, code: error.code || null, at: now().toISOString() };
+          state.terminal ||= terminalReport();
+          state.terminal.nextAction = `maestro resume --session ${state.id}`;
+          state.checkpoints.push(checkpoint("bookkeeping-error", state.lastError, now()));
+          return state;
+        });
+        await releaseSession(repoPath, session.id, token, {
+          status: "quiescent",
+          stopReason: error.code || "bookkeeping-failed"
+        });
+        throw error;
+      }
+    }
+
+    // Reload under the lease so a pause/stop request made while finalization
+    // was publishing bookkeeping is honored before ownership is released.
+    session = await updateOwnedSession(repoPath, session.id, token, (state) => state);
+    const control = requestedControl(session);
+    return releaseSession(repoPath, session.id, token, control || terminal);
+  }
+
   try {
     while (true) {
       const elapsed = now().getTime() - started;
       if ((session.cycles || 0) >= session.settings.limits.maxCycles) {
-        return releaseSession(repoPath, session.id, token, { status: "quiescent", stopReason: "max-cycles" });
+        return finish({ status: "quiescent", stopReason: "max-cycles" });
       }
       if (elapsed >= session.settings.limits.maxRuntimeMs) {
-        return releaseSession(repoPath, session.id, token, { status: "quiescent", stopReason: "max-runtime" });
+        return finish({ status: "quiescent", stopReason: "max-runtime" });
       }
 
       session = await updateOwnedSession(repoPath, session.id, token, (state) => {
@@ -156,7 +193,7 @@ async function driveSession({
         state.checkpoints.push(checkpoint("reconcile-intent", { cycle: state.cycles || 0 }, now()));
         return state;
       });
-      if (requestedControl(session)) return releaseSession(repoPath, session.id, token, requestedControl(session));
+      if (requestedControl(session)) return finish(requestedControl(session));
       const observation = await observe(session);
       session = await updateOwnedSession(repoPath, session.id, token, (state) => {
         state.checkpoints.push(checkpoint("reconcile-result", {
@@ -167,13 +204,13 @@ async function driveSession({
         state.terminal = terminalReport(observation);
         return state;
       });
-      if (requestedControl(session)) return releaseSession(repoPath, session.id, token, requestedControl(session));
+      if (requestedControl(session)) return finish(requestedControl(session));
 
       if (observation.verifiedComplete === true) {
-        return releaseSession(repoPath, session.id, token, { status: "complete", stopReason: "verified-complete" });
+        return finish({ status: "complete", stopReason: "verified-complete" });
       }
       if (!(observation.readyIssueIds || []).length && observation.recoverable !== true) {
-        return releaseSession(repoPath, session.id, token, {
+        return finish({
           status: "quiescent",
           stopReason: observation.stopReason || (session.terminal.unresolved.length ? "unresolved-work" : "no-ready-work")
         });
@@ -187,7 +224,7 @@ async function driveSession({
         }, now()));
         return state;
       });
-      if (requestedControl(session)) return releaseSession(repoPath, session.id, token, requestedControl(session));
+      if (requestedControl(session)) return finish(requestedControl(session));
       const outcome = await advance({ session, observation });
       session = await updateOwnedSession(repoPath, session.id, token, (state) => {
         const runIds = (outcome.runIds || []).map(String);
@@ -197,7 +234,10 @@ async function driveSession({
           state.lineage.issueAttempts[String(issue)] = Math.max(Number(state.lineage.issueAttempts[String(issue)] || 0), Number(count));
         }
         state.progress.integratedIssueIds = [...new Set([...state.progress.integratedIssueIds, ...(outcome.integratedIssueIds || []).map(String)])];
-        state.progress.bookkeepingPendingIssueIds = (outcome.bookkeepingPendingIssueIds || []).map(String);
+        state.progress.bookkeepingPendingIssueIds = [...new Set([
+          ...state.progress.bookkeepingPendingIssueIds,
+          ...(outcome.bookkeepingPendingIssueIds || []).map(String)
+        ])];
         state.progress.noProgressCycles = outcome.progressed === false ? state.progress.noProgressCycles + 1 : 0;
         state.cycles = (state.cycles || 0) + 1;
         state.phase = "reconcile";
@@ -209,9 +249,9 @@ async function driveSession({
         }, now()));
         return state;
       });
-      if (outcome.stopReason) return releaseSession(repoPath, session.id, token, { status: "quiescent", stopReason: outcome.stopReason });
+      if (outcome.stopReason) return finish({ status: "quiescent", stopReason: outcome.stopReason });
       if (session.progress.noProgressCycles >= session.settings.limits.maxNoProgressCycles) {
-        return releaseSession(repoPath, session.id, token, { status: "quiescent", stopReason: "no-progress-limit" });
+        return finish({ status: "quiescent", stopReason: "no-progress-limit" });
       }
     }
   } catch (error) {

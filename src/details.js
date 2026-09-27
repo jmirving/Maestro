@@ -1,6 +1,7 @@
 const { loadRunState } = require("./run-store");
 const { evidenceForIssue, resolveRunsForIssues } = require("./run-resolver");
 const { conflictRecoveryCommands } = require("./git-conflict");
+const { loadSessionSummaries, formatSessionSummaries } = require("./session-view");
 
 function issueTitle(config, evidence) {
   const issue = evidence.issue;
@@ -38,8 +39,10 @@ async function loadIssueDetails(repoPath, issueIds, {
   runId = null,
   config = null,
   resolver = resolveRunsForIssues,
-  stateLoader = loadRunState
+  stateLoader = loadRunState,
+  sessionLoader = loadSessionSummaries
 } = {}) {
+  const sessions = await sessionLoader(repoPath, { issueIds });
   const resolved = [];
   for (const issue of issueIds.map(String)) {
     try {
@@ -47,7 +50,8 @@ async function loadIssueDetails(repoPath, issueIds, {
       resolved.push(entry);
     } catch (error) {
       const noHistory = /No Maestro runs found|No relevant Maestro run/.test(error.message);
-      if (runId || !noHistory || config?.work?.[issue]?.completion?.source !== "external") throw error;
+      const hasSession = sessions.some((session) => session.scope.issueIds.includes(issue));
+      if (runId || !noHistory || (!hasSession && config?.work?.[issue]?.completion?.source !== "external")) throw error;
       resolved.push({ issue, runId: null, state: null, evidence: null });
     }
   }
@@ -56,7 +60,8 @@ async function loadIssueDetails(repoPath, issueIds, {
     title: entry.evidence ? issueTitle(config, entry.evidence) : config?.work?.[entry.issue]?.github?.title || null,
     manifestStatus: config?.work?.[entry.issue]?.status || null,
     completion: config?.work?.[entry.issue]?.completion || null,
-    lineage: entry.state ? await loadLineage(repoPath, entry.issue, entry.state, stateLoader) : []
+    lineage: entry.state ? await loadLineage(repoPath, entry.issue, entry.state, stateLoader) : [],
+    sessions: sessions.filter((session) => session.scope.issueIds.includes(String(entry.issue)))
   })));
 }
 
@@ -332,6 +337,8 @@ function formatDetails(items, { repository = null } = {}) {
     }
     if (!item.state) {
       lines.push("Maestro execution history: none");
+      const sessions = formatSessionSummaries(item.sessions || [], { heading: `Autonomous session for #${item.issue}` });
+      if (sessions) lines.push("", sessions.trimEnd());
       return lines.join("\n");
     }
     lines.push(`Resolved run: ${item.runId}`);
@@ -348,6 +355,8 @@ function formatDetails(items, { repository = null } = {}) {
         heading: `## ${relationship} for #${item.issue}`
       });
     }
+    const sessions = formatSessionSummaries(item.sessions || [], { heading: `Autonomous session for #${item.issue}` });
+    if (sessions) lines.push("", sessions.trimEnd());
     return lines.join("\n");
   });
   return `${sections.join("\n\n")}\n`;

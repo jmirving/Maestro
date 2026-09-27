@@ -8,6 +8,7 @@ const { formatConcurrency } = require("./concurrency");
 const { loadAuthorization, assessCurrentScope, assessDelegatedAuthorization } = require("./authorization");
 const { retryableValidationFailure } = require("./validator");
 const { isSafelyResumableReworkSetup, isSafelyResumableSetupFailure } = require("./run-lifecycle");
+const { loadSessionSummaries, formatSessionSummaries } = require("./session-view");
 
 function numericSort(left, right) {
   return String(left).localeCompare(String(right), undefined, { numeric: true });
@@ -264,7 +265,8 @@ async function statusSnapshot(config, repoPath, requestedIssues = [], {
   stateLoader = loadExecutionStates,
   concurrency,
   scopeAssessmentOptions = {},
-  view = "default"
+  view = "default",
+  sessionLoader = loadSessionSummaries
 } = {}) {
   if (!["default", "all", "completed"].includes(view)) throw new Error(`Unknown status view: ${view}.`);
   const states = await stateLoader(repoPath);
@@ -344,7 +346,8 @@ async function statusSnapshot(config, repoPath, requestedIssues = [], {
       available: capacity.available,
       requestedLimit: capacity.requestedLimit,
       idle: capacity.idle
-    }
+    },
+    sessions: await sessionLoader(repoPath, { issueIds: requested })
   };
 }
 
@@ -502,6 +505,9 @@ function formatStatus(snapshot, { columns = Number.POSITIVE_INFINITY } = {}) {
   } else {
     formatGroupedStatus(lines, snapshot, { columns });
   }
+
+  const sessions = formatSessionSummaries(snapshot.sessions || []);
+  if (sessions) lines.push("", ...sessions.trimEnd().split("\n"));
 
   if (snapshot.view === "completed") {
     return `${lines.flatMap((line) => wrapLine(line, columns)).join("\n")}\n`;

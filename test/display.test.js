@@ -53,6 +53,42 @@ test("mixed status parks validator rework without blocking passing siblings", as
   assert.doesNotMatch(text, /Issue #2 .*— approved$/m);
 });
 
+test("status exposes autonomous scope, limits, progress, stop reason, gates, and continuation", async () => {
+  const session = {
+    id: "session-visible",
+    status: "quiescent",
+    phase: "bookkeeping-pending",
+    scope: { type: "issues", issueIds: ["7"], revision: "scope-7" },
+    authorizationId: "delegation-7",
+    settings: {
+      concurrency: 2,
+      correction: { retryLimit: 3, deadlineMs: 60000 },
+      limits: { maxCycles: 20, maxRuntimeMs: 3600000, maxNoProgressCycles: 2 }
+    },
+    cycles: 4,
+    progress: {
+      integratedIssueIds: ["7"], bookkeepingPendingIssueIds: ["7"], manifestPublicationState: "committed",
+      noProgressCycles: 1, issueAttempts: { "7": 2 }, remainingIssueIds: ["7"]
+    },
+    stopReason: "MANIFEST_PUBLICATION_UNCERTAIN",
+    gates: [{ issue: "7", reason: "manifest publication uncertain", nextAction: "maestro resume --session session-visible" }],
+    lastError: null,
+    nextAction: "maestro resume --session session-visible"
+  };
+  const snapshot = await statusSnapshot(config, "/unused", ["7"], {
+    stateLoader: async () => [mixedRun()],
+    sessionLoader: async () => [session]
+  });
+  const text = formatStatus(snapshot);
+  assert.match(text, /Session session-visible: quiescent \(bookkeeping-pending\)/);
+  assert.match(text, /Scope: #7; revision scope-7/);
+  assert.match(text, /cycles 4\/20/);
+  assert.match(text, /bookkeeping pending #7; publication committed/);
+  assert.match(text, /Stop reason: MANIFEST_PUBLICATION_UNCERTAIN/);
+  assert.match(text, /manifest publication uncertain; next: maestro resume --session session-visible/);
+  assert.match(text, /Next: maestro resume --session session-visible/);
+});
+
 test("status recommends issue-oriented rework for a safely resumable setup failure", async () => {
   const failed = {
     runId: "20260926101010-aaaaaa",
