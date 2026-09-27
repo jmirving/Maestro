@@ -40,9 +40,11 @@ const { reserveReadyWork, reserveExplicitWork, runLifecycleBackfill } = require(
 const { resolveConcurrency } = require("../src/concurrency");
 const { runConfigCommand } = require("../src/config-command");
 const { createDelegatedAuthorization, saveAuthorization, loadAuthorization, revokeAuthorization, assessCurrentScope, issuePolicy, digest } = require("../src/authorization");
-const { createSession, resolveSession, driveSession, requestSessionState } = require("../src/autonomous-controller");
+const { createSession, resolveSession, verifySessionContext, driveSession, requestSessionState } = require("../src/autonomous-controller");
 const { loadSession, saveSession } = require("../src/session-store");
 const { processIsRunning } = require("../src/recovery-attempts");
+const { validateRepositoryConfig } = require("../src/config-validator");
+const { validateDependencyGraph, validateAdvisoryReferences } = require("../src/planning-analysis");
 const {
   resolveRepoPath,
   resolveManifestPath,
@@ -215,6 +217,19 @@ function loadConfig(manifestPath, args) {
   return config;
 }
 
+function loadValidatedConfig(manifestPath) {
+  const config = loadConfig(manifestPath, []);
+  validateRepositoryConfig(config);
+  const diagnostics = [
+    ...validateDependencyGraph(config.work),
+    ...validateAdvisoryReferences(config.work, config.planning?.advisoryConflicts || [])
+  ];
+  if (diagnostics.length) {
+    throw new Error(`Unsafe Maestro manifest: ${diagnostics.map((entry) => entry.reason).join(" ")}`);
+  }
+  return config;
+}
+
 function setResultExitCode(result) {
   if (result.status === "failed") process.exitCode = 1;
   if (result.workers?.some((worker) => worker.exitCode !== 0)) process.exitCode = 1;
@@ -327,39 +342,136 @@ function unresolvedSessionWork(plan, authorizedIssueIds) {
   return [...new Map(entries.map((entry) => [entry.issue, entry])).values()];
 }
 
-async function driveAutonomous({ config, repoPath, manifestPath, session }) {
-  const authorization = await loadAuthorization(repoPath, session.authorization.id);
+async function driveAutonomous({ config, repoPath, manifestPath, session }, serviceOverrides = {}) {
+  const services = {
+    assessCurrentScope,
+    autoRework,
+    computeEffectivePlan,
+    driveSession,
+    executeReworkRun,
+    executeRun,
+    integrateExistingRun,
+    loadAuthorization,
+    loadConfig: loadValidatedConfig,
+    loadExecutionStates,
+    loadRunState,
+    loadSession,
+    newRunId,
+    persistManifestCompletionDurably,
+    processIsRunning,
+    reserveReadyWork,
+    saveSession,
+    verifyExecutionSelection,
+    ...serviceOverrides
+  };
+  const authorization = await services.loadAuthorization(repoPath, session.authorization.id);
   const concurrency = resolveConcurrency({ override: session.settings.concurrency, savedDefault: config.defaultConcurrency });
   const authorizedIssueIds = session.scope.issueIds.map(String);
   let firstRunAvailable = !session.lineage.runIds.length;
-  const result = await driveSession({
+
+  async function currentContext(stage) {
+    const currentConfig = services.loadConfig(manifestPath);
+    const liveAuthorization = await services.loadAuthorization(repoPath, session.authorization.id);
+    await verifySessionContext({
+      session,
+      config: currentConfig,
+      repoPath,
+      manifestPath,
+      authorizationLoader: async () => liveAuthorization
+    });
+    if (liveAuthorization.policyDigest !== digest(issuePolicy(currentConfig, liveAuthorization.scope.issueIds, liveAuthorization.limits))) {
+      const error = new Error(`Autonomous protected policy, checks, capabilities, dependencies, human gates, baseline, or operational limits drifted before ${stage}.`);
+      error.code = "SESSION_CONTEXT_DRIFT";
+      throw error;
+    }
+    const liveScope = await services.assessCurrentScope({ config: currentConfig, repoPath, authorization: liveAuthorization });
+    if (liveScope.current !== true) {
+      const error = new Error(`Autonomous live scope drifted before ${stage}: ${liveScope.reason}`);
+      error.code = "SESSION_CONTEXT_DRIFT";
+      throw error;
+    }
+    return { config: currentConfig, authorization: liveAuthorization };
+  }
+
+  function correctionDeadline(currentSession, liveAuthorization) {
+    const startedAt = Date.parse(currentSession.startedAt || currentSession.createdAt);
+    return startedAt + liveAuthorization.limits.correction.deadlineMs;
+  }
+
+  async function integrateCurrent(runId) {
+    const current = await currentContext("integration");
+    return services.integrateExistingRun(current.config, {
+      repoPath,
+      manifestPath,
+      runId,
+      configResolver: async () => (await currentContext("serialized integration")).config
+    });
+  }
+
+  async function correctCurrent(issueIds, currentSession) {
+    const current = await currentContext("correction reservation");
+    const deadlineAt = correctionDeadline(currentSession, current.authorization);
+    return services.autoRework(current.config, {
+      repoPath,
+      issueIds,
+      retryLimit: current.authorization.limits.correction.retryLimit,
+      capacity: concurrency.value,
+      timeoutMs: Math.max(1, deadlineAt - Date.now()),
+      deadlineAt,
+      configResolver: async () => (await currentContext("correction reservation")).config,
+      reworkOptions: { reserveCapacity: true, concurrency }
+    });
+  }
+
+  async function settleExecution(execution, sourceRunId, currentSession) {
+    const runIds = [String(sourceRunId)];
+    const recoveryRunIds = [];
+    const issueAttempts = {};
+    const integratedIssueIds = [];
+    const initialIntegration = await integrateCurrent(sourceRunId);
+    integratedIssueIds.push(...(initialIntegration.integration || []).map((entry) => String(entry.issue)));
+    if (initialIntegration.integrationRecovery?.runId) recoveryRunIds.push(String(initialIntegration.integrationRecovery.runId));
+
+    const reworkIssues = (execution.validations || [])
+      .filter((entry) => entry.verdict === "rework")
+      .map((entry) => String(entry.issue));
+    if (reworkIssues.length) {
+      const correction = await correctCurrent(reworkIssues, currentSession);
+      for (const item of correction.issues) {
+        const correctionRuns = (item.runs || []).map((run) => String(run.runId || run));
+        runIds.push(...correctionRuns, String(item.finalRunId));
+        recoveryRunIds.push(...correctionRuns);
+        issueAttempts[item.issue] = Math.max(Number(item.attemptsUsed || 0), correctionRuns.length);
+        if (item.outcome === "approved") {
+          const integrated = await integrateCurrent(item.finalRunId);
+          integratedIssueIds.push(...(integrated.integration || []).map((entry) => String(entry.issue)));
+          if (integrated.integrationRecovery?.runId) recoveryRunIds.push(String(integrated.integrationRecovery.runId));
+        }
+      }
+    }
+    return {
+      runIds: [...new Set(runIds)],
+      recoveryRunIds: [...new Set(recoveryRunIds)],
+      issueAttempts,
+      integratedIssueIds: [...new Set(integratedIssueIds)]
+    };
+  }
+
+  const result = await services.driveSession({
     config,
     repoPath,
     manifestPath,
     session,
     observe: async (currentSession) => {
-      const plan = await computeEffectivePlan(config, repoPath, { issueIds: authorizedIssueIds, concurrency });
-      const liveAuthorization = await loadAuthorization(repoPath, session.authorization.id);
-      if (liveAuthorization.status !== "active" || liveAuthorization.policyDigest !== session.authorization.policyDigest) {
-        const error = new Error("Autonomous authorization was revoked or its protected policy changed before reservation.");
-        error.code = "SESSION_CONTEXT_DRIFT";
-        throw error;
-      }
-      if (liveAuthorization.policyDigest !== digest(issuePolicy(config, liveAuthorization.scope.issueIds, liveAuthorization.limits))) {
-        const error = new Error("Autonomous protected policy, checks, capabilities, baseline, or operational limits drifted before reservation.");
-        error.code = "SESSION_CONTEXT_DRIFT";
-        throw error;
-      }
-      const liveScope = await assessCurrentScope({ config, repoPath, authorization: liveAuthorization });
-      if (liveScope.current !== true) {
-        const error = new Error(`Autonomous live scope drifted before reservation: ${liveScope.reason}`);
-        error.code = "SESSION_CONTEXT_DRIFT";
-        throw error;
-      }
-      if (plan.selected.length) await verifyExecutionSelection(config, repoPath, plan.selected.map((item) => String(item.id)));
+      const current = await currentContext("reservation");
+      const plan = await services.computeEffectivePlan(current.config, repoPath, { issueIds: authorizedIssueIds, concurrency });
+      if (plan.selected.length) await services.verifyExecutionSelection(current.config, repoPath, plan.selected.map((item) => String(item.id)));
       const unresolved = unresolvedSessionWork(plan, authorizedIssueIds);
-      const states = await loadExecutionStates(repoPath);
+      const states = await services.loadExecutionStates(repoPath);
       const recordedBySession = new Set(currentSession.progress.integratedIssueIds.map(String));
+      const childRunIds = new Set(states
+        .filter((state) => state.authorization?.id === authorization.id && state.parentRunId)
+        .map((state) => String(state.parentRunId)));
       const recoveryStates = states.filter((state) => {
         if (state.authorization?.id !== authorization.id) return false;
         if (state.status === "running" && ["autonomous", "execute", "rework"].includes(state.mode)) return true;
@@ -368,7 +480,8 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }) {
         const pendingPublication = Object.values(state.publications || {}).some((entry) => entry.state !== "recorded");
         const validationByIssue = new Map((state.validations || []).map((entry) => [String(entry.issue), entry]));
         const pendingApproved = (state.workers || []).some((worker) => validationByIssue.get(String(worker.issue))?.verdict === "approve" && !integrated.has(String(worker.issue)));
-        return uncheckpointedIntegration || pendingPublication || pendingApproved || state.mode === "integration-correction";
+        const pendingRework = !childRunIds.has(String(state.runId)) && (state.workers || []).some((worker) => validationByIssue.get(String(worker.issue))?.verdict === "rework" && !integrated.has(String(worker.issue)));
+        return uncheckpointedIntegration || pendingPublication || pendingApproved || pendingRework || state.mode === "integration-correction";
       });
       const recoveryRunIds = recoveryStates.map((state) => String(state.parentRunId || state.runId));
       return {
@@ -377,7 +490,7 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }) {
         unresolved,
         nextAction: unresolved.find((entry) => entry.nextAction)?.nextAction || "maestro status",
         recoveryRunIds: [...new Set(recoveryRunIds)],
-        recoveryStates: recoveryStates.map((state) => ({ runId: String(state.runId), mode: state.mode, parentRunId: state.parentRunId ? String(state.parentRunId) : null })),
+        recoveryStates: recoveryStates.map((state) => ({ runId: String(state.runId), mode: state.mode, status: state.status, parentRunId: state.parentRunId ? String(state.parentRunId) : null })),
         recoverable: recoveryRunIds.length > 0,
         stopReason: unresolved.length ? "unresolved-work" : "no-ready-work",
         // Issue #28 owns verified workset acceptance. Empty scheduler output is
@@ -385,51 +498,41 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }) {
         verifiedComplete: false
       };
     },
-    advance: async ({ observation }) => {
+    advance: async ({ session: currentSession, observation }) => {
+      const current = await currentContext("reservation");
       if (observation.recoveryStates?.length) {
         const integratedIssueIds = [];
         const recoveryRunIds = [];
+        const runIds = [];
         const issueAttempts = {};
         for (const recoveryState of observation.recoveryStates) {
-          let sourceRunId = recoveryState.mode === "integration-correction" && recoveryState.parentRunId
+          const sourceRunId = recoveryState.mode === "integration-correction" && recoveryState.parentRunId
             ? recoveryState.parentRunId
             : recoveryState.runId;
-          if (recoveryState.mode === "rework") {
-            const running = await loadRunState(repoPath, recoveryState.runId);
-            const resumed = await executeReworkRun(config, {
+          let execution = null;
+          if (recoveryState.mode === "rework" && recoveryState.status === "running") {
+            const running = await services.loadRunState(repoPath, recoveryState.runId);
+            execution = await services.executeReworkRun(current.config, {
               repoPath,
               sourceRunId: running.parentRunId,
               runId: running.runId,
               issueIds: running.plan.selected.map((item) => String(item.id)),
               reservedState: running,
               automatic: true,
-              retryLimit: authorization.limits.correction.retryLimit
+              retryLimit: current.authorization.limits.correction.retryLimit,
+              deadlineAt: correctionDeadline(currentSession, current.authorization)
             });
-            const resumedIssues = resumed.plan.selected.map((item) => String(item.id));
-            const correction = await autoRework(config, {
-              repoPath,
-              issueIds: resumedIssues,
-              capacity: concurrency.value,
-              timeoutMs: authorization.limits.correction.deadlineMs,
-              reworkOptions: { reserveCapacity: true, concurrency }
-            });
-            const approved = correction.issues.filter((item) => item.outcome === "approved");
-            if (approved.length === 1) sourceRunId = approved[0].finalRunId;
-            for (const item of correction.issues) {
-              issueAttempts[item.issue] = Math.max(Number(item.attemptsUsed || 0), (item.runs || []).length + 1);
-              recoveryRunIds.push(...(item.runs || []).map((run) => String(run.runId || run)));
-            }
-          } else if (["autonomous", "execute"].includes(recoveryState.mode)) {
-            const running = await loadRunState(repoPath, recoveryState.runId);
+          } else if (["autonomous", "execute"].includes(recoveryState.mode) && recoveryState.status === "running") {
+            const running = await services.loadRunState(repoPath, recoveryState.runId);
             for (const operation of Object.values(running.operations || {})) {
-              if (operation.stage !== "complete" && processIsRunning(operation.processId)) {
+              if (operation.stage !== "complete" && services.processIsRunning(operation.processId)) {
                 const error = new Error(`Run ${running.runId} still has a live ${operation.stage} process ${operation.processId}; resume will not duplicate it.`);
                 error.code = "SESSION_OPERATION_RUNNING";
                 throw error;
               }
               if (operation.stage !== "complete") operation.resumedAt = new Date().toISOString();
             }
-            await executeRun(config, {
+            execution = await services.executeRun(current.config, {
               repoPath,
               runId: running.runId,
               plan: running.plan,
@@ -437,14 +540,24 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }) {
               parentRunId: running.parentRunId || null,
               reservedState: running
             });
+          } else if (["autonomous", "execute", "rework"].includes(recoveryState.mode)) {
+            execution = await services.loadRunState(repoPath, recoveryState.runId);
           }
-          const recovered = await integrateExistingRun(config, { repoPath, manifestPath, runId: sourceRunId });
-          integratedIssueIds.push(...(recovered.integration || []).map((entry) => String(entry.issue)));
-          if (recovered.integrationRecovery?.runId) recoveryRunIds.push(String(recovered.integrationRecovery.runId));
+          if (execution) {
+            const settled = await settleExecution(execution, sourceRunId, currentSession);
+            runIds.push(...settled.runIds);
+            integratedIssueIds.push(...settled.integratedIssueIds);
+            recoveryRunIds.push(...settled.recoveryRunIds, ...settled.runIds.filter((id) => id !== String(sourceRunId)));
+            for (const [issue, count] of Object.entries(settled.issueAttempts)) issueAttempts[issue] = count;
+          } else {
+            const recovered = await integrateCurrent(sourceRunId);
+            integratedIssueIds.push(...(recovered.integration || []).map((entry) => String(entry.issue)));
+            if (recovered.integrationRecovery?.runId) recoveryRunIds.push(String(recovered.integrationRecovery.runId));
+          }
         }
         return {
           kind: "integration-recovery",
-          runIds: observation.recoveryStates.map((entry) => entry.runId),
+          runIds: [...new Set([...observation.recoveryStates.map((entry) => entry.runId), ...runIds])],
           recoveryRunIds,
           issueAttempts,
           integratedIssueIds: [...new Set(integratedIssueIds)],
@@ -452,61 +565,37 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }) {
           progressed: integratedIssueIds.length > 0 || recoveryRunIds.length > 0
         };
       }
-      const runId = firstRunAvailable ? authorization.runId : newRunId();
+      const runId = firstRunAvailable ? current.authorization.runId : services.newRunId();
       firstRunAvailable = false;
-      const reservation = await reserveReadyWork(config, {
+      const reservation = await services.reserveReadyWork(current.config, {
         repoPath,
         runId,
         mode: "autonomous",
         authorizedIssueIds,
         planOptions: { issueIds: authorizedIssueIds, concurrency },
         extraState: {
-          authorization,
+          authorization: current.authorization,
           autonomousSessionId: session.id,
-          ...(runId !== authorization.runId ? { parentRunId: authorization.runId } : {})
+          ...(runId !== current.authorization.runId ? { parentRunId: current.authorization.runId } : {})
         }
       });
       if (!reservation.reserved) return { progressed: false, stopReason: reservation.capacity?.idle?.kind || reservation.reason || "capacity-unavailable" };
-      const execution = await executeAndIntegrate(config, {
+      const execution = await services.executeRun(current.config, {
         repoPath,
-        manifestPath,
         runId,
-        concurrency,
-        delegate: true,
-        authorization,
-        parentRunId: runId !== authorization.runId ? authorization.runId : null,
-        issueIds: authorizedIssueIds,
+        plan: reservation.plan,
+        authorization: current.authorization,
+        parentRunId: runId !== current.authorization.runId ? current.authorization.runId : null,
         reservedState: reservation.state,
-        effectivePlanResolver: async () => reservation.plan,
-        allowPartialIntegration: true
       });
-      const runIds = [runId];
-      const integratedIssueIds = (execution.integration || []).map((entry) => String(entry.issue));
-      const reworkIssues = (execution.validations || []).filter((entry) => entry.verdict === "rework").map((entry) => String(entry.issue));
-      const issueAttempts = {};
-      if (reworkIssues.length) {
-        const correction = await autoRework(config, {
-          repoPath,
-          issueIds: reworkIssues,
-          capacity: concurrency.value,
-          timeoutMs: authorization.limits.correction.deadlineMs,
-          reworkOptions: { reserveCapacity: true, concurrency }
-        });
-        for (const item of correction.issues) {
-          runIds.push(...(item.runs || []).map((run) => String(run.runId || run)), item.finalRunId);
-          issueAttempts[item.issue] = Math.max(Number(item.attemptsUsed || 0), (item.runs || []).length);
-          if (item.outcome === "approved") {
-            const integrated = await integrateExistingRun(config, { repoPath, manifestPath, runId: item.finalRunId });
-            integratedIssueIds.push(...(integrated.integration || []).map((entry) => String(entry.issue)));
-          }
-        }
-      }
+      const settled = await settleExecution(execution, runId, currentSession);
       return {
         kind: "lifecycle-wave",
-        runIds: [...new Set(runIds)],
-        issueAttempts,
-        integratedIssueIds: [...new Set(integratedIssueIds)],
-        bookkeepingPendingIssueIds: [...new Set(integratedIssueIds)],
+        runIds: settled.runIds,
+        recoveryRunIds: settled.recoveryRunIds,
+        issueAttempts: settled.issueAttempts,
+        integratedIssueIds: settled.integratedIssueIds,
+        bookkeepingPendingIssueIds: settled.integratedIssueIds,
         // A worker/validator/rework gate is durable lifecycle progress even
         // when it is issue-local and integrates nothing. Reconciliation will
         // continue independent authorized work before quiescing on the gate.
@@ -517,8 +606,8 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }) {
 
   if (result.progress.bookkeepingPendingIssueIds.length || result.progress.integratedIssueIds.length) {
     try {
-      let current = await loadSession(repoPath, result.id);
-      const progress = await persistManifestCompletionDurably({
+      let current = await services.loadSession(repoPath, result.id);
+      const progress = await services.persistManifestCompletionDurably({
         repoPath,
         manifestPath,
         issueIds: result.progress.integratedIssueIds,
@@ -526,13 +615,13 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }) {
         onCheckpoint: async (checkpoint) => {
           current.progress.manifestPublication = checkpoint;
           current.checkpoints.push({ kind: "bookkeeping-checkpoint", at: new Date().toISOString(), state: checkpoint.state, candidateSha: checkpoint.candidateSha || null });
-          await saveSession(repoPath, current);
-          current = await loadSession(repoPath, result.id);
+          await services.saveSession(repoPath, current);
+          current = await services.loadSession(repoPath, result.id);
         }
       });
       current.progress.bookkeepingPendingIssueIds = [];
       current.checkpoints.push({ kind: "bookkeeping-result", at: new Date().toISOString(), changedIssueIds: progress.changed, committed: progress.committed });
-      await saveSession(repoPath, current);
+      await services.saveSession(repoPath, current);
       return current;
     } catch (error) {
       error.message = `Autonomous code integration is durable, but manifest bookkeeping remains pending: ${error.message}`;
@@ -1301,7 +1390,7 @@ async function main() {
   setResultExitCode(result);
 }
 
-main().catch((error) => {
+if (require.main === module) main().catch((error) => {
   console.error(error.code === "CLI_USAGE" ? error.message : error.stack || error.message);
   if (error.baselineComparison) console.error(`Baseline comparison:\n${JSON.stringify(error.baselineComparison, null, 2)}`);
   if (error.result) {
@@ -1311,3 +1400,5 @@ main().catch((error) => {
   if (error.results) console.error(JSON.stringify(error.results, null, 2));
   process.exitCode = 1;
 });
+
+module.exports = { driveAutonomous, loadConfig, loadValidatedConfig };

@@ -1065,6 +1065,7 @@ async function autoReworkIssue(config, {
   stateSaver,
   recordOutcome,
   reworkExecutor,
+  configResolver,
   reworkOptions,
   initialReservation,
   now
@@ -1202,7 +1203,10 @@ async function autoReworkIssue(config, {
     }
 
     const runId = prepared?.runId || newRunId();
-    const reservedState = await persistAutomaticChild(config, {
+    const currentConfig = configResolver
+      ? await configResolver({ issue: String(issue), runId, sourceRunId: resolved.runId })
+      : config;
+    const reservedState = await persistAutomaticChild(currentConfig, {
       repoPath,
       runId,
       resolved,
@@ -1218,7 +1222,7 @@ async function autoReworkIssue(config, {
     prepared = null;
     let result;
     try {
-      result = await reworkExecutor(config, {
+      result = await reworkExecutor(currentConfig, {
         repoPath,
         sourceRunId: resolved.runId,
         issueIds: [String(issue)],
@@ -1302,9 +1306,11 @@ async function autoRework(config, {
   stateLoader = loadRunState,
   stateSaver = saveRunState,
   reworkExecutor = executeReworkRun,
+  configResolver = null,
   reworkOptions = {},
   initialReservations = {},
   timeoutMs = DEFAULT_AUTO_REWORK_TIMEOUT_MS,
+  deadlineAt = null,
   now = Date.now
 } = {}) {
   const issues = [...new Set((issueIds || []).map(String))];
@@ -1317,7 +1323,7 @@ async function autoRework(config, {
     return { mode: "auto-rework", retryLimit, capacity, timeoutMs, issues: [] };
   }
 
-  const deadlineAt = now() + timeoutMs;
+  const effectiveDeadlineAt = deadlineAt || now() + timeoutMs;
 
   const results = new Array(issues.length);
   let cursor = 0;
@@ -1371,7 +1377,8 @@ async function autoRework(config, {
         stateSaver,
         recordOutcome,
         reworkExecutor,
-        reworkOptions: { ...reworkOptions, deadlineAt },
+        configResolver,
+        reworkOptions: { ...reworkOptions, deadlineAt: effectiveDeadlineAt },
         initialReservation: initialReservations[String(issues[index])] || null,
         now
       });

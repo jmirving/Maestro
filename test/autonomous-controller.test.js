@@ -11,14 +11,14 @@ const {
   driveSession,
   requestSessionState
 } = require("../src/autonomous-controller");
-const { loadSession, claimSession, releaseSession } = require("../src/session-store");
+const { loadSession, saveSession, claimSession, releaseSession } = require("../src/session-store");
+const { driveAutonomous } = require("../bin/maestro");
 
 async function fixture(t, issueIds = ["1", "2"]) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-session-"));
   const repoPath = path.join(root, "target");
   const manifestPath = path.join(repoPath, ".maestro.json");
   await fs.mkdir(repoPath);
-  await fs.writeFile(manifestPath, "{}\n");
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const config = {
     repository: "example/repo",
@@ -26,6 +26,7 @@ async function fixture(t, issueIds = ["1", "2"]) {
     integration: { enabled: true },
     work: Object.fromEntries(issueIds.map((id) => [id, { status: "ready" }]))
   };
+  await fs.writeFile(manifestPath, `${JSON.stringify(config, null, 2)}\n`);
   const scope = { type: "issues", issueIds, revision: "scope-revision" };
   const authorization = createDelegatedAuthorization({
     config,
@@ -145,4 +146,108 @@ test("pause and stop requests preserve evidence and are observed at checkpoints"
   });
   assert.equal(result.status, "stopped");
   assert.equal(result.stopReason, "user-stopped");
+});
+
+test("autonomous reservation reloads the manifest and drift prevents any further mutation", async (t) => {
+  const context = await fixture(t, ["1"]);
+  let reserved = false;
+  let integrated = false;
+  let injected = false;
+
+  await assert.rejects(driveAutonomous(context, {
+    assessCurrentScope: async () => ({ current: true, revision: context.scope.revision }),
+    computeEffectivePlan: async () => {
+      if (!injected) {
+        injected = true;
+        const changed = structuredClone(context.config);
+        changed.work["1"].humanGate = "security-owner approval";
+        await fs.writeFile(context.manifestPath, `${JSON.stringify(changed, null, 2)}\n`);
+      }
+      return { selected: [{ id: "1" }], humanGates: [], blocked: [], deferred: [] };
+    },
+    verifyExecutionSelection: async () => {},
+    loadExecutionStates: async () => [],
+    reserveReadyWork: async () => { reserved = true; throw new Error("must not reserve"); },
+    integrateExistingRun: async () => { integrated = true; throw new Error("must not integrate"); }
+  }), (error) => error.code === "SESSION_CONTEXT_DRIFT" && /human gates.*reservation/.test(error.message));
+
+  assert.equal(reserved, false);
+  assert.equal(integrated, false);
+  const persisted = await loadSession(context.repoPath, context.session.id);
+  assert.equal(persisted.stopReason, "SESSION_CONTEXT_DRIFT");
+});
+
+test("resumed validation REWORK enters bounded correction, approval, and integration with the original deadline", async (t) => {
+  const context = await fixture(t, ["1"]);
+  const session = await loadSession(context.repoPath, context.session.id);
+  session.startedAt = new Date(Date.now() - 20_000).toISOString();
+  session.lineage.runIds = [context.authorization.runId];
+  await saveSession(context.repoPath, session);
+
+  const source = {
+    runId: context.authorization.runId,
+    mode: "autonomous",
+    status: "running",
+    authorization: context.authorization,
+    plan: { concurrency: 2, selected: [{ id: "1", status: "ready" }] },
+    operations: { "1": { stage: "validation", processId: 999999 } },
+    workers: [{ issue: "1", exitCode: 0, baseSha: "base", headSha: "implementation" }],
+    validations: [],
+    reviews: {},
+    integration: []
+  };
+  const correctionRunId = "correction-approved";
+  let executionCalls = 0;
+  let correctedIntegrated = false;
+  let correctionOptions = null;
+  const integrationCalls = [];
+
+  const result = await driveAutonomous({ ...context, session }, {
+    assessCurrentScope: async () => ({ current: true, revision: context.scope.revision }),
+    computeEffectivePlan: async () => ({ selected: [], humanGates: [], blocked: [], deferred: [] }),
+    verifyExecutionSelection: async () => {},
+    loadExecutionStates: async () => correctedIntegrated ? [] : [source],
+    loadRunState: async () => source,
+    processIsRunning: () => false,
+    executeRun: async (_config, options) => {
+      executionCalls += 1;
+      assert.ok(options.reservedState.operations["1"].resumedAt);
+      source.status = "awaiting-review";
+      source.operations["1"].stage = "complete";
+      source.validations = [{ issue: "1", exitCode: 0, verdict: "rework", report: "correct this" }];
+      return source;
+    },
+    autoRework: async (_config, options) => {
+      correctionOptions = options;
+      const reloaded = await options.configResolver({ issue: "1", runId: correctionRunId, sourceRunId: source.runId });
+      assert.equal(reloaded.work["1"].status, "ready");
+      return {
+        issues: [{
+          issue: "1",
+          outcome: "approved",
+          attemptsUsed: 1,
+          finalRunId: correctionRunId,
+          runs: [{ runId: correctionRunId }]
+        }]
+      };
+    },
+    integrateExistingRun: async (_config, options) => {
+      integrationCalls.push(options.runId);
+      if (options.runId === correctionRunId) {
+        correctedIntegrated = true;
+        return { integration: [{ issue: "1", integratedSha: "integrated" }] };
+      }
+      return { integration: [] };
+    },
+    persistManifestCompletionDurably: async () => ({ changed: [], committed: false })
+  });
+
+  assert.equal(executionCalls, 1);
+  assert.deepEqual(integrationCalls, [source.runId, correctionRunId]);
+  assert.deepEqual(result.progress.integratedIssueIds, ["1"]);
+  assert.ok(result.lineage.runIds.includes(correctionRunId));
+  assert.equal(result.lineage.issueAttempts["1"], 1);
+  assert.equal(correctionOptions.retryLimit, context.authorization.limits.correction.retryLimit);
+  assert.ok(correctionOptions.timeoutMs <= 45_000 && correctionOptions.timeoutMs > 30_000);
+  assert.equal(correctionOptions.deadlineAt, Date.parse(session.startedAt) + context.authorization.limits.correction.deadlineMs);
 });

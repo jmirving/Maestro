@@ -195,6 +195,7 @@ async function integrateExistingRun(config, {
   closeIssues = false,
   runner,
   shellRunner,
+  configResolver = null,
   scopeAssessmentOptions = {},
   integrationCorrectionExecutor = executeIntegrationCorrection
 }) {
@@ -395,12 +396,13 @@ async function integrateExistingRun(config, {
     shellRunner,
     sourceRunId: runId,
     revalidateDelegated: state.authorization?.kind === "delegated" ? async ({ worker, validation, authorization }) => {
+      const currentConfig = configResolver ? await configResolver() : config;
       const liveState = await loadRunState(repoPath, runId);
       const liveStates = await loadPersistedRunStates(repoPath);
       const liveAuthorization = liveState.authorization;
       const persisted = liveAuthorization?.id ? await loadAuthorization(repoPath, liveAuthorization.id) : null;
       const liveScopeAssessment = liveAuthorization?.kind === "delegated"
-        ? await assessCurrentScope({ config, repoPath, authorization: liveAuthorization, ...scopeAssessmentOptions })
+        ? await assessCurrentScope({ config: currentConfig, repoPath, authorization: liveAuthorization, ...scopeAssessmentOptions })
         : null;
       const liveWorker = (liveState.workers || []).find((entry) => String(entry.issue) === String(worker.issue));
       const liveValidation = (liveState.validations || []).find((entry) => String(entry.issue) === String(worker.issue));
@@ -411,7 +413,7 @@ async function integrateExistingRun(config, {
         return { eligible: false, reason: "the run now references different authorization evidence" };
       }
       return assessDelegatedAuthorization({
-        config, repoPath, state: liveState, issue: worker.issue, worker: liveWorker, validation: liveValidation,
+        config: currentConfig, repoPath, state: liveState, issue: worker.issue, worker: liveWorker, validation: liveValidation,
         authorization: liveAuthorization,
         persistedAuthorization: persisted,
         statesById: new Map(liveStates.map((entry) => [String(entry.runId), entry])),

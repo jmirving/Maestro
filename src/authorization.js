@@ -56,6 +56,12 @@ function issuePolicy(config, issueIds, limits = {}) {
       closeIssues: config.integration?.closeIssues === true
     },
     limits: normalizeLimits(limits),
+    executionConditions: ids.map((issue) => ({
+      issue,
+      mode: config.work?.[issue]?.mode || "execute",
+      blockedBy: [...(config.work?.[issue]?.blockedBy || [])].map(String).sort(),
+      humanGate: config.work?.[issue]?.humanGate || null
+    })),
     capabilities: ids.map((issue) => ({
       issue,
       requires: [...(config.work?.[issue]?.requires || [])].sort(),
