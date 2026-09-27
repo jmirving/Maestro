@@ -274,7 +274,8 @@ function assessDelegatedAuthorization({ config, repoPath, state, issue, worker, 
   }
   if ((state.baseline.results || []).length !== expectedBaseline.commands.length) return fail("baseline evidence is incomplete");
   if (state.baseline.passing !== true && state.baseline.allowFailing !== true) return fail("baseline failed without an authorized known-failure policy");
-  if (!worker || worker.exitCode !== 0 || !worker.headSha || worker.headSha === worker.baseSha) return fail("worker result is not a current successful implementation");
+  if (!worker || worker.exitCode !== 0 || !worker.headSha) return fail("worker result is not a current successful implementation");
+  if (worker.headSha === worker.baseSha && worker.noChange !== true) return fail("unchanged worker result lacks an explicit no-change claim");
   if (!validation || validation.exitCode !== 0 || validation.verdict !== "approve") return fail("independent validation is missing, invalid, or not approving");
   const expectedEvidence = validationContext(config, worker, issue, authorization.scope.revision);
   if (digest(validation.evidence || null) !== digest(expectedEvidence)) return fail("validation evidence is stale or bound to a different implementation/policy context");

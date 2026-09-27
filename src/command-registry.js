@@ -95,8 +95,8 @@ const COMMANDS = [
       "--renew": { value: "<authorization-id>", description: "Create a new authorization after explicitly resolving scope and policy again; the prior record is retained." }
     },
     prerequisites: "Ready reconciled work, a clean usable repository, current GitHub issue facts, and every capability required by the selected items.",
-    effects: "Atomically reserves repository worker slots, persists a run, creates isolated branches/worktrees, validates changed branches, and backfills authorized ready work. With --delegate, eligible passing results are integrated serially under a durable scoped authorization.",
-    cautions: "Without --delegate: Does not approve, integrate, push the default branch, or close issues. --continuous requires --delegate plus explicit issues or --workset. Delegation does not override human gates, validation failures, drift, checks, closure policy, or unrelated/live operations. --rerun cannot be combined with --workset or --continuous.",
+    effects: "Atomically reserves repository worker slots, persists a run, creates isolated branches/worktrees, validates implementations or explicit no-change claims, and backfills authorized ready work. With --delegate, eligible passing results are integrated serially under a durable scoped authorization. Continuous sessions claim completion only after member accounting, live-scope reconciliation, aggregate acceptance checks, and bookkeeping pass.",
+    cautions: "Without --delegate: Does not approve, integrate, push the default branch, or close issues. --continuous requires --delegate plus explicit issues or --workset. A named workset needs explicit repository-owned acceptance requirements before it can complete. Delegation does not override human gates, validation failures, drift, checks, closure policy, or unrelated/live operations. --rerun cannot be combined with --workset or --continuous.",
     next: ["maestro status", "maestro details <issue>", "maestro output"],
     examples: [["start"], ["start", "57", "63", "--delegate"]],
     positionalKind: "manifest-issues",
@@ -112,8 +112,8 @@ const COMMANDS = [
     positionals: "Optional manifest path and at most one issue number. A scope selector is required and ambiguous matches are reported rather than guessed.",
     options: { "--repo-path": COMMON_REPO_OPTION, "--workset": { value: "<name>", description: "Select the active session for this named workset." }, "--session": { value: "<session-id>", description: "Select an exact session for exceptional or ambiguous recovery." } },
     prerequisites: "A persisted non-terminal session whose repository, manifest, scope revision, authorization, and protected policy still match.",
-    effects: "Reclaims orphaned ownership, reconciles persisted evidence, and continues only pending authorized lifecycle and bookkeeping work.",
-    cautions: "Resume never resets attempt/runtime/no-progress budgets or revives stale authorization. Budget exhaustion terminally stops that session; status shows the explicit renewed-start command. A quiescent stop is not verified epic acceptance.",
+    effects: "Reclaims orphaned ownership, reconciles persisted evidence, continues pending authorized lifecycle/bookkeeping work, and re-evaluates completion against the current target and live scope.",
+    cautions: "Resume never resets attempt/runtime/no-progress budgets or revives stale authorization. Budget exhaustion terminally stops that session; status shows the explicit renewed-start command. Quiescence, closed children, or a passing scheduler wave are not verified epic acceptance.",
     next: ["maestro status", "maestro details <issue>"],
     examples: [["resume", "57"], ["resume", "--workset", "release"]],
     positionalKind: "manifest-issues",
@@ -476,6 +476,9 @@ Boundaries
   merge/rebase and configured checks; it never grants push or integration authority.
   Resume with status/next. Use --rerun only to intentionally retry deferred work.
   "No ready work" can still mean blocked, human-gated, or bookkeeping-pending work.
+  Verified completion additionally requires every authorized member, live-scope reconciliation,
+  repository-owned workset acceptance, one assembled target SHA, and settled bookkeeping.
+  An approved no-change claim records evidence without manufacturing an empty commit.
 
 Advanced compatibility
   maestro start 57 63 --delegate --continuous creates one durable autonomous session.

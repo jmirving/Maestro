@@ -42,6 +42,14 @@ function summarizeSession(session) {
       remainingIssueIds: (session.terminal?.remainingIssueIds || []).map(String)
     },
     stopReason: session.stopReason || null,
+    acceptance: session.acceptance ? {
+      outcome: session.acceptance.outcome,
+      targetSha: session.acceptance.targetSha || null,
+      scopeRevision: session.acceptance.scopeRevision || null,
+      authorizedSnapshotSatisfied: session.acceptance.authorizedSnapshotSatisfied === true,
+      liveScopeComplete: session.acceptance.liveScopeComplete === true,
+      checks: session.acceptance.checks || []
+    } : null,
     gates: unresolved,
     lastError: session.lastError || null,
     nextAction: sessionNextAction(session)
@@ -77,6 +85,11 @@ function formatSessionSummaries(sessions, { heading = "Autonomous sessions" } = 
       `  Attempts: ${Object.keys(session.progress.issueAttempts).length ? Object.entries(session.progress.issueAttempts).map(([issue, count]) => `#${issue}=${count}`).join(", ") : "none"}`,
       `  Stop reason: ${session.stopReason || "none"}`
     );
+    if (session.acceptance) {
+      lines.push(
+        `  Acceptance: ${session.acceptance.outcome}; authorized snapshot ${session.acceptance.authorizedSnapshotSatisfied ? "satisfied" : "incomplete"}; live scope ${session.acceptance.liveScopeComplete ? "complete" : "changed/unverified"}; target ${session.acceptance.targetSha || "unavailable"}`
+      );
+    }
     if (session.ownerPid) lines.push(`  Active owner: process ${session.ownerPid}`);
     if (session.lastError) lines.push(`  Last error: ${session.lastError.code || "error"}: ${session.lastError.message}`);
     if (session.gates.length) {

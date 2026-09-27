@@ -143,6 +143,30 @@ maestro pause session-20260910010101-aaaaaa
 
 The session record lives with Maestro evidence rather than in the editable manifest. It binds the exact repository/common-Git root, manifest path, target, scope revision, authorization and effective limits, then persists transition intent/results and run, correction, recovery, integration, closure, and manifest-publication lineage. Resume reloads and validates the current manifest, live scope, protected policy, and every cumulative session budget before another observation, reservation, or integration; drift or exhaustion stops before another mutation. It adopts retained interrupted worker/validation/correction stages, routes resumed `REWORK` results through the same bounded correction path and original deadline as fresh results, refuses a still-live child, and never guesses among multiple matching sessions. Ownership verifies both PID and OS process start time so a reused PID cannot indefinitely preserve an orphaned claim. Closure recovery observes GitHub before retrying; manifest recovery verifies its recorded candidate against the remote and gates remote movement. The controller keeps its session ownership through manifest commit/push and only releases after success or after recording a resumable bookkeeping failure, so a concurrent resume cannot take over that Git boundary. Pause and stop take effect at a lifecycle checkpoint after an active child or bookkeeping publication settles; neither pretends to cancel work that can still write. Cycle, runtime, and no-progress exhaustion terminally stop the old session and show an explicit renewal command for a newly authorized session. `maestro status`, focused `maestro details <issue>`, and shareable `maestro output` all show retained session scope, phase, effective limits, attempts/progress, publication state, stop reason, gates, and an exact supported next command. Quiescent output lists unresolved work and exact next actions. An empty scheduler wave is not reported as verified epic acceptance.
 
+Continuous sessions now finish only through the persisted completion evaluator. Every authorized member must have current integration evidence on the target, a freshly verified no-change outcome, or documented external verification for that exact target; manifest/closure bookkeeping must also be settled. Discard, cancellation, not-planned closure, retry exhaustion, human gates, missing capabilities, skipped validation, and scheduler exhaustion remain incomplete outcomes. The report distinguishes the authorized snapshot from live-scope completeness and records the evaluated target SHA, scope revision, contract version, member evidence, and aggregate check results. Movement of the target or live scope invalidates the result instead of silently broadening authority.
+
+For a named workset, declare the repository-owned acceptance contract in its definition. `completionPolicy` and `acceptance.requirements` describe the intended assembled behavior; commands are optional but, when present, run observationally on the integrated target. A failing command keeps the workset incomplete. A failure matching an explicitly accepted baseline remains labeled `accepted-baseline-failure`, never `passed`. Parent closure is opt-in twice: `acceptance.closeParent` requests it and `integration.closeIssues` authorizes issue closure. Maestro observes GitHub before closing and records the parent separately from executable members.
+
+```json
+{
+  "worksets": {
+    "scheduling": {
+      "source": { "type": "epic", "issue": { "repository": "owner/repo", "number": "42" } },
+      "refresh": { "mode": "explicit" },
+      "completionPolicy": "A user can create, edit, and cancel a schedule end to end.",
+      "acceptance": {
+        "version": "2026-09-27",
+        "requirements": ["The parent epic workflow is exercised on the assembled target."],
+        "commands": ["npm run test:workflow"],
+        "closeParent": false
+      }
+    }
+  }
+}
+```
+
+A successful worker that leaves `HEAD` equal to its base is treated as an explicit no-change claim. Maestro still launches a fresh validator against the current target. Only an approving validation plus normal human/delegated disposition can record `verified-no-change`; no fake commit is required. External completion similarly requires a repository-recorded `completion.verification` with an exact `targetSha` and passing or accepted-baseline check evidence. A closed issue by itself is not enough.
+
 Repository configuration, worksets, and execution sessions have distinct jobs. `.maestro.json` contains one repository-wide `work` graph and execution configuration; `worksets.<name>` only records a repository-qualified epic or explicit issue source plus explicit-refresh policy. It does not copy issue lifecycle or grant permission to execute. A successful scoped `--write` stores the resolved, revisioned membership snapshot outside the editable manifest with other Maestro evidence. `start`/`next --workset` is the explicit authorization event: Maestro resolves the source again, refuses scope or requirement drift, and records the authorized membership in that run.
 
 Epic membership uses GitHub's documented parent/sub-issue relationship recursively; ordinary body mentions are never inferred as members. The epic is organizational by default and its body remains read-only planning context. Cycles, duplicate paths, missing/inaccessible children, empty scopes, incomplete relationship retrieval, and cross-repository children block persistence. Closed children remain visible and reconcile to non-runnable history. Dependencies outside membership remain hard prerequisites labeled `outsideScope`; unrelated ready issues are not selected. Shared issues retain one global lifecycle, capacity, and conflict state across worksets.

@@ -11,10 +11,14 @@ function buildValidatorPrompt({ repository, worker, baseline }) {
     ? `A clean-base validation was captured before workers started. Failing baseline is ${baseline.allowFailing ? "explicitly allowed" : "not allowed"}. A branch failure may be treated as non-regressive ONLY when the evidence shows it is the same failure already present in the captured baseline; new, changed, or broader failures require REWORK or HUMAN_GATE.\n\nCaptured baseline:\n${summarizeBaseline(baseline)}\n\n`
     : "No clean-base validation was configured; do not assume unrelated failures are acceptable.\n\n";
 
+  const implementationKind = worker.noChange === true
+    ? "The worker claims the requirement is already implemented and produced no diff. Independently inspect the current target and run the relevant checks; approve only if the issue is demonstrably satisfied without a code change. Do not require or manufacture a commit."
+    : "Validate the worker's implementation diff.";
+
   return `Validate ${repository} issue #${worker.issue} after an implementation worker completed.\n\n` +
     `Base SHA: ${worker.baseSha}\nHead SHA: ${worker.headSha}\nBranch: ${worker.branch}\n\n` +
     baselinePolicy +
-    `Read the issue and comments, repository instructions, relevant canonical docs, the worker report, and the actual diff from base to HEAD. ` +
+    `${implementationKind}\n\nRead the issue and comments, repository instructions, relevant canonical docs, the worker report, and the actual diff from base to HEAD. ` +
     `Do not edit files, commit, push, merge, or close anything.\n\n` +
     `Check that the change satisfies the issue, preserves repository/domain contracts, does not cross unresolved human gates, and has tests proportional to risk. ` +
     `Treat skipped mandatory tests as a rejection unless the repository explicitly permits them.\n\n` +

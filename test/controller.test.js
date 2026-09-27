@@ -68,6 +68,24 @@ test("executeRun preflights once, creates isolated worktrees, runs workers, vali
   assert.deepEqual(saved.at(-1).state.reviews, {});
 });
 
+test("executeRun independently validates an explicit no-change claim without requiring a fake commit", async () => {
+  let validatorWorker = null;
+  const result = await executeRun({ repository: "example/repo", work: { "1": { status: "ready" } } }, {
+    repoPath: "/target",
+    runId: "run-no-change",
+    plan: { selected: [{ id: "1", requires: [] }] },
+    preflightRunner: async () => ({ code: 0, stdout: "", stderr: "" }),
+    baselineRunner: async () => ({ enabled: false, commands: [], results: [], passing: true }),
+    worktreeFactory: async () => ({ baseSha: "already-there", branch: "maestro/1", worktreePath: "/wt/1" }),
+    workerExecutor: async ({ item, worktree }) => ({ issue: item.id, exitCode: 0, ...worktree, headSha: worktree.baseSha, report: "Already implemented; npm test passed." }),
+    validatorExecutor: async ({ worker }) => { validatorWorker = worker; return { issue: worker.issue, exitCode: 0, verdict: "approve" }; },
+    stateSaver: async () => {}
+  });
+  assert.equal(validatorWorker.noChange, true);
+  assert.equal(result.workers[0].headSha, result.workers[0].baseSha);
+  assert.equal(result.validations[0].verdict, "approve");
+});
+
 test("executeRun persists a failed lifecycle that requires an explicit retry", async () => {
   const saved = [];
   await assert.rejects(executeRun(config, {

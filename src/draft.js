@@ -112,7 +112,7 @@ function hasCurrentLifecycle(entry) {
   return !new Set(["discarded", "integrated-pending-manifest"]).has(lifecycle);
 }
 
-function externalCompletion(snapshot, executionStates, issue) {
+function externalCompletion(snapshot, executionStates, issue, prior = null) {
   const hasHistory = executionStates.some((state) => (
     (state.plan?.selected || []).some((entry) => String(entry.id) === issue) ||
     (state.workers || []).some((entry) => String(entry.issue) === issue) ||
@@ -128,7 +128,8 @@ function externalCompletion(snapshot, executionStates, issue) {
     evidence: {
       manifestStatus: "complete",
       maestroHistory: hasHistory
-    }
+    },
+    ...(prior?.source === "external" && prior.verification ? { verification: clone(prior.verification) } : {})
   };
 }
 
@@ -288,7 +289,7 @@ function proposeDraft({ repository, existingConfig = null, issues = [], selected
 
     if (state === "CLOSED" && outcome === "completed" && proposed.status === "complete" && !hasMaestroIntegration) {
       adoptingExternalCompletion = true;
-      proposed.completion = externalCompletion(snapshot, executionStates, id);
+      proposed.completion = externalCompletion(snapshot, executionStates, id, proposed.completion);
     } else if (state === "CLOSED" && outcome !== "completed" && proposed.status === "complete" && !hasMaestroIntegration) {
       recordTransition(proposed, "complete", "inactive", `GitHub closure is no longer verified as completed${snapshot.stateReason ? ` (${snapshot.stateReason})` : ""}.`);
       proposed.status = "inactive";

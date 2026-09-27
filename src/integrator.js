@@ -521,6 +521,8 @@ async function integrateApproved({
           issue: worker.issue,
           branch: worker.branch,
           integratedSha,
+          noChange: worker.noChange === true,
+          implementationSha: worker.headSha,
           validationResults,
           closureRequired: integration.closeIssues === true && (permission.review != null || permission.delegated?.allowedActions?.closeIssue === true),
           authorization: permission.delegated?.eligible

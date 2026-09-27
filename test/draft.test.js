@@ -304,6 +304,17 @@ test("closed completed work adopts external completion while preserving historic
 
   const second = proposeDraft({ repository: "owner/repo", existingConfig: first.manifest, issues: [closed], executionStates: [historical] });
   assert.equal(second.changed, false);
+
+  const verifiedManifest = structuredClone(first.manifest);
+  verifiedManifest.work["13"].completion.verification = {
+    outcome: "verified",
+    targetSha: "target-sha",
+    disposition: "owner accepted independent verification",
+    checks: [{ name: "npm test", status: "passed", evidence: "469 tests passed" }]
+  };
+  const verified = proposeDraft({ repository: "owner/repo", existingConfig: verifiedManifest, issues: [closed], executionStates: [historical] });
+  assert.equal(verified.changed, false);
+  assert.deepEqual(verified.manifest.work["13"].completion.verification, verifiedManifest.work["13"].completion.verification);
 });
 
 test("external completion adoption works without Maestro history and satisfies dependencies", () => {

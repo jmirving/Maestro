@@ -44,6 +44,7 @@ const { createSession, resolveSession, verifySessionContext, driveSession, reque
 const { loadSession, operationAlive } = require("../src/session-store");
 const { loadSessionSummaries, formatSessionSummaries } = require("../src/session-view");
 const { processIsRunning } = require("../src/recovery-attempts");
+const { evaluateCompletion, reconcileParentClosure } = require("../src/completion");
 const { validateRepositoryConfig } = require("../src/config-validator");
 const { validateDependencyGraph, validateAdvisoryReferences } = require("../src/planning-analysis");
 const {
@@ -360,6 +361,7 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
     driveSession,
     executeReworkRun,
     executeRun,
+    evaluateCompletion,
     integrateExistingRun,
     loadAuthorization,
     loadConfig: loadValidatedConfig,
@@ -370,6 +372,7 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
     persistManifestCompletionDurably,
     processIsRunning,
     processIdentityIsLive: operationAlive,
+    reconcileParentClosure,
     reserveReadyWork,
     verifyExecutionSelection,
     ...serviceOverrides
@@ -400,7 +403,7 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
       error.code = "SESSION_CONTEXT_DRIFT";
       throw error;
     }
-    return { config: currentConfig, authorization: liveAuthorization };
+    return { config: currentConfig, authorization: liveAuthorization, scopeAssessment: liveScope };
   }
 
   function correctionDeadline(currentSession, liveAuthorization) {
@@ -477,7 +480,20 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
     manifestPath,
     session,
     observe: async (currentSession) => {
-      const current = await currentContext("reservation");
+      let current;
+      try {
+        current = await currentContext("reservation");
+      } catch (error) {
+        if (error.code !== "SESSION_CONTEXT_DRIFT") throw error;
+        return {
+          readyIssueIds: [],
+          remainingIssueIds: authorizedIssueIds,
+          unresolved: [{ issue: session.scope.workset || "scope", category: "scope-changed", reason: error.message, nextAction: session.scope.workset ? `maestro draft --workset ${session.scope.workset} --write` : "maestro status" }],
+          stopReason: "scope-changed",
+          verifiedComplete: false,
+          acceptance: { outcome: "scope-changed", verifiedComplete: false, reason: error.message }
+        };
+      }
       const plan = await services.computeEffectivePlan(current.config, repoPath, { issueIds: authorizedIssueIds, concurrency });
       if (plan.selected.length) await services.verifyExecutionSelection(current.config, repoPath, plan.selected.map((item) => String(item.id)));
       const unresolved = unresolvedSessionWork(plan, authorizedIssueIds);
@@ -505,6 +521,16 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
         return uncheckpointedIntegration || pendingPublication || pendingApproved || pendingRework || pendingIntegrationCorrection;
       });
       const recoveryRunIds = recoveryStates.map((state) => String(state.parentRunId || state.runId));
+      let acceptance = null;
+      if (!plan.selected.length && !recoveryRunIds.length) {
+        acceptance = await services.evaluateCompletion({
+          config: current.config,
+          repoPath,
+          session: currentSession,
+          states,
+          scopeAssessment: current.scopeAssessment
+        });
+      }
       return {
         readyIssueIds: plan.selected.map((item) => String(item.id)),
         remainingIssueIds: [...new Set([...plan.selected.map((item) => String(item.id)), ...unresolved.map((entry) => entry.issue)])],
@@ -527,10 +553,14 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
         }),
         rootRunConsumed,
         recoverable: recoveryRunIds.length > 0,
-        stopReason: unresolved.length ? "unresolved-work" : "no-ready-work",
-        // Issue #28 owns verified workset acceptance. Empty scheduler output is
-        // intentionally not promoted to verified completion here.
-        verifiedComplete: false
+        stopReason: acceptance?.outcome || (unresolved.length ? "unresolved-work" : "no-ready-work"),
+        verifiedComplete: acceptance?.verifiedComplete === true,
+        ...(acceptance ? {
+          acceptance,
+          unresolved: acceptance.unresolved || unresolved,
+          remainingIssueIds: (acceptance.unresolved || []).map((entry) => String(entry.issue)).filter((issue) => /^\d+$/.test(issue)),
+          nextAction: acceptance.nextAction || unresolved.find((entry) => entry.nextAction)?.nextAction || "maestro status"
+        } : {})
       };
     },
     advance: async ({ session: currentSession, observation }) => {
@@ -658,7 +688,8 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
       };
     },
     finalize: async ({ session: currentSession, update }) => {
-      if (!currentSession.progress.bookkeepingPendingIssueIds.length && !currentSession.progress.integratedIssueIds.length) {
+      const parentClosurePending = currentSession.acceptance?.parentClosurePending === true && currentSession.parentClosure?.state !== "confirmed";
+      if (!currentSession.progress.bookkeepingPendingIssueIds.length && !currentSession.progress.integratedIssueIds.length && !parentClosurePending) {
         return currentSession;
       }
       currentSession = await update((state) => {
@@ -671,7 +702,7 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
         return state;
       });
       try {
-        const progress = await services.persistManifestCompletionDurably({
+        const progress = currentSession.progress.integratedIssueIds.length ? await services.persistManifestCompletionDurably({
           repoPath,
           manifestPath,
           issueIds: currentSession.progress.integratedIssueIds,
@@ -688,7 +719,15 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
               return state;
             });
           }
-        });
+        }) : { changed: [], committed: false };
+        if (parentClosurePending) {
+          const closure = await services.reconcileParentClosure({ config, repoPath, session: currentSession, authorization });
+          currentSession = await update((state) => {
+            state.parentClosure = closure;
+            state.checkpoints.push({ kind: "parent-closure-confirmed", at: new Date().toISOString(), issue: closure.issue });
+            return state;
+          });
+        }
         return update((state) => {
           state.progress.bookkeepingPendingIssueIds = [];
           state.phase = "bookkeeping-complete";

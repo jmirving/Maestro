@@ -100,6 +100,7 @@ async function resolveSession(repoPath, selector) {
 function terminalReport(observation = {}) {
   const unresolved = (observation.unresolved || []).map((entry) => ({
     issue: String(entry.issue),
+    ...(entry.category ? { category: entry.category } : {}),
     reason: entry.reason,
     nextAction: entry.nextAction || null
   }));
@@ -107,7 +108,14 @@ function terminalReport(observation = {}) {
     verifiedComplete: observation.verifiedComplete === true,
     unresolved,
     remainingIssueIds: (observation.remainingIssueIds || unresolved.map((entry) => entry.issue)).map(String),
-    nextAction: observation.nextAction || unresolved.find((entry) => entry.nextAction)?.nextAction || "maestro status"
+    nextAction: observation.nextAction || unresolved.find((entry) => entry.nextAction)?.nextAction || "maestro status",
+    ...(observation.acceptance ? {
+      outcome: observation.acceptance.outcome,
+      authorizedSnapshotSatisfied: observation.acceptance.authorizedSnapshotSatisfied === true,
+      liveScopeComplete: observation.acceptance.liveScopeComplete === true,
+      targetSha: observation.acceptance.targetSha || null,
+      scopeRevision: observation.acceptance.scopeRevision || null
+    } : {})
   };
 }
 
@@ -204,6 +212,7 @@ async function driveSession({
           unresolved: observation.unresolved || []
         }, now()));
         state.terminal = terminalReport(observation);
+        if (observation.acceptance) state.acceptance = observation.acceptance;
         return state;
       });
       if (requestedControl(session)) return finish(requestedControl(session));

@@ -152,6 +152,7 @@ async function executeRun(config, {
               });
             }
           });
+          worker.noChange = worker.exitCode === 0 && Boolean(worker.headSha) && worker.headSha === worker.baseSha;
           result.workers.push(worker);
           result.operations[issue] = { ...result.operations[issue], stage: "validation", workerHeadSha: worker.headSha, workerFinishedAt: new Date().toISOString() };
           await persistLifecycle([issue], (current) => {
@@ -161,8 +162,15 @@ async function executeRun(config, {
             return current;
           });
         }
-        if (!validation && worker.exitCode === 0 && worker.headSha !== worker.baseSha) {
-          console.error(`[Maestro] run ${runId}: validating changed branch for #${issue}`);
+        if (worker.exitCode === 0 && worker.headSha && worker.headSha === worker.baseSha && worker.noChange == null) {
+          worker.noChange = true;
+          await persistLifecycle([issue], (current) => {
+            current.workers = upsertIssueEvidence(current.workers, worker);
+            return current;
+          });
+        }
+        if (!validation && worker.exitCode === 0) {
+          console.error(`[Maestro] run ${runId}: validating ${worker.noChange ? "no-change claim" : "changed branch"} for #${issue}`);
           validation = bindValidation(config, worker, await validatorExecutor({
             repository: config.repository,
             worker,
