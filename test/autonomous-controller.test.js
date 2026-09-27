@@ -334,6 +334,177 @@ test("resumed validation REWORK enters bounded correction, approval, and integra
   assert.equal(correctionOptions.deadlineAt, Date.parse(session.startedAt) + context.authorization.limits.correction.deadlineMs);
 });
 
+test("resume verifies child process identity and reclaims a reused PID", async (t) => {
+  const context = await fixture(t, ["1"]);
+  const session = await loadSession(context.repoPath, context.session.id);
+  session.lineage.runIds = [context.authorization.runId];
+  await saveSession(context.repoPath, session);
+
+  const source = {
+    runId: context.authorization.runId,
+    mode: "autonomous",
+    status: "running",
+    authorization: context.authorization,
+    autonomousSessionId: session.id,
+    plan: { concurrency: 1, selected: [{ id: "1", status: "ready" }] },
+    operations: { "1": { stage: "worker", processId: 321, processStartTime: "boot-a:original" } },
+    workers: [],
+    validations: [],
+    reviews: {},
+    integration: []
+  };
+  let executionCalls = 0;
+  let identityChecks = 0;
+
+  const result = await driveAutonomous({ ...context, session }, {
+    assessCurrentScope: async () => ({ current: true, revision: context.scope.revision }),
+    computeEffectivePlan: async () => ({ selected: [], humanGates: [], blocked: [], deferred: [] }),
+    verifyExecutionSelection: async () => {},
+    loadExecutionStates: async () => source.integration.length ? [] : [source],
+    loadRunState: async () => source,
+    processIsRunning: () => true,
+    processIdentityIsLive: async (operation) => {
+      identityChecks += 1;
+      assert.equal(operation.processStartTime, "boot-a:original");
+      return false;
+    },
+    executeRun: async (_config, options) => {
+      executionCalls += 1;
+      assert.ok(options.reservedState.operations["1"].resumedAt);
+      source.status = "awaiting-review";
+      source.operations["1"].stage = "complete";
+      source.workers = [{ issue: "1", exitCode: 0, baseSha: "base", headSha: "implementation" }];
+      source.validations = [{ issue: "1", exitCode: 0, verdict: "approve" }];
+      return source;
+    },
+    integrateExistingRun: async () => {
+      source.integration = [{ issue: "1", integratedSha: "integrated" }];
+      return { integration: source.integration };
+    },
+    persistManifestCompletionDurably: async () => ({ changed: ["1"], committed: true })
+  });
+
+  assert.equal(identityChecks, 1);
+  assert.equal(executionCalls, 1, "a reused PID must not be mistaken for the interrupted child");
+  assert.deepEqual(result.progress.integratedIssueIds, ["1"]);
+});
+
+test("resume fails closed for a live child without persisted process identity", async (t) => {
+  const context = await fixture(t, ["1"]);
+  const source = {
+    runId: context.authorization.runId,
+    mode: "autonomous",
+    status: "running",
+    authorization: context.authorization,
+    autonomousSessionId: context.session.id,
+    plan: { concurrency: 1, selected: [{ id: "1", status: "ready" }] },
+    operations: { "1": { stage: "validation", processId: 654 } },
+    workers: [{ issue: "1", exitCode: 0, baseSha: "base", headSha: "implementation" }],
+    validations: [], reviews: {}, integration: []
+  };
+  let executionCalls = 0;
+
+  await assert.rejects(driveAutonomous(context, {
+    assessCurrentScope: async () => ({ current: true, revision: context.scope.revision }),
+    computeEffectivePlan: async () => ({ selected: [], humanGates: [], blocked: [], deferred: [] }),
+    verifyExecutionSelection: async () => {},
+    loadExecutionStates: async () => [source],
+    loadRunState: async () => source,
+    processIsRunning: () => true,
+    executeRun: async () => { executionCalls += 1; },
+    persistManifestCompletionDurably: async () => ({ changed: [], committed: false })
+  }), (error) => error.code === "SESSION_OPERATION_IDENTITY_UNAVAILABLE");
+
+  assert.equal(executionCalls, 0);
+});
+
+test("resume before the first lineage checkpoint consumes the root run and executes the next wave once", async (t) => {
+  const context = await fixture(t, ["1", "2"]);
+  const states = [];
+  const reservations = [];
+  const integrationCalls = [];
+  let interruptAfterFirstIntegration = true;
+  let childRunIds = 0;
+
+  const services = {
+    assessCurrentScope: async () => ({ current: true, revision: context.scope.revision }),
+    computeEffectivePlan: async () => {
+      const integrated = new Set(states.flatMap((state) => (state.integration || []).map((entry) => String(entry.issue))));
+      const selected = !integrated.has("1") ? [{ id: "1" }] : !integrated.has("2") ? [{ id: "2" }] : [];
+      return { selected, humanGates: [], blocked: [], deferred: [] };
+    },
+    verifyExecutionSelection: async () => {},
+    loadExecutionStates: async () => states,
+    loadRunState: async (_repoPath, runId) => states.find((state) => state.runId === runId),
+    newRunId: () => {
+      childRunIds += 1;
+      return "second-wave";
+    },
+    reserveReadyWork: async (_config, options) => {
+      if (states.some((state) => state.runId === options.runId)) {
+        const error = new Error(`duplicate run ${options.runId}`);
+        error.code = "RUN_STATE_CONFLICT";
+        throw error;
+      }
+      const issue = states.some((state) => (state.integration || []).some((entry) => String(entry.issue) === "1")) ? "2" : "1";
+      const state = {
+        runId: options.runId,
+        mode: "autonomous",
+        status: "running",
+        authorization: context.authorization,
+        autonomousSessionId: context.session.id,
+        ...(options.runId === context.authorization.runId ? {} : { parentRunId: context.authorization.runId }),
+        plan: { concurrency: 1, selected: [{ id: issue }] },
+        workers: [], validations: [], reviews: {}, integration: []
+      };
+      states.push(state);
+      reservations.push(options.runId);
+      return { reserved: true, state, plan: state.plan };
+    },
+    executeRun: async (_config, options) => {
+      const state = options.reservedState;
+      const issue = String(state.plan.selected[0].id);
+      state.status = "awaiting-review";
+      state.workers = [{ issue, exitCode: 0, baseSha: `base-${issue}`, headSha: `head-${issue}` }];
+      state.validations = [{ issue, exitCode: 0, verdict: "approve" }];
+      return state;
+    },
+    integrateExistingRun: async (_config, options) => {
+      const state = states.find((entry) => entry.runId === options.runId);
+      integrationCalls.push(options.runId);
+      if (!state.integration.length) {
+        const issue = String(state.plan.selected[0].id);
+        state.integration = [{ issue, integratedSha: `integrated-${issue}` }];
+        state.status = "integrated";
+      }
+      if (options.runId === context.authorization.runId && interruptAfterFirstIntegration) {
+        interruptAfterFirstIntegration = false;
+        const error = new Error("fault before first advance-result");
+        error.code = "FAULT_BEFORE_FIRST_LINEAGE_CHECKPOINT";
+        throw error;
+      }
+      return { integration: state.integration };
+    },
+    persistManifestCompletionDurably: async ({ issueIds }) => ({ changed: issueIds, committed: true })
+  };
+
+  await assert.rejects(
+    driveAutonomous(context, services),
+    (error) => error.code === "FAULT_BEFORE_FIRST_LINEAGE_CHECKPOINT"
+  );
+  const interrupted = await loadSession(context.repoPath, context.session.id);
+  assert.deepEqual(interrupted.lineage.runIds, [], "the injected fault must precede the first advance-result checkpoint");
+  assert.deepEqual(reservations, [context.authorization.runId]);
+
+  const resumed = await driveAutonomous({ ...context, session: interrupted }, services);
+
+  assert.deepEqual(reservations, [context.authorization.runId, "second-wave"]);
+  assert.equal(childRunIds, 1);
+  assert.deepEqual(integrationCalls, [context.authorization.runId, context.authorization.runId, "second-wave"]);
+  assert.deepEqual(resumed.lineage.runIds, [context.authorization.runId, "second-wave"]);
+  assert.deepEqual(resumed.progress.integratedIssueIds, ["1", "2"]);
+});
+
 test("real autonomous rework classification preserves delegated lineage and resumes the same approved child", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-autonomous-rework-lineage-"));
   const repoPath = path.join(root, "target");

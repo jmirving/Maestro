@@ -41,7 +41,7 @@ const { resolveConcurrency } = require("../src/concurrency");
 const { runConfigCommand } = require("../src/config-command");
 const { createDelegatedAuthorization, saveAuthorization, loadAuthorization, revokeAuthorization, assessCurrentScope, issuePolicy, digest } = require("../src/authorization");
 const { createSession, resolveSession, verifySessionContext, driveSession, requestSessionState } = require("../src/autonomous-controller");
-const { loadSession } = require("../src/session-store");
+const { loadSession, ownerAlive } = require("../src/session-store");
 const { loadSessionSummaries, formatSessionSummaries } = require("../src/session-view");
 const { processIsRunning } = require("../src/recovery-attempts");
 const { validateRepositoryConfig } = require("../src/config-validator");
@@ -369,6 +369,7 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
     newRunId,
     persistManifestCompletionDurably,
     processIsRunning,
+    processIdentityIsLive: ownerAlive,
     reserveReadyWork,
     verifyExecutionSelection,
     ...serviceOverrides
@@ -481,6 +482,7 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
       if (plan.selected.length) await services.verifyExecutionSelection(current.config, repoPath, plan.selected.map((item) => String(item.id)));
       const unresolved = unresolvedSessionWork(plan, authorizedIssueIds);
       const states = await services.loadExecutionStates(repoPath);
+      const rootRunConsumed = states.some((state) => String(state.runId) === String(authorization.runId));
       const recordedBySession = new Set(currentSession.progress.integratedIssueIds.map(String));
       const childRunIds = new Set(states
         .filter((state) => state.authorization?.id === authorization.id && state.parentRunId)
@@ -523,6 +525,7 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
             deadlineAt: state.integrationCorrection?.deadlineAt || correction?.[1]?.deadlineAt || null
           };
         }),
+        rootRunConsumed,
         recoverable: recoveryRunIds.length > 0,
         stopReason: unresolved.length ? "unresolved-work" : "no-ready-work",
         // Issue #28 owns verified workset acceptance. Empty scheduler output is
@@ -532,6 +535,7 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
     },
     advance: async ({ session: currentSession, observation }) => {
       const current = await currentContext("reservation");
+      if (observation.rootRunConsumed) firstRunAvailable = false;
       if (observation.recoveryStates?.length) {
         const integratedIssueIds = [];
         const recoveryRunIds = [];
@@ -566,12 +570,19 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
           } else if (["autonomous", "execute"].includes(recoveryState.mode) && recoveryState.status === "running") {
             const running = await services.loadRunState(repoPath, recoveryState.runId);
             for (const operation of Object.values(running.operations || {})) {
-              if (operation.stage !== "complete" && services.processIsRunning(operation.processId)) {
+              if (operation.stage === "complete") continue;
+              const pidIsLive = services.processIsRunning(operation.processId);
+              if (pidIsLive && !operation.processStartTime) {
+                const error = new Error(`Run ${running.runId} has a live ${operation.stage} process ${operation.processId} without reliable process identity; resume will not duplicate it.`);
+                error.code = "SESSION_OPERATION_IDENTITY_UNAVAILABLE";
+                throw error;
+              }
+              if (pidIsLive && await services.processIdentityIsLive(operation)) {
                 const error = new Error(`Run ${running.runId} still has a live ${operation.stage} process ${operation.processId}; resume will not duplicate it.`);
                 error.code = "SESSION_OPERATION_RUNNING";
                 throw error;
               }
-              if (operation.stage !== "complete") operation.resumedAt = new Date().toISOString();
+              operation.resumedAt = new Date().toISOString();
             }
             execution = await services.executeRun(current.config, {
               repoPath,

@@ -12,6 +12,7 @@ const { bindValidation, createDelegatedAuthorization, saveAuthorization } = requ
 const { integrateExistingRun } = require("./existing-run");
 const { verifyExecutionSelection } = require("./execution-selection");
 const { explicitIssueRevision } = require("./worksets");
+const { processStartTime } = require("./session-store");
 
 function newRunId(now = new Date()) {
   const stamp = now.toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
@@ -60,6 +61,7 @@ async function executeRun(config, {
   authorization = null,
   parentRunId = null,
   reservedState = null,
+  processIdentity = processStartTime,
   onIssueSettled = async () => {}
 } = {}) {
   plan = plan || computePlan(config, { concurrency });
@@ -135,7 +137,14 @@ async function executeRun(config, {
             worktree,
             runId,
             onProcessStart: async (processId) => {
+              const identity = await processIdentity(processId);
+              if (identity == null) {
+                const error = new Error(`Cannot record reliable identity for worker process ${processId}.`);
+                error.code = "PROCESS_IDENTITY_UNAVAILABLE";
+                throw error;
+              }
               result.operations[issue].processId = processId;
+              result.operations[issue].processStartTime = String(identity);
               await persistLifecycle([issue], (current) => {
                 current.operations = current.operations || {};
                 current.operations[issue] = result.operations[issue];
@@ -160,7 +169,18 @@ async function executeRun(config, {
             baseline: result.baseline,
             runId,
             onProcessStart: async (processId) => {
-              result.operations[issue] = { ...(result.operations[issue] || {}), stage: "validation", processId };
+              const identity = await processIdentity(processId);
+              if (identity == null) {
+                const error = new Error(`Cannot record reliable identity for validator process ${processId}.`);
+                error.code = "PROCESS_IDENTITY_UNAVAILABLE";
+                throw error;
+              }
+              result.operations[issue] = {
+                ...(result.operations[issue] || {}),
+                stage: "validation",
+                processId,
+                processStartTime: String(identity)
+              };
               await persistLifecycle([issue], (current) => {
                 current.operations = current.operations || {};
                 current.operations[issue] = result.operations[issue];

@@ -104,6 +104,35 @@ test("executeRun resumes an interrupted validation from persisted worker evidenc
   assert.equal(result.validations[0].verdict, "approve");
 });
 
+test("executeRun persists reliable process identity for active workers and validators", async () => {
+  const saved = [];
+  const result = await executeRun({ repository: "example/repo", work: { "1": { status: "ready" } } }, {
+    repoPath: "/target",
+    runId: "process-identity",
+    plan: { selected: [{ id: "1", requires: [] }] },
+    preflightRunner: async () => ({ code: 0, stdout: "", stderr: "" }),
+    baselineRunner: async () => ({ enabled: false }),
+    processIdentity: async (pid) => `boot-a:${pid === 101 ? "worker-start" : "validator-start"}`,
+    worktreeFactory: async () => ({ baseSha: "base", branch: "b-1", worktreePath: "/wt/1" }),
+    workerExecutor: async ({ item, worktree, onProcessStart }) => {
+      await onProcessStart(101);
+      return { issue: item.id, exitCode: 0, ...worktree, headSha: "head" };
+    },
+    validatorExecutor: async ({ worker, onProcessStart }) => {
+      await onProcessStart(202);
+      return { issue: worker.issue, exitCode: 0, verdict: "approve" };
+    },
+    stateSaver: async (_repoPath, _runId, state) => saved.push(structuredClone(state))
+  });
+
+  const workerActive = saved.find((state) => state.operations?.["1"]?.stage === "worker" && state.operations["1"].processId === 101);
+  const validatorActive = saved.find((state) => state.operations?.["1"]?.stage === "validation" && state.operations["1"].processId === 202);
+  assert.equal(workerActive.operations["1"].processStartTime, "boot-a:worker-start");
+  assert.equal(validatorActive.operations["1"].processStartTime, "boot-a:validator-start");
+  assert.equal(result.operations["1"].stage, "complete");
+  assert.equal(result.operations["1"].processStartTime, "boot-a:validator-start");
+});
+
 test("executeRun continues an interrupted worker in its retained worktree without allocating a duplicate", async () => {
   let factories = 0;
   let mode;
