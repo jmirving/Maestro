@@ -845,6 +845,82 @@ test("manifest publication retains ownership, rejects concurrent resume, and pub
   assert.equal(manifestPublications, 1, "the manifest commit/push boundary executes exactly once");
 });
 
+test("parent closure reruns acceptance after manifest publication moves the target", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-parent-publication-"));
+  const repoPath = path.join(root, "target");
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  await fs.mkdir(repoPath);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const config = {
+    repository: "example/repo",
+    defaultBranch: "main",
+    integration: { enabled: true, closeIssues: true },
+    worksets: { epic: {
+      source: { type: "epic", issue: { repository: "example/repo", number: "10" } },
+      refresh: { mode: "explicit" },
+      completionPolicy: "The assembled workflow passes.",
+      acceptance: { version: "v1", commands: ["npm test"], closeParent: true }
+    } },
+    work: { "1": { status: "complete" } }
+  };
+  await fs.writeFile(manifestPath, `${JSON.stringify(config, null, 2)}\n`);
+  const scope = { type: "workset", workset: "epic", issueIds: ["1"], revision: "scope-revision" };
+  const authorization = createDelegatedAuthorization({
+    config, repoPath, runId: "publication-root", issueIds: ["1"], scope,
+    limits: { concurrency: 1, correction: { enabled: true, retryLimit: 2, deadlineMs: 60_000 } },
+    invocation: ["maestro", "start", "--workset", "epic", "--delegate", "--continuous"]
+  });
+  await saveAuthorization(repoPath, authorization);
+  let session = await createSession({
+    config, repoPath, manifestPath, scope, authorization,
+    settings: { concurrency: 1, correction: authorization.limits.correction }
+  });
+  session.progress.integratedIssueIds = ["1"];
+  session.progress.bookkeepingPendingIssueIds = ["1"];
+  session.acceptance = {
+    outcome: "bookkeeping-pending", parentClosurePending: true, acceptanceReady: true,
+    targetSha: "before-publication", scopeRevision: scope.revision
+  };
+  await saveSession(repoPath, session);
+
+  let published = false;
+  const evaluatedTargets = [];
+  let closureCalls = 0;
+  const acceptance = (targetSha) => ({
+    outcome: "bookkeeping-pending", verifiedComplete: false, acceptanceReady: true,
+    authorizedSnapshotSatisfied: true, liveScopeComplete: true, parentClosurePending: true,
+    targetSha, scopeRevision: scope.revision, contractDigest: `contract-${targetSha}`,
+    checks: [{ command: "npm test", status: "passed" }], unresolved: []
+  });
+  const result = await driveAutonomous({ config, repoPath, manifestPath, session }, {
+    assessCurrentScope: async () => ({ current: true, revision: scope.revision }),
+    computeEffectivePlan: async () => ({ selected: [], humanGates: [], blocked: [], deferred: [] }),
+    verifyExecutionSelection: async () => {},
+    loadExecutionStates: async () => [],
+    evaluateCompletion: async () => {
+      const target = published ? "after-publication" : "before-publication";
+      evaluatedTargets.push(target);
+      return acceptance(target);
+    },
+    persistManifestCompletionDurably: async () => {
+      published = true;
+      return { changed: ["1"], committed: true };
+    },
+    reconcileParentClosure: async ({ session: closureSession, scopeAssessment }) => {
+      closureCalls += 1;
+      assert.equal(closureSession.acceptance.targetSha, "after-publication");
+      assert.equal(closureSession.progress.bookkeepingPendingIssueIds.length, 0);
+      assert.equal(scopeAssessment.revision, scope.revision);
+      return { state: "confirmed", issue: "10", targetSha: closureSession.acceptance.targetSha };
+    }
+  });
+
+  assert.deepEqual(evaluatedTargets, ["before-publication", "after-publication"]);
+  assert.equal(closureCalls, 1);
+  assert.equal(result.parentClosure.targetSha, "after-publication");
+  assert.ok(result.checkpoints.some((entry) => entry.kind === "post-bookkeeping-acceptance"));
+});
+
 test("bookkeeping failure is durably pending before ownership is released", async (t) => {
   const context = await fixture(t, ["1"]);
   const error = new Error("push outcome unknown");

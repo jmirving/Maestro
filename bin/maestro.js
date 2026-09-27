@@ -720,8 +720,58 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
             });
           }
         }) : { changed: [], committed: false };
+        currentSession = await update((state) => {
+          state.progress.bookkeepingPendingIssueIds = [];
+          state.checkpoints.push({
+            kind: "bookkeeping-settled",
+            at: new Date().toISOString(),
+            changedIssueIds: progress.changed,
+            committed: progress.committed
+          });
+          return state;
+        });
         if (parentClosurePending) {
-          const closure = await services.reconcileParentClosure({ config, repoPath, session: currentSession, authorization });
+          const current = await currentContext("parent closure acceptance");
+          const states = await services.loadExecutionStates(repoPath);
+          const acceptance = await services.evaluateCompletion({
+            config: current.config,
+            repoPath,
+            session: currentSession,
+            states,
+            scopeAssessment: current.scopeAssessment
+          });
+          currentSession = await update((state) => {
+            state.acceptance = acceptance;
+            state.terminal = {
+              ...state.terminal,
+              verifiedComplete: acceptance.verifiedComplete === true,
+              outcome: acceptance.outcome,
+              authorizedSnapshotSatisfied: acceptance.authorizedSnapshotSatisfied === true,
+              liveScopeComplete: acceptance.liveScopeComplete === true,
+              targetSha: acceptance.targetSha || null,
+              scopeRevision: acceptance.scopeRevision || null,
+              unresolved: acceptance.unresolved || [],
+              nextAction: acceptance.nextAction || `maestro resume --session ${state.id}`
+            };
+            state.checkpoints.push({
+              kind: "post-bookkeeping-acceptance",
+              at: new Date().toISOString(),
+              outcome: acceptance.outcome,
+              targetSha: acceptance.targetSha || null
+            });
+            return state;
+          });
+          if (acceptance.acceptanceReady !== true || acceptance.parentClosurePending !== true) {
+            return currentSession;
+          }
+          const closureCurrent = await currentContext("parent closure");
+          const closure = await services.reconcileParentClosure({
+            config: closureCurrent.config,
+            repoPath,
+            session: currentSession,
+            scopeAssessment: closureCurrent.scopeAssessment,
+            authorization
+          });
           currentSession = await update((state) => {
             state.parentClosure = closure;
             state.checkpoints.push({ kind: "parent-closure-confirmed", at: new Date().toISOString(), issue: closure.issue });
@@ -729,7 +779,6 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
           });
         }
         return update((state) => {
-          state.progress.bookkeepingPendingIssueIds = [];
           state.phase = "bookkeeping-complete";
           state.checkpoints.push({
             kind: "bookkeeping-result",

@@ -117,16 +117,30 @@ async function targetHead(repoPath, targetBranch, runner = runChecked) {
   return (await runner("git", ["rev-parse", "HEAD"], { cwd: repoPath })).stdout.trim();
 }
 
-function baselineForChecks(states, commands) {
+function stateBelongsToSession(state, session) {
+  const lineage = new Set((session?.lineage?.runIds || []).map(String));
+  return Boolean(
+    session?.id &&
+    session?.authorization?.id &&
+    lineage.has(String(state.runId)) &&
+    state.autonomousSessionId === session.id &&
+    state.authorization?.id === session.authorization.id &&
+    state.authorization?.policyDigest === session.authorization.policyDigest &&
+    state.authorization?.scope?.revision === session.scope?.revision
+  );
+}
+
+function baselineForChecks(states, commands, session) {
   return [...states]
+    .filter((state) => stateBelongsToSession(state, session))
     .sort((left, right) => String(right.runId).localeCompare(String(left.runId)))
     .map((state) => state.baseline)
     .find((baseline) => commands.every((command) => baseline?.results?.some((entry) => entry.command === command))) || null;
 }
 
-async function executeChecks({ repoPath, targetBranch, targetSha, commands, states, runner = runChecked, shellRunner }) {
+async function executeChecks({ repoPath, targetBranch, targetSha, commands, states, session, runner = runChecked, shellRunner }) {
   const checks = [];
-  const baseline = baselineForChecks(states, commands);
+  const baseline = baselineForChecks(states, commands, session);
   for (const command of commands) {
     try {
       const result = await runObservationalIntegrationCommand(command, {
@@ -162,15 +176,35 @@ async function executeChecks({ repoPath, targetBranch, targetSha, commands, stat
   return { checks, targetMoved: false, afterSha };
 }
 
-async function reconcileParentClosure({ config, repoPath, session, authorization = null, runner = runChecked, now = new Date() }) {
+async function reconcileParentClosure({ config, repoPath, session, scopeAssessment, authorization = null, runner = runChecked, now = new Date() }) {
   const contract = worksetContract(config, session.scope);
   if (!contract?.closeParent || !contract.parentIssue) return null;
+  if (session.parentClosure?.state === "confirmed") return session.parentClosure;
+  const contractDigest = digest({ contract, scopeRevision: session.scope.revision });
+  const acceptance = session.acceptance;
+  if (scopeAssessment?.current !== true || scopeAssessment.revision !== session.scope.revision) {
+    const error = new Error(`Parent epic closure requires a current live scope at authorized revision ${session.scope.revision}.`);
+    error.code = "PARENT_CLOSURE_SCOPE_STALE";
+    throw error;
+  }
+  if (acceptance?.acceptanceReady !== true || acceptance.authorizedSnapshotSatisfied !== true ||
+      acceptance.liveScopeComplete !== true || acceptance.scopeRevision !== session.scope.revision ||
+      acceptance.contractDigest !== contractDigest || !acceptance.targetSha) {
+    const error = new Error("Parent epic closure requires current verified acceptance evidence after bookkeeping.");
+    error.code = "PARENT_CLOSURE_ACCEPTANCE_STALE";
+    throw error;
+  }
+  const currentSha = await targetHead(repoPath, config.defaultBranch || "main", runner);
+  if (currentSha !== acceptance.targetSha) {
+    const error = new Error(`Parent epic closure target moved after acceptance (${acceptance.targetSha} -> ${currentSha}); acceptance must be rerun.`);
+    error.code = "PARENT_CLOSURE_TARGET_MOVED";
+    throw error;
+  }
   if (config.integration?.closeIssues !== true || authorization?.allowedActions?.closeIssue !== true) {
     const error = new Error("Parent epic closure was requested by the workset, but delegated issue-closure authorization is unavailable.");
     error.code = "PARENT_CLOSURE_UNAUTHORIZED";
     throw error;
   }
-  if (session.parentClosure?.state === "confirmed") return session.parentClosure;
   const observed = await runner("gh", ["issue", "view", contract.parentIssue, "--repo", config.repository, "--json", "state", "--jq", ".state"], { cwd: repoPath });
   if (observed.stdout.trim().toUpperCase() !== "CLOSED") {
     await runner("gh", ["issue", "close", contract.parentIssue, "--repo", config.repository, "--reason", "completed", "--comment", `Maestro verified workset ${session.scope.workset} at ${session.acceptance?.targetSha || "the authorized target"}.`], { cwd: repoPath });
@@ -181,7 +215,7 @@ async function reconcileParentClosure({ config, repoPath, session, authorization
     repository: config.repository,
     state: "confirmed",
     confirmedAt: now.toISOString(),
-    targetSha: session.acceptance?.targetSha || null,
+    targetSha: acceptance.targetSha,
     scopeRevision: session.scope.revision
   };
 }
@@ -327,6 +361,7 @@ async function evaluateCompletion({
     targetSha,
     commands: contract.commands,
     states,
+    session,
     runner,
     shellRunner
   });
@@ -354,6 +389,7 @@ async function evaluateCompletion({
       ...base,
       outcome: "bookkeeping-pending",
       verifiedComplete: false,
+      acceptanceReady: true,
       authorizedSnapshotSatisfied: true,
       checks: checked.checks,
       parentClosurePending: true,
