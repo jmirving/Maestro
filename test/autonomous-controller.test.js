@@ -3,7 +3,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { createDelegatedAuthorization, saveAuthorization } = require("../src/authorization");
+const { spawnSync } = require("node:child_process");
+const { createDelegatedAuthorization, saveAuthorization, bindValidation } = require("../src/authorization");
 const {
   createSession,
   resolveSession,
@@ -12,7 +13,16 @@ const {
   requestSessionState
 } = require("../src/autonomous-controller");
 const { loadSession, saveSession, claimSession, releaseSession } = require("../src/session-store");
+const { autoRework } = require("../src/rework");
+const { integrateExistingRun } = require("../src/existing-run");
+const { loadRunState, saveRunState, loadPersistedRunStates } = require("../src/run-store");
 const { driveAutonomous } = require("../bin/maestro");
+
+function git(cwd, ...args) {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  assert.equal(result.status, 0, `git ${args.join(" ")} failed:\n${result.stderr}`);
+  return result.stdout.trim();
+}
 
 async function fixture(t, issueIds = ["1", "2"]) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-session-"));
@@ -250,6 +260,161 @@ test("resumed validation REWORK enters bounded correction, approval, and integra
   assert.equal(correctionOptions.retryLimit, context.authorization.limits.correction.retryLimit);
   assert.ok(correctionOptions.timeoutMs <= 45_000 && correctionOptions.timeoutMs > 30_000);
   assert.equal(correctionOptions.deadlineAt, Date.parse(session.startedAt) + context.authorization.limits.correction.deadlineMs);
+});
+
+test("real autonomous rework classification preserves delegated lineage and resumes the same approved child", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-autonomous-rework-lineage-"));
+  const repoPath = path.join(root, "target");
+  const originPath = path.join(root, "origin.git");
+  const workerPath = path.join(root, "worker-1");
+  const manifestPath = path.join(repoPath, ".maestro.json");
+  await fs.mkdir(repoPath);
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  git(repoPath, "init", "-q", "-b", "main");
+  git(repoPath, "config", "user.name", "Test");
+  git(repoPath, "config", "user.email", "test@example.com");
+  const config = {
+    repository: "example/repo",
+    defaultBranch: "main",
+    defaultConcurrency: 1,
+    integration: { enabled: true, commands: [], postMergeCommands: [], closeIssues: false },
+    work: { "1": { status: "ready" } }
+  };
+  await fs.writeFile(manifestPath, `${JSON.stringify(config, null, 2)}\n`);
+  await fs.writeFile(path.join(repoPath, "implementation.txt"), "base\n");
+  git(repoPath, "add", ".maestro.json", "implementation.txt");
+  git(repoPath, "commit", "-qm", "base");
+  git(root, "clone", "-q", "--bare", repoPath, originPath);
+  git(repoPath, "remote", "add", "origin", originPath);
+  git(repoPath, "fetch", "-q", "origin", "main");
+  git(repoPath, "worktree", "add", "-q", "-b", "maestro/1", workerPath, "main");
+  await fs.writeFile(path.join(workerPath, "implementation.txt"), "initial implementation\n");
+  git(workerPath, "add", "implementation.txt");
+  git(workerPath, "commit", "-qm", "initial implementation");
+
+  const sourceRunId = "20260927122500-aabbcc";
+  const scope = { type: "issues", issueIds: ["1"], revision: "scope-revision" };
+  const authorization = createDelegatedAuthorization({
+    config,
+    repoPath,
+    runId: sourceRunId,
+    issueIds: ["1"],
+    scope,
+    limits: { concurrency: 1, correction: { enabled: true, retryLimit: 3, deadlineMs: 60_000 } },
+    invocation: ["maestro", "start", "1", "--delegate", "--continuous"]
+  });
+  await saveAuthorization(repoPath, authorization);
+  const session = await createSession({
+    config,
+    repoPath,
+    manifestPath,
+    scope,
+    authorization,
+    settings: { concurrency: 1, correction: authorization.limits.correction }
+  });
+  const initialWorker = {
+    issue: "1",
+    exitCode: 0,
+    baseSha: git(repoPath, "rev-parse", "main"),
+    headSha: git(workerPath, "rev-parse", "HEAD"),
+    branch: "maestro/1",
+    worktreePath: workerPath,
+    report: "initial implementation"
+  };
+  await saveRunState(repoPath, sourceRunId, {
+    runId: sourceRunId,
+    mode: "autonomous",
+    status: "awaiting-review",
+    authorization,
+    autonomousSessionId: session.id,
+    plan: { concurrency: 1, selected: [{ id: "1", status: "ready" }] },
+    baseline: { enabled: false, allowFailing: false, commands: [], results: [], passing: true },
+    preflights: [],
+    workers: [initialWorker],
+    validations: [bindValidation(config, initialWorker, {
+      issue: "1", exitCode: 0, verdict: "rework", report: "VERDICT: REWORK\ncorrect it"
+    }, { scopeRevision: scope.revision })],
+    reviews: {},
+    integration: []
+  });
+
+  let correctionRunId = null;
+  let interruptCorrectionIntegration = true;
+  const services = {
+    assessCurrentScope: async () => ({ current: true, revision: scope.revision }),
+    computeEffectivePlan: async () => ({ selected: [], humanGates: [], blocked: [], deferred: [] }),
+    verifyExecutionSelection: async () => {},
+    autoRework: (currentConfig, options) => autoRework(currentConfig, {
+      ...options,
+      reworkOptions: {
+        ...options.reworkOptions,
+        workerExecutor: async ({ item, worktree, runId }) => {
+          correctionRunId = runId;
+          await fs.writeFile(path.join(worktree.worktreePath, "implementation.txt"), "corrected implementation\n");
+          git(worktree.worktreePath, "add", "implementation.txt");
+          git(worktree.worktreePath, "commit", "-qm", "correct implementation");
+          return {
+            issue: item.id,
+            exitCode: 0,
+            baseSha: worktree.baseSha,
+            headSha: git(worktree.worktreePath, "rev-parse", "HEAD"),
+            branch: worktree.branch,
+            worktreePath: worktree.worktreePath,
+            report: "corrected implementation"
+          };
+        },
+        validatorExecutor: async ({ worker }) => ({
+          issue: worker.issue, exitCode: 0, verdict: "approve", report: "VERDICT: APPROVE"
+        })
+      }
+    }),
+    integrateExistingRun: async (currentConfig, options) => {
+      const state = await loadRunState(repoPath, options.runId);
+      if (state.mode === "rework" && interruptCorrectionIntegration) {
+        interruptCorrectionIntegration = false;
+        const error = new Error("fault before corrected-child integration");
+        error.code = "FAULT_BEFORE_CORRECTION_INTEGRATION";
+        throw error;
+      }
+      return integrateExistingRun(currentConfig, {
+        ...options,
+        scopeAssessmentOptions: {
+          explicitScopeResolver: async () => ({ type: "issues", issueIds: ["1"], revision: scope.revision })
+        }
+      });
+    },
+    persistManifestCompletionDurably: async () => ({ changed: ["1"], committed: true })
+  };
+
+  await assert.rejects(
+    driveAutonomous({ config, repoPath, manifestPath, session }, services),
+    (error) => error.code === "FAULT_BEFORE_CORRECTION_INTEGRATION"
+  );
+  assert.ok(correctionRunId);
+  const interruptedChild = await loadRunState(repoPath, correctionRunId);
+  assert.equal(interruptedChild.authorization.id, authorization.id);
+  assert.equal(interruptedChild.autonomousSessionId, session.id);
+  assert.equal(interruptedChild.correction.attempts["1"].number, 1);
+  assert.equal(interruptedChild.validations[0].evidence.issueFactsRevision, scope.revision);
+
+  const resumed = await driveAutonomous({
+    config,
+    repoPath,
+    manifestPath,
+    session: await loadSession(repoPath, session.id)
+  }, services);
+  const correctionChildren = (await loadPersistedRunStates(repoPath))
+    .filter((state) => state.mode === "rework");
+  const integratedChild = await loadRunState(repoPath, correctionRunId);
+
+  assert.equal(correctionChildren.length, 1, "resume must not create a duplicate correction child");
+  assert.equal(integratedChild.correction.attempts["1"].number, 1, "resume must not recharge the attempt");
+  assert.deepEqual(integratedChild.integration.map((entry) => String(entry.issue)), ["1"]);
+  assert.deepEqual(resumed.progress.integratedIssueIds, ["1"]);
+  assert.equal(resumed.lineage.issueAttempts["1"], 1, "resume must retain the charged attempt in session lineage");
+  assert.ok(resumed.lineage.recoveryRunIds.includes(correctionRunId));
+  assert.equal(git(repoPath, "rev-parse", "HEAD"), git(workerPath, "rev-parse", "HEAD"));
 });
 
 test("integration-check correction survives interruption and only the approved session-owned child integrates", async (t) => {

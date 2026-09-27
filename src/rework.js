@@ -65,6 +65,16 @@ function validationSnapshot(validation) {
   };
 }
 
+function delegatedCorrectionLineage(source) {
+  if (source?.authorization?.kind !== "delegated" || source.authorization.allowedActions?.correct !== true) {
+    return {};
+  }
+  return {
+    authorization: source.authorization,
+    ...(source.autonomousSessionId ? { autonomousSessionId: source.autonomousSessionId } : {})
+  };
+}
+
 function automaticAttemptFailure(error, classification, phase) {
   return {
     classification,
@@ -112,6 +122,7 @@ async function persistAutomaticChild(config, {
     validations: [],
     reviews: {}
   };
+  Object.assign(state, delegatedCorrectionLineage(resolved.state));
   state.parentRunId = String(resolved.runId);
   state.correction = state.correction || { attempts: {} };
   state.correction.attempts = state.correction.attempts || {};
@@ -786,7 +797,7 @@ async function executeReworkRun(config, {
       sourceRunId,
       attemptIdentity: `rework:${runId}`
     }),
-    ...(source.authorization?.allowedActions?.correct === true ? { authorization: source.authorization } : {})
+    ...delegatedCorrectionLineage(source)
   };
   if (reserveCapacity && !reservedState) {
     const reservation = await capacityReserver(config, {
@@ -800,7 +811,7 @@ async function executeReworkRun(config, {
       extraState: {
         parentRunId,
         correction: { attempts },
-        ...(source.authorization?.allowedActions?.correct === true ? { authorization: source.authorization } : {})
+        ...delegatedCorrectionLineage(source)
       }
     });
     if (!reservation.reserved) {
@@ -811,7 +822,11 @@ async function executeReworkRun(config, {
     reservedState = reservation.state;
   }
   const result = reservedState
-    ? Object.assign(reservedState, { parentRunId, correction: { attempts } })
+    ? Object.assign(reservedState, {
+      parentRunId,
+      correction: { attempts },
+      ...delegatedCorrectionLineage(source)
+    })
     : initialState;
   if (!result.setup) result.setup = initialState.setup;
   result.status = "running";

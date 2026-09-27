@@ -509,15 +509,20 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
         unresolved,
         nextAction: unresolved.find((entry) => entry.nextAction)?.nextAction || "maestro status",
         recoveryRunIds: [...new Set(recoveryRunIds)],
-        recoveryStates: recoveryStates.map((state) => ({
-          runId: String(state.runId),
-          mode: state.mode,
-          status: state.status,
-          parentRunId: state.parentRunId ? String(state.parentRunId) : null,
-          issue: state.integrationCorrection?.issue ? String(state.integrationCorrection.issue) : null,
-          attemptsUsed: state.integrationCorrection?.attempts?.length || 0,
-          deadlineAt: state.integrationCorrection?.deadlineAt || null
-        })),
+        recoveryStates: recoveryStates.map((state) => {
+          const correction = Object.entries(state.correction?.attempts || {})[0] || null;
+          return {
+            runId: String(state.runId),
+            mode: state.mode,
+            status: state.status,
+            parentRunId: state.parentRunId ? String(state.parentRunId) : null,
+            issue: state.integrationCorrection?.issue
+              ? String(state.integrationCorrection.issue)
+              : correction ? String(correction[0]) : null,
+            attemptsUsed: state.integrationCorrection?.attempts?.length || Number(correction?.[1]?.number || 0),
+            deadlineAt: state.integrationCorrection?.deadlineAt || correction?.[1]?.deadlineAt || null
+          };
+        }),
         recoverable: recoveryRunIds.length > 0,
         stopReason: unresolved.length ? "unresolved-work" : "no-ready-work",
         // Issue #28 owns verified workset acceptance. Empty scheduler output is
@@ -533,14 +538,14 @@ async function driveAutonomous({ config, repoPath, manifestPath, session }, serv
         const runIds = [];
         const issueAttempts = {};
         for (const recoveryState of observation.recoveryStates) {
-          if (recoveryState.mode === "integration-correction") {
+          if (["integration-correction", "rework"].includes(recoveryState.mode)) {
             recoveryRunIds.push(String(recoveryState.runId));
-            if (recoveryState.issue) {
-              issueAttempts[recoveryState.issue] = Math.max(
-                Number(issueAttempts[recoveryState.issue] || 0),
-                Number(recoveryState.attemptsUsed || 0)
-              );
-            }
+          }
+          if (recoveryState.issue) {
+            issueAttempts[recoveryState.issue] = Math.max(
+              Number(issueAttempts[recoveryState.issue] || 0),
+              Number(recoveryState.attemptsUsed || 0)
+            );
           }
           const sourceRunId = recoveryState.mode === "integration-correction" && recoveryState.parentRunId
             ? recoveryState.parentRunId
