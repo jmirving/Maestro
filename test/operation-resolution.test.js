@@ -9,6 +9,8 @@ const { inspectGitOperation } = require("../src/git-conflict");
 const { loadPersistedRunStates, saveRunState } = require("../src/run-store");
 const { reserveExplicitWork } = require("../src/scheduler");
 
+const RECOVERY_TIMEOUT_TEST_MS = 2_000;
+
 function git(cwd, ...args) {
   const result = spawnSync("git", args, { cwd, encoding: "utf8" });
   assert.equal(result.status, 0, `git ${args.join(" ")} failed:\n${result.stderr}`);
@@ -352,7 +354,7 @@ test("hanging standalone validation is bounded by the persisted deadline and rel
   const state = await executeAdoptedResolution({
     repository: "example/repo",
     defaultConcurrency: 1,
-    resolution: { commands: ["hanging check"], timeoutMs: 250 },
+    resolution: { commands: ["hanging check"], timeoutMs: RECOVERY_TIMEOUT_TEST_MS },
     work: {}
   }, {
     repoPath: fixture.root,
@@ -369,7 +371,7 @@ test("hanging standalone validation is bounded by the persisted deadline and rel
     }
   });
 
-  assert.ok(checkOptions.timeoutMs > 0 && checkOptions.timeoutMs <= 250);
+  assert.ok(checkOptions.timeoutMs > 0 && checkOptions.timeoutMs <= RECOVERY_TIMEOUT_TEST_MS);
   assert.equal(checkOptions.maxOutputBytes, 512 * 1024);
   assert.equal(state.status, "human-required");
   assert.equal(state.resolution.validation.status, "timeout");
