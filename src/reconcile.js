@@ -182,12 +182,6 @@ async function executeReconcileRun(config, {
     reviews: reservation?.state?.reviews || resumeState?.reviews || {},
     conflicts: resumeState?.conflicts || {}
   });
-  result.recovery = ensureRecoveryContract(result.recovery, {
-    kind: "managed-reconciliation",
-    issue: null,
-    timeoutMs: config.resolution?.timeoutMs || DEFAULT_RECONCILE_TIMEOUT_MS,
-    sourceRunId
-  });
   if (resuming) {
     result.workers = [];
     result.validations = [];
@@ -389,6 +383,13 @@ async function executeReconcileRun(config, {
   }
 
   result.validations = [];
+  result.recovery = ensureRecoveryContract(result.recovery, {
+    kind: "managed-reconciliation",
+    issue: null,
+    timeoutMs: config.resolution?.timeoutMs || DEFAULT_RECONCILE_TIMEOUT_MS,
+    sourceRunId
+  });
+  await stateSaver(repoPath, runId, result);
   for (const worker of result.workers.filter((entry) => entry.exitCode === 0 && entry.headSha !== entry.baseSha)) {
     const conflict = result.conflicts?.[String(worker.issue)];
     if (conflict) {

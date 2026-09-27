@@ -426,6 +426,7 @@ test("clean managed reconciliation persists a deadline that bounds a hanging val
     repository: "example/repo",
     defaultBranch: "main",
     defaultConcurrency: 1,
+    baseline: { commands: ["slow baseline"] },
     resolution: { timeoutMs: RECOVERY_TIMEOUT_TEST_MS },
     work: { "19": { status: "ready", blockedBy: [], requires: [] } }
   }, {
@@ -434,6 +435,10 @@ test("clean managed reconciliation persists a deadline that bounds a hanging val
     issueIds: ["19"],
     runId,
     reserveCapacity: true,
+    baselineRunner: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      return { code: 0, stdout: "", stderr: "" };
+    },
     validatorExecutor: async (options) => {
       validatorOptions = options;
       return new Promise(() => {});
