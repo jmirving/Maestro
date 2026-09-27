@@ -708,7 +708,7 @@
       ]
     },
     "31": {
-      "status": "ready",
+      "status": "complete",
       "github": {
         "state": "OPEN",
         "stateReason": null,
